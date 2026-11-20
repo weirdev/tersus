@@ -1,6 +1,6 @@
 module TestTraits (testTraits) where
 
-import MirEval (fromMirValue)
+import MirEval (fromMirValue, runProgram)
 import Compile (lowerSource)
 import ElaboratorTool (noVerdict)
 import Data.List (isInfixOf, isPrefixOf)
@@ -24,6 +24,7 @@ testTraits =
                 , "impl Clone for Counter { }; impl Copy for Counter { };"
                 ]
         runs body expected = parseEvalProgramHelper (types ++ body) (Just (VInt expected))
+        later = "c = Counter { value: 1 }; x = c.later(); impl Counter { fn later(self: Self) -> Int { return 1; }; }; return x;"
         valid body = parseValidProgramHelper (types ++ body)
         rejected body expected = parseValidateFailProgramHelper (types ++ body) expected
         parseFails source = case parseValidProgramHelper source of
@@ -158,8 +159,14 @@ testTraits =
                   testCase "the trait picks the function" (runs (conflict ++ "c = Counter { value: 0 }; return Name::label(c) * 100 + Code::label(c) * 10;") 120)
                 , testCase "a path names the impl in full" (runs (conflict ++ "c = Counter { value: 0 }; return <Counter as Name>::label(c) + <Counter as Code>::label(c) * 10 + <Counter>::label(c) * 100;") 321)
                 , testCase "a function with no Self argument is named in full" (runs (conflict ++ "return <Counter as Name>::make().value + <Counter as Code>::make().value;") 30)
-                , -- (a program is elaborated as a module is, whose impls are declared before its statements are checked)
-                  testCase "a function of the type written after its call is the type's" (runs "c = Counter { value: 1 }; x = c.later(); impl Counter { fn later(self: Self) -> Int { return 1; }; }; return x;" 1)
+                , -- (a module is elaborated with its impls declared before its statements are checked)
+                  TestCase "a function of the type written after its call is the type's" $ do
+                    program <- programFromFiles "app/main.tersus" [("app/package.tersus", ""), ("app/main.tersus", types ++ later)]
+                    pure $ case program `bindResult` runProgram of
+                        Error e -> Just e
+                        Ok value -> testAssertEq (fmap fromMirValue value) (Just (VInt 1))
+                , -- (a program's statements are checked in the order it has them)
+                  testCase "a function of the type written after its call in a program is not yet the type's" (rejected later "Counter::later is not defined before this call")
                 , testCase "a method call is ambiguous" (rejected (conflict ++ "c = Counter { value: 0 }; x = c.label();") "Counter::label is ambiguous")
                 , testCase "a call by the type is ambiguous, and the type's own function is a path too" (rejectedBoth (conflict ++ "x = Counter::label(Counter { value: 0 });") "Counter::label is ambiguous" "<Counter>::label(...)")
                 , testCase "the error lists the paths" (rejected (conflict ++ "x = Counter::make();") "<Counter as Name>::make(...) or <Counter as Code>::make(...)")

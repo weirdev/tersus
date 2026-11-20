@@ -6,7 +6,7 @@ import elaborate::records { listItems, nameText, nodeIn };
 import elaborate::check { indexOfByte };
 import elaborate::resolve { Maps, PFile, Pkg, TypeTarget, colonsAt, implParts, mapsFor, noMaps, startsWithByte };
 import elaborate::state { fnContractSuffix, indexIn, intText, joinWith };
-import elaborate::traits { implFunctionName };
+import elaborate::traits { implFunctionName, isFnTraitName };
 
 // bound: the variables in scope; params: the type parameters in scope
 
@@ -948,7 +948,8 @@ fn prepareModule(nodes: List<AstNode>, p: &Pkg, key: &String, roots: &List<Int>)
 fn prepareFile(rw: Rw, p: &Pkg, f: &PFile, index: Int, ids: &List<Int>) -> Rw ~ {
     if !f.entry {
         locals = HashSet::new();
-        for d in &p.decls { if d.file = index && indexOfByte(&d.local, 60) < 0 { locals = locals.insert(clone(d.local)); }; };
+        // (a minted Fn trait keeps its name, as resolve gives it: finishPackage)
+        for d in &p.decls { if d.file = index && indexOfByte(&d.local, 60) < 0 && !isFnTraitName(&d.local) { locals = locals.insert(clone(d.local)); }; };
         rw = Rw { cn: Canon { on: true, locals: locals, prefix: clone(f.prefix) }, ..rw };
         for s in ids { rw = canonStatement(rw, s); };
     };

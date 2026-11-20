@@ -37,7 +37,7 @@ testGenerics =
             , ("its type is the type of the struct", "struct Pair<T> { a: T, b: T };  fn first<U>(p: Pair<U>) -> U { return p.a; }; return first(Pair<Bool> { a: true, b: false });", Right (VBool True))
             , ("an update keeps the type", "struct Pair<T> { a: T, b: T };  a = Pair<Int> { a: 1, b: 2 }; b = Pair<Int> { b: 9, ..a }; return b.a + b.b;", Right (VInt 10))
             , ("a struct that holds another of its type", "struct Pair<T> { a: T, b: T };  struct Wrap<T> { inner: Pair<T>, tag: Int }; fn mk<T>(x: T, y: T) -> Wrap<T> { return Wrap<T> { inner: Pair<T> { a: x, b: y }, tag: 7 }; }; return mk(true, false).tag;", Right (VInt 7))
-            , ("in a list, an array and a Box", "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct Pair<T> { a: T, b: T }; impl<T> Clone for Pair<T> { }; l = push([], Pair<Int> { a: 1, b: 2 }); a = array(2, Pair<Bool> { a: true, b: true }); b = Box::new(Pair<Int> { a: 5, b: 6 }); return get(l, 0).b + b.a + size(a);", Right (VInt 9))
+            , ("in a list, an array and a Box", "struct Pair<T> { a: T, b: T }; impl<T> Clone for Pair<T> { }; l = push([], Pair<Int> { a: 1, b: 2 }); a = array(2, Pair<Bool> { a: true, b: true }); b = Box::new(Pair<Int> { a: 5, b: 6 }); return get(l, 0).b + b.a + size(a);", Right (VInt 9))
             ]
      in TestList
             "testGenerics"

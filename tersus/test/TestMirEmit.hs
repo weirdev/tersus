@@ -28,6 +28,7 @@ import TestHarness
 import TestMirReader (programExecutable)
 import TestNative (clangAvailable, nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
+import PreludeSource (stdName)
 
 -- The lowering to LLVM IR written in Tersus (lib/mir/emit/emit.tersus, step 31 of the roadmap and STEP31.md) is the compiler's emitter. It is given the MIR as data,
 -- and writes all of the IR with no argument, the declarations, the descriptors of the types and the entry point for `outline`, and the code of each function for
@@ -142,7 +143,7 @@ orderedTypeClosure = do
             | (declarations, roots, expected) <- cases
             ]
   where
-    text s = Eval.MData "String" [("bytes", Eval.MList [Eval.MInt (toInteger (fromEnum c)) | c <- s])]
+    text s = Eval.MData (stdName "string" "String") [("bytes", Eval.MList [Eval.MInt (toInteger (fromEnum c)) | c <- s])]
     named n = Eval.MData "data$codec$codec$Type::TNamed" [("name", text n), ("base", text n), ("argc", Eval.MInt 0), ("argTokens", Eval.MList [])]
     int = Eval.MData "data$codec$codec$Type::TInt" []
     byte = Eval.MData "data$codec$codec$Type::TByte" []
