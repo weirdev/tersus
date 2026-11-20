@@ -2,7 +2,7 @@ import data::codec::codec { Token, catStrings };
 import data::ast::ast { AstNode, AstProof, AstExpression, AstValue, AstValidation, AstRule, AstStatement };
 import data::reader::reader { nodeKind, nodeRefs, nameValue };
 import mir::full::full { FullProgram, FullFunction, FullRecord, FullBlock };
-import mir::full::tokens { appendTokens, integerAt, intsEnd, intToken, name, numberAt, operandEnd, namesEnd, sliceTokens, textAt, typeEnd, wordIs, word, quotedAt };
+import mir::full::tokens { appendTokens, argEnd, constantEnd, integerAt, intsEnd, intToken, name, numberAt, operandEnd, namesEnd, sizeEnd, sliceTokens, textAt, typeEnd, wordIs, word, quotedAt };
 import mir::full::records { nodeAt, statementAt, envStart, envEnd, envEntries, envTokens, replaceEnv, EnvEntry };
 import mir::link::merge { rowIndex, fnIndex };
 import mir::full::environments { replaceEnvBase };
@@ -225,8 +225,237 @@ fn keptFunctions(functions: &List<FullFunction>, kept: &HashSet<String>) -> List
     };
     return out;
 };
+// The provider the program's checked protocols give a role ("" for none: data written without them)
+fn storageRole(p: &FullProgram, role: &String) -> String ~ {
+    i = rowIndex(&p.protocols, role);
+    if i >= 0 && i < size(p.protocols) { return textAt(&get(p.protocols, i).tokens, 2); };
+    return "";
+};
+struct TypeText { text: String, end: Int };
+impl Clone for TypeText { };
+// A size as the rendered name of an instance writes it (Types.renderSizeForName)
+fn sizeText(ts: &List<Token>, p: Int) -> TypeText ~ {
+    end = sizeEnd(ts, p);
+    if wordIs(ts, p, "any") { return TypeText { text: "?", end: end }; };
+    if wordIs(ts, p, "v") { return TypeText { text: catStrings("_", textAt(ts, p + 1)), end: end }; };
+    return TypeText { text: textAt(ts, p + 1), end: end };
+};
+fn bareLower(n: &String) -> Bool ~ {
+    if size(n.bytes) = 0 { return false; };
+    c = toInt(get(n.bytes, 0));
+    if c < 97 || c > 122 { return false; };
+    for i in 1..size(n.bytes) {
+        b = toInt(get(n.bytes, i));
+        if !((b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)) { return false; };
+    };
+    return true;
+};
+// A type as the rendered name of an instance writes it (Types.renderTypeForName)
+fn typeText(ts: &List<Token>, p: Int) -> TypeText ~ {
+    end = typeEnd(ts, p); w = textAt(ts, p);
+    if w = "int" { return TypeText { text: "Int", end: end }; };
+    if w = "byte" { return TypeText { text: "Byte", end: end }; };
+    if w = "bool" { return TypeText { text: "Bool", end: end }; };
+    if w = "i8" || w = "i16" || w = "i32" { return TypeText { text: catStrings("I", w.slice(1, size(w.bytes))), end: end }; };
+    if w = "u16" || w = "u32" { return TypeText { text: catStrings("U", w.slice(1, size(w.bytes))), end: end }; };
+    if w = "variant" { return TypeText { text: textAt(ts, p + 1), end: end }; };
+    if w = "param" { return TypeText { text: catStrings("'", textAt(ts, p + 1)), end: end }; };
+    if w = "var" { return TypeText { text: catStrings("?", textAt(ts, p + 1)), end: end }; };
+    if w = "named" { return TypeText { text: instanceText(ts, p), end: end }; };
+    if w = "forall" { at = namesEnd(ts, p + 1); at = namesEnd(ts, at); inner = typeText(ts, at); return TypeText { text: inner.text, end: end }; };
+    if w = "fn" {
+        n = numberAt(ts, p + 1); at = p + 2; out = "fn(";
+        for i in 0..n { a = typeText(ts, at); if i > 0 { out = catStrings(out, ", "); }; out = catStrings(out, a.text); at = a.end; };
+        r = typeText(ts, at);
+        return TypeText { text: catStrings(catStrings(out, ") -> "), r.text), end: end };
+    };
+    inner = typeText(ts, p + 1);
+    if w = "array" { s = sizeText(ts, inner.end); return TypeText { text: catStrings(catStrings(catStrings(catStrings("Array<", inner.text), ", "), s.text), ">"), end: end }; };
+    if w = "addr" { return TypeText { text: catStrings(catStrings("Addr<", inner.text), ">"), end: end }; };
+    if w = "block" { return TypeText { text: catStrings(catStrings("Block<", inner.text), ">"), end: end }; };
+    if w = "uninit" { return TypeText { text: catStrings(catStrings("Uninit<", inner.text), ">"), end: end }; };
+    if w = "ref" { return TypeText { text: catStrings("&", inner.text), end: end }; };
+    if w = "mutref" { return TypeText { text: catStrings("&mut ", inner.text), end: end }; };
+    return TypeText { text: "", end: end };
+};
+// The rendered name of the instance a named type at p is (Types.instanceName), its base for one with no arguments
+fn instanceText(ts: &List<Token>, p: Int) -> String ~ {
+    base = textAt(ts, p + 1); n = numberAt(ts, p + 2);
+    if n <= 0 { if bareLower(&base) { return catStrings("`", base); }; return base; };
+    out = catStrings(base, "<"); at = p + 3;
+    for i in 0..n {
+        if i > 0 { out = catStrings(out, ", "); };
+        if wordIs(ts, at, "size") { s = sizeText(ts, at + 1); out = catStrings(out, s.text); at = s.end; } else { t = typeText(ts, at + 1); out = catStrings(out, t.text); at = t.end; };
+    };
+    return catStrings(out, ">");
+};
+// The rendered names of the instances a type at p is made of (Link.instancesIn)
+fn instancesIn(ts: &List<Token>, p: Int) -> List<String> ~ {
+    if wordIs(ts, p, "named") {
+        out = push([], instanceText(ts, p)); n = numberAt(ts, p + 2); at = p + 3;
+        for i in 0..n { if wordIs(ts, at, "type") { out = addTexts(out, instancesIn(ts, at + 1)); }; at = argEnd(ts, at); };
+        return out;
+    };
+    if wordIs(ts, p, "array") || wordIs(ts, p, "ref") || wordIs(ts, p, "mutref") { return instancesIn(ts, p + 1); };
+    return [];
+};
+// The type at p as it is natively (Types.listType): a Box of an array is a list of its elements, wherever it is
+fn listImage(ts: &List<Token>, p: Int, list: &String, box: &String) -> List<Token> ~ {
+    end = typeEnd(ts, p); w = textAt(ts, p);
+    if w = "named" {
+        n = numberAt(ts, p + 2);
+        if textAt(ts, p + 1) = *box && n = 1 && wordIs(ts, p + 3, "type") && wordIs(ts, p + 4, "array") {
+            element = listImage(ts, p + 5, list, box);
+            return appendTokens(push(push(push(push([], word("named")), name(clone(*list))), intToken(1)), word("type")), &element);
+        };
+        out = sliceTokens(ts, p, p + 3); at = p + 3;
+        for i in 0..n {
+            next = argEnd(ts, at);
+            if wordIs(ts, at, "type") { inner = listImage(ts, at + 1, list, box); out = appendTokens(push(out, word("type")), &inner); } else { kept = sliceTokens(ts, at, next); out = appendTokens(out, &kept); };
+            at = next;
+        };
+        return out;
+    };
+    if w = "array" { at = typeEnd(ts, p + 1); inner = listImage(ts, p + 1, list, box); sizeTokens = sliceTokens(ts, at, end); return appendTokens(appendTokens(push([], word("array")), &inner), &sizeTokens); };
+    if w = "addr" || w = "uninit" || w = "ref" || w = "mutref" { inner = listImage(ts, p + 1, list, box); return appendTokens(push([], word(w)), &inner); };
+    if w = "fn" {
+        n = numberAt(ts, p + 1); out = sliceTokens(ts, p, p + 2); at = p + 2;
+        for i in 0..n { a = listImage(ts, at, list, box); out = appendTokens(out, &a); at = typeEnd(ts, at); };
+        r = listImage(ts, at, list, box);
+        return appendTokens(out, &r);
+    };
+    return sliceTokens(ts, p, end);
+};
+// The names the native images of a type's named parts keep (Link.reachable's typesFromStorage)
+fn storageImages(p: &FullProgram, ts: &List<Token>, pos: Int) -> List<String> ~ {
+    box = storageRole(p, "Box"); list = storageRole(p, "List"); out = [];
+    if size(box.bytes) = 0 { return out; };
+    end = typeEnd(ts, pos); i = pos;
+    while i >= 0 && i < end [{ affirm i >= 0; }] ~ {
+        if wordIs(ts, i, "named") && quotedAt(ts, i + 1) {
+            image = listImage(ts, i, &list, &box);
+            if image != sliceTokens(ts, i, typeEnd(ts, i)) { out = addTexts(addTexts(out, typeNames(&image, 0)), instancesIn(&image, 0)); };
+        };
+        i = i + 1;
+    };
+    return out;
+};
+// The positions of the field types of a struct or enum record
+fn fieldTypeStarts(ts: &List<Token>) -> List<Int> ~ {
+    out = [];
+    if wordIs(ts, 0, "struct") { n = numberAt(ts, 2); at = 3; for i in 0..n { out = push(out, at + 1); at = typeEnd(ts, at + 1); if at < 0 { return out; }; }; return out; };
+    if wordIs(ts, 0, "enum") {
+        n = numberAt(ts, 2); at = 3;
+        for i in 0..n { k = numberAt(ts, at + 1); at = at + 2; for j in 0..k { out = push(out, at + 1); at = typeEnd(ts, at + 1); if at < 0 { return out; }; }; };
+    };
+    return out;
+};
+fn declarationImages(p: &FullProgram, r: &FullRecord) -> List<String> ~ {
+    out = []; for at in fieldTypeStarts(&r.tokens) { out = addTexts(out, storageImages(p, &r.tokens, at)); }; return out;
+};
+fn localTypeStart(row: &List<Token>) -> Int ~ { if wordIs(row, 2, "some") { return 4; }; return 3; };
+fn functionImages(p: &FullProgram, f: &FullFunction) -> List<String> ~ {
+    out = [];
+    for r in &f.locals { out = addTexts(out, storageImages(p, &r.tokens, localTypeStart(&r.tokens))); };
+    end = intsEnd(&f.header, 3); if wordIs(&f.header, end + 1, "some") { out = addTexts(out, storageImages(p, &f.header, end + 2)); };
+    return out;
+};
+// Whether a type has no type parameter, unknown or unsized parameter (MirCopies.groundType)
+fn groundTokens(ts: &List<Token>) -> Bool ~ {
+    for i in 0..size(ts) { if !quotedAt(ts, i) && (wordIs(ts, i, "param") || wordIs(ts, i, "var") || wordIs(ts, i, "forall") || wordIs(ts, i, "p") || wordIs(ts, i, "v")) { return false; }; };
+    return true;
+};
+// The type of a constant (Mir.constantType), none for one that has none
+fn constantTypeTokens(ts: &List<Token>, p: Int, list: &String) -> List<Token> ~ {
+    if wordIs(ts, p, "int") { return push([], word("int")); };
+    if wordIs(ts, p, "bool") { return push([], word("bool")); };
+    if wordIs(ts, p, "data") {
+        n = textAt(ts, p + 1);
+        for i in 0..size(n.bytes) { if i + 1 < size(n.bytes) && get(n.bytes, i) = toByte(58) && get(n.bytes, i + 1) = toByte(58) { return push(push([], word("variant")), name(n)); }; };
+        return push(push(push([], word("named")), name(n)), intToken(0));
+    };
+    if wordIs(ts, p, "list") {
+        element = push([], word("int")); n = numberAt(ts, p + 1); at = p + 2; found = false;
+        for i in 0..n { if !found { t = constantTypeTokens(ts, at, list); if size(t) > 0 { element = t; found = true; }; }; at = constantEnd(ts, at); };
+        return appendTokens(push(push(push(push([], word("named")), name(clone(*list))), intToken(1)), word("type")), &element);
+    };
+    return [];
+};
+// The names a constant's type keeps (Link.typeRefsOfFunction's instanceNames)
+fn instanceNames(ts: &List<Token>, p: Int) -> List<String> ~ {
+    if !wordIs(ts, p, "named") { return []; };
+    out = push(push([], textAt(ts, p + 1)), instanceText(ts, p)); n = numberAt(ts, p + 2); at = p + 3;
+    for i in 0..n { if wordIs(ts, at, "type") { out = addTexts(out, instanceNames(ts, at + 1)); }; at = argEnd(ts, at); };
+    return out;
+};
+// The names a constant at p keeps, of the type the place it is put in says (expected, empty for none) or its own
+fn constantNames(ts: &List<Token>, p: Int, expected: &List<Token>, list: &String) -> List<String> ~ {
+    if wordIs(ts, p, "list") && size(*expected) > 3 && wordIs(expected, 0, "named") && textAt(expected, 1) = *list && groundTokens(expected) { return instanceNames(expected, 0); };
+    own = constantTypeTokens(ts, p, list);
+    return instanceNames(&own, 0);
+};
+fn localTypeOf(f: &FullFunction, local: Int) -> List<Token> ~ {
+    i = rowIndex(&f.locals, String::fromInt(local));
+    if i < 0 || i >= size(f.locals) { return []; };
+    row = clone(get(&f.locals, i).tokens); at = localTypeStart(&row);
+    return sliceTokens(&row, at, typeEnd(&row, at));
+};
+// The starts of the operands of an rvalue at p
+fn rvalueOperands(ts: &List<Token>, p: Int) -> List<Int> ~ {
+    w = textAt(ts, p);
+    if w = "use" || w = "makebox" || w = "unbox" || w = "unsize" || w = "clone" || w = "deref" || w = "readfield" || w = "isvariant" || w = "asvariant" { return push([], p + 1); };
+    out = []; at = 0; n = 0;
+    if w = "binary" { at = p + 2; n = 2; };
+    if w = "listop" { at = p + 3; n = numberAt(ts, p + 2); };
+    if w = "makelist" { at = p + 2; n = numberAt(ts, p + 1); };
+    if w = "makedata" { at = p + 3; n = numberAt(ts, p + 2); for i in 0..n { out = push(out, at + 1); at = operandEnd(ts, at + 1); }; return out; };
+    for i in 0..n { out = push(out, at); at = operandEnd(ts, at); };
+    return out;
+};
+fn constOperandNames(ts: &List<Token>, operand: Int, expected: &List<Token>, list: &String) -> List<String> ~ {
+    if !wordIs(ts, operand, "const") { return []; };
+    return constantNames(ts, operand + 1, expected, list);
+};
+// The names the list constants of a function keep (Link.typeRefsOfFunction's constantTypeNames): a list constant is a struct
+// of the storage List once MirLists makes it, of the type the place it is put in says or, where nothing says it, its elements do
+fn constantRoots(p: &FullProgram, f: &FullFunction) -> List<String> ~ {
+    list = storageRole(p, "List"); out = []; none = [];
+    if size(list.bytes) = 0 { return out; };
+    for b in &f.blocks { for row in &b.lines {
+        if wordIs(row, 0, "assign") || wordIs(row, 0, "peek") {
+            dest = localTypeOf(f, integerAt(row, 1).value); operands = rvalueOperands(row, 2);
+            if wordIs(row, 2, "use") { out = addTexts(out, constOperandNames(row, 3, &dest, &list)); } else {
+                if wordIs(row, 2, "listop") && size(operands) > 0 && (wordIs(row, 3, "push") || wordIs(row, 3, "set") || wordIs(row, 3, "pop") || wordIs(row, 3, "uninitNew") || wordIs(row, 3, "first") || wordIs(row, 3, "last") || wordIs(row, 3, "get")) {
+                    expected = clone(dest);
+                    if (wordIs(row, 3, "first") || wordIs(row, 3, "last") || wordIs(row, 3, "get")) && size(dest) > 0 { expected = appendTokens(push(push(push(push([], word("named")), name(clone(list))), intToken(1)), word("type")), &dest); };
+                    out = addTexts(out, constOperandNames(row, get(&operands, 0), &expected, &list));
+                    for i in 1..size(operands) { out = addTexts(out, constOperandNames(row, get(&operands, i), &none, &list)); };
+                } else {
+                    element = [];
+                    if wordIs(row, 2, "makelist") && size(dest) > 4 && wordIs(&dest, 0, "named") && textAt(&dest, 1) = list && numberAt(&dest, 2) = 1 && wordIs(&dest, 3, "type") { element = sliceTokens(&dest, 4, size(dest)); };
+                    for o in &operands { out = addTexts(out, constOperandNames(row, o, &element, &list)); };
+                };
+            };
+        };
+        if wordIs(row, 0, "switch") { out = addTexts(out, constOperandNames(row, 1, &none, &list)); };
+        if wordIs(row, 0, "call") {
+            calleeEnd = operandEnd(row, 1); n = numberAt(row, calleeEnd); at = calleeEnd + 1;
+            ci = 0 - 1; if wordIs(row, 1, "const") && wordIs(row, 2, "fn") { ci = fnIndex(&p.functions, textAt(row, 3)); };
+            for i in 0..n {
+                expected = [];
+                if ci >= 0 && ci < size(p.functions) {
+                    callee = clone(get(&p.functions, ci)); params = intsEnd(&callee.header, 3);
+                    if 4 + i < params { pi = integerAt(&callee.header, 4 + i); if pi.ok { expected = localTypeOf(&callee, pi.value); }; };
+                };
+                out = addTexts(out, constOperandNames(row, at, &expected, &list)); at = operandEnd(row, at);
+            };
+        };
+    }; };
+    return out;
+};
 fn pruneProgram(p: FullProgram) -> FullProgram ~ {
     fns = addNames(HashSet::new(), functionRefs(&p, &p.entry)); types = addNames(HashSet::new(), functionTypes(&p, &p.entry)); changed = true;
+    types = addNames(addNames(types, functionImages(&p, &p.entry)), constantRoots(&p, &p.entry));
     processedFns = HashSet::new(); processedTypes = HashSet::new();
     while changed ~ {
         oldFns = fns.size(); oldTypes = types.size();
@@ -234,7 +463,10 @@ fn pruneProgram(p: FullProgram) -> FullProgram ~ {
             if !HashSet::contains(&processedFns, n) {
                 processedFns = processedFns.insert(clone(n));
                 i = fnIndex(&p.functions, n);
-                if i >= 0 && i < size(p.functions) { fns = addNames(fns, functionRefs(&p, &get(p.functions, i))); types = addNames(types, functionTypes(&p, &get(p.functions, i))); };
+                if i >= 0 && i < size(p.functions) {
+                    fun = clone(get(&p.functions, i));
+                    fns = addNames(fns, functionRefs(&p, &fun)); types = addNames(addNames(addNames(types, functionTypes(&p, &fun)), functionImages(&p, &fun)), constantRoots(&p, &fun));
+                };
             };
         };
         for n in types.elements() {
@@ -242,7 +474,7 @@ fn pruneProgram(p: FullProgram) -> FullProgram ~ {
                 processedTypes = processedTypes.insert(clone(n));
                 fns = addNames(fns, implRefs(&p, n)); fns = addNames(fns, factRefs(&p, n)); i = rowIndex(&p.invariants, n);
                 if i >= 0 && i < size(p.invariants) { refs = payloadRefs(&p.arena, integerAt(&get(p.invariants, i).tokens, 2).value, false); for f in &refs { if fnIndex(&p.functions, f) >= 0 { fns = fns.insert(clone(f)); }; }; };
-                i = rowIndex(&p.types, n); if i >= 0 && i < size(p.types) { types = addNames(types, declarationTypes(&get(p.types, i))); };
+                i = rowIndex(&p.types, n); if i >= 0 && i < size(p.types) { decl = clone(get(&p.types, i)); types = addNames(addNames(types, declarationTypes(&decl)), declarationImages(&p, &decl)); };
             };
         };
         changed = oldFns != fns.size() || oldTypes != types.size();
