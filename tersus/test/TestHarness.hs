@@ -744,15 +744,17 @@ cacheBuildScope = do
         override <- lookupEnv variable
         selected <- case override of
             Just file -> pure (Just file)
-            Nothing -> firstExisting (if variable == "TERSUS_PARSER_SEED_FILE"
-                then ["bootstrap/parser.ll", "tersus/bootstrap/parser.ll"]
-                else ["bootstrap/emitter.ll", "tersus/bootstrap/emitter.ll"])
+            Nothing -> firstExisting [directory ++ seedName variable ++ ".ll" | directory <- ["bootstrap/", "tersus/bootstrap/"]]
         case selected of
             Nothing -> pure (Just (variable, Nothing))
             Just file -> do
                 absolute <- makeAbsolute file
                 digest <- verifiedSeedIdentity absolute expected
                 pure ((\value -> (variable, Just (absolute, value))) <$> digest)
+    seedName variable = case variable of
+        "TERSUS_PARSER_SEED_FILE" -> "parser"
+        "TERSUS_FRONTEND_SEED_FILE" -> "frontend"
+        _ -> "emitter"
     firstExisting [] = pure Nothing
     firstExisting (file : rest) = do
         exists <- doesFileExist file
