@@ -119,12 +119,12 @@ impl Clone for Pend { };
 // The lowering's state with the fields of the function being built, threaded by value. ok is false after the first
 // failure, msg says why. ty, op, pend, root and steps are what the last function that makes one gave.
 struct LowSt {
-    ok: Bool, msg: String, listName: String, boxName: String, copyName: String,
+    ok: Bool, msg: String, listName: String, boxName: String, copyName: String, unitKey: String,
     tys: List<LTy>, tyIndex: HashMap<String, Int>, defaulted: HashMap<Int, Int>,
     elab: List<Int>, nextElab: Int,
     stmts: List<Stmt>,
     types: HashMap<String, TDecl>, functions: HashMap<String, LFn>, fnKeys: HashSet<String>, names: HashSet<String>,
-    globals: HashMap<String, String>, globalsVersion: Int, assigned: HashSet<String>, topAssigned: HashSet<String>,
+    globals: HashMap<String, String>, globalsVersion: Int, assigned: HashSet<Int>, fnBindings: HashMap<Int, Int>,
     generics: HashMap<String, GenericRec>, invariants: HashMap<String, Int>,
     bounded: HashMap<String, BoundedRec>, instances: HashMap<String, String>, packLoops: HashMap<String, List<PackLoopRec>>,
     copies: HashSet<String>, linears: HashSet<String>, externs: HashSet<String>, drops: HashSet<String>,
@@ -185,11 +185,11 @@ fn newBuilder(name: String, isMain: Bool, hasReturns: Bool, returns: Int) -> Bui
     };
 };
 
-fn newLowSt(pbase: Int) -> LowSt ~ {
+fn newLowSt(pbase: Int, unitKey: String) -> LowSt ~ {
     return LowSt {
-        ok: true, msg: "", listName: "List", boxName: "Box", copyName: "Copy", tys: [], tyIndex: HashMap::new(), defaulted: HashMap::new(), elab: [], nextElab: 0,
+        ok: true, msg: "", listName: "List", boxName: "Box", copyName: "Copy", unitKey: unitKey, tys: [], tyIndex: HashMap::new(), defaulted: HashMap::new(), elab: [], nextElab: 0,
         stmts: [], types: HashMap::new(), functions: HashMap::new(), fnKeys: HashSet::new(), names: HashSet::new().insert("main"),
-        globals: HashMap::new(), globalsVersion: 0, assigned: HashSet::new(), topAssigned: HashSet::new(), generics: HashMap::new(), invariants: HashMap::new(), bounded: HashMap::new(), instances: HashMap::new(), packLoops: HashMap::new(),
+        globals: HashMap::new(), globalsVersion: 0, assigned: HashSet::new(), fnBindings: HashMap::new(), generics: HashMap::new(), invariants: HashMap::new(), bounded: HashMap::new(), instances: HashMap::new(), packLoops: HashMap::new(),
         copies: HashSet::new(), linears: HashSet::new(), externs: HashSet::new(), drops: HashSet::new(),
         prereg: HashMap::new(), stubs: HashSet::new(), pn: [], pbase: pbase,
         envs: [], contents: [], contentKeys: HashMap::new(), contentTexts: HashMap::new(),

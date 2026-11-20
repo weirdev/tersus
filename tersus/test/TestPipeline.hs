@@ -13,7 +13,7 @@ module TestPipeline
     ) where
 
 import Control.Exception (IOException, bracket, evaluate, finally, try)
-import Data.List (isInfixOf, nub, sort, subsequences)
+import Data.List (isInfixOf, isPrefixOf, nub, sort, subsequences)
 import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
 import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, findExecutable, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.Environment (getExecutablePath, lookupEnv)
@@ -553,7 +553,7 @@ testMirStructure =
         , -- A builtin used as a value is a function of the program
           case lowerStatements [Assign "f" (Val (builtinFunct Plus)), Assign "r" (F (Var "f") [Val (VInt 1), Val (VInt 2)]), Return (Var "r")] of
             Error e -> Just e
-            Ok p -> testAssertEq (Map.keys (M.progFunctions p), mapResult (fmap renderMirValue) (runProgram p)) (["builtin::add"], Ok (Just "3"))
+            Ok p -> testAssertEq (map ("builtin::add#" `isPrefixOf`) (Map.keys (M.progFunctions p)), mapResult (fmap renderMirValue) (runProgram p)) ([True], Ok (Just "3"))
         , -- A call ends the block it is in
           withMir "fn f(n: Int) -> Int { return n; }; a = f(1); b = f(a); return b;" $ \p ->
             testAssertEq (length [() | (_, M.BasicBlock _ M.Call{}) <- blocksOf (mainFunction p)]) 2

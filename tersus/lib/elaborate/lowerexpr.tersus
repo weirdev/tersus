@@ -1,4 +1,5 @@
 import data::ast::ast { AstExpression, AstNode, AstStatement, AstValue };
+import elaborate::out { hexText };
 import elaborate::records { listItems, nameText, nodeIn };
 import elaborate::state { intText };
 import elaborate::lowerstate { lwMalformed, Swapped, swapBuilder, Builder, LowSt, Op, Pend, RefTarget, Rv, Step, Term, argOf, boxInner, claim, fnType, forNameOf, hasInt, hasText, intAt, isRefTy, isTupleBase, lfail, lwBaseName, lwCat, lwCat3, lwHasByte, lwInstanceText, lwKind, lwTextAt, newBuilder, noOp, noRv, quote, lwSp, tupleParts, tyOf, typeNameOf, unrefTy, wrapType, isMutRefTy };
@@ -140,7 +141,9 @@ fn builtinFunction(ls: LowSt, src: &List<AstNode>, b: Int, ft: Int) -> LowSt ~ {
     x = tyOf(&ls, ft);
     n = size(x.args) - 1;
     rty = intAt(&x.args, n);
-    ls = uniqueName(ls, lwCat("builtin::", builtinLabel(&bi)));
+    signature = hexText(&x.text);
+    nameBase = lwCat3(lwCat("builtin::", builtinLabel(&bi)), "#", &ls.unitKey);
+    ls = uniqueName(ls, lwCat3(nameBase, "#", &signature));
     name = clone(ls.name);
     Swapped { ls: inner, b: outer } = swapBuilder(ls, newBuilder(clone(name), false, true, rty));
     ls = inner;

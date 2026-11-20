@@ -13,6 +13,8 @@ import elaborate::lowerplace { lowerDerefPlace };
 // assignment means are resolved to numbered locals. Every local and temporary has the type the elaborator gave its
 // expression, taken in the order the lowering visits them (claim).
 
+struct AssignmentScan { writes: HashSet<Int>, definitions: HashMap<Int, Int>, functions: Bool };
+
 // (after a return nothing runs: the expression types of what follows are taken and dropped)
 fn lowerStatements(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
     i = 0;
@@ -395,12 +397,18 @@ fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: 
 // (a local the body or the condition of a loop assigns, a statement's or an expression's, may hold something else at
 // the loop's head and after it)
 fn forgetAssigned(ls: LowSt, src: &List<AstNode>, cond: Int, body: &List<Int>) -> LowSt ~ {
-    start = [];
-    if cond >= 0 { start = expressionNamesAssigned(src, cond, true, []); };
-    for name in statementNamesAssigned(src, body, true, start) {
-        found = lookupBinding(&ls, &name);
-        if found.found && found.b.isLocal { ls = forgetRefTarget(ls, found.b.local); };
+    bindings = HashMap::new();
+    i = 0;
+    while i < size(ls.bScopeNames) && i < size(ls.bScopeBinds) [{ affirm i >= 0; }] shrinks size(ls.bScopeNames) - i {
+        b = get(ls.bScopeBinds, i);
+        name = get(ls.bScopeNames, i);
+        if b.isLocal { bindings = bindings.insert(clone(name), b.local); } else { bindings = bindings.remove(name); };
+        i = i + 1;
     };
+    scan = AssignmentScan { writes: HashSet::new(), definitions: HashMap::new(), functions: false };
+    scan = scanExpression(src, cond, &bindings, scan);
+    scan = scanStatements(src, body, 0 - 1, bindings, scan);
+    for local in scan.writes.elements() { ls = forgetRefTarget(ls, local); };
     return ls;
 };
 
@@ -578,7 +586,7 @@ fn defineFunction(ls: LowSt, src: &List<AstNode>, var: String, v: Int) -> LowSt 
         name = clone(ls.name);
     };
     // (a function with sizes is called by name: it has no value to put in a local)
-    assigned = HashSet::contains(&ls.assigned, &var) && size(sig.sizes) = 0;
+    assigned = functionAssigned(&ls, v) && size(sig.sizes) = 0;
     if atTop {
         ls = setGlobal(ls, clone(var), clone(name));
         ls = setGlobalTy(ls, clone(var), fnType0);
@@ -587,9 +595,8 @@ fn defineFunction(ls: LowSt, src: &List<AstNode>, var: String, v: Int) -> LowSt 
     if atTop { top = "true"; };
     ls = ghostHere(ls, 3, 0 - 1, lwSp(lwSp(quote(&name), quote(&var)), top));
     if assigned {
-        ls = newLocal(ls, true, clone(var), fnType0);
+        ls = assignTarget(ls, clone(var), fnType0);
         l = ls.root;
-        ls = bindName(ls, clone(var), localBinding(l, fnType0));
         ls = materializeFunction(ls, &name, fnType0);
         rv = useRv(clone(ls.op));
         ls = emitAssign(ls, l, &rv);
@@ -749,81 +756,93 @@ fn sortLoops(loops: List<LoopRec>) -> List<LoopRec> ~ {
     return sortBy(&loops, fn(a: LoopRec, b: LoopRec) => a.header < b.header);
 };
 
-// The variables that statements assign (or bind with let), other than the names of the functions they define
-fn assignedNames(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
-    assigned = ls.assigned;
-    for name in statementNamesAssigned(src, stmts, true, []) { assigned = assigned.insert(clone(name)); };
-    ls = LowSt { assigned: assigned, ..ls };
-    // (a local of a function's body is not the top's variable: it does not stop a call before the definition finding the
-    // function at the top)
-    top = ls.topAssigned;
-    for name in statementNamesAssigned(src, stmts, false, []) { top = top.insert(clone(name)); };
-    return LowSt { topAssigned: top, ..ls };
+fn scanWrite(scan: AssignmentScan, bindings: &HashMap<String, Int>, name: &String) -> AssignmentScan ~ {
+    id = HashMap::lookup(bindings, name, 0 - 1);
+    if id < 0 { return scan; };
+    return AssignmentScan { writes: scan.writes.insert(id), ..scan };
 };
 
-// The variables statements assign or bind, also in their expressions' blocks, other than the names of the functions
-// they define (and, with bodies, also in those functions' bodies)
-fn statementNamesAssigned(src: &List<AstNode>, stmts: &List<Int>, bodies: Bool, out: List<String>) -> List<String> ~ {
+fn scanStatements(src: &List<AstNode>, stmts: &List<Int>, tail: Int, bindings: HashMap<String, Int>, scan: AssignmentScan) -> AssignmentScan ~ {
     for s in stmts {
         stmt = stmtAt(src, s);
-        f = definedFunction(src, clone(stmt));
-        if f >= 0 {
-            if bodies { out = statementNamesAssigned(src, bodyOf(src, f), bodies, out); };
-        } else {
-            if stmt is AstStatement::Assign {
-                a = stmt as AstStatement::Assign;
-                out = expressionNamesAssigned(src, a.e, bodies, push(out, nameText(src, a.n)));
-            };
-            if stmt is AstStatement::Let {
-                l = stmt as AstStatement::Let;
-                out = expressionNamesAssigned(src, l.e, bodies, push(out, nameText(src, l.n)));
-            };
-            if stmt is AstStatement::AssignDeref {
-                d = stmt as AstStatement::AssignDeref;
-                out = expressionNamesAssigned(src, d.b, bodies, expressionNamesAssigned(src, d.a, bodies, out));
-            };
-            if stmt is AstStatement::Return { out = expressionNamesAssigned(src, (stmt as AstStatement::Return).e, bodies, out); };
-            if stmt is AstStatement::Block { out = statementNamesAssigned(src, listItems(src, (stmt as AstStatement::Block).xs), bodies, out); };
-            if stmt is AstStatement::If {
-                x = stmt as AstStatement::If;
-                out = expressionNamesAssigned(src, x.e, bodies, out);
-                out = statementNamesAssigned(src, listItems(src, x.a), bodies, out);
-                out = statementNamesAssigned(src, listItems(src, x.b), bodies, out);
-            };
-            if stmt is AstStatement::While {
-                w = stmt as AstStatement::While;
-                out = expressionNamesAssigned(src, w.e, bodies, out);
-                out = statementNamesAssigned(src, listItems(src, w.xs), bodies, out);
-            };
-            if stmt is AstStatement::PackLoop {
-                pl = stmt as AstStatement::PackLoop;
-                out = push(push(out, nameText(src, pl.i)), nameText(src, pl.a));
-                out = statementNamesAssigned(src, listItems(src, pl.xs), bodies, out);
+        if stmt is AstStatement::BoundedDef { stmt = stmtAt(src, (stmt as AstStatement::BoundedDef).s); };
+        if stmt is AstStatement::Assign {
+            a = stmt as AstStatement::Assign;
+            var = nameText(src, a.n);
+            f = definedFunction(src, clone(stmt));
+            if f >= 0 {
+                if scan.functions {
+                    id = HashMap::lookup(&bindings, &var, f);
+                    bindings = bindings.insert(var, id);
+                    scan = AssignmentScan { definitions: scan.definitions.insert(f, id), ..scan };
+                    scan = scanStatements(src, bodyOf(src, f), 0 - 1, HashMap::new(), scan);
+                };
+            } else {
+                scan = scanExpression(src, a.e, &bindings, scan);
+                if scan.functions && !HashMap::contains(&bindings, &var) { bindings = bindings.insert(clone(var), s); };
+                scan = scanWrite(scan, &bindings, &var);
             };
         };
+        if stmt is AstStatement::Let {
+            l = stmt as AstStatement::Let;
+            scan = scanExpression(src, l.e, &bindings, scan);
+            bindings = bindings.remove(nameText(src, l.n));
+        };
+        if stmt is AstStatement::AssignDeref {
+            d = stmt as AstStatement::AssignDeref;
+            scan = scanExpression(src, d.b, &bindings, scanExpression(src, d.a, &bindings, scan));
+        };
+        if stmt is AstStatement::Return { scan = scanExpression(src, (stmt as AstStatement::Return).e, &bindings, scan); };
+        if stmt is AstStatement::Block { scan = scanStatements(src, listItems(src, (stmt as AstStatement::Block).xs), 0 - 1, clone(bindings), scan); };
+        if stmt is AstStatement::If {
+            x = stmt as AstStatement::If;
+            scan = scanExpression(src, x.e, &bindings, scan);
+            scan = scanStatements(src, listItems(src, x.a), 0 - 1, clone(bindings), scan);
+            scan = scanStatements(src, listItems(src, x.b), 0 - 1, clone(bindings), scan);
+        };
+        if stmt is AstStatement::While {
+            w = stmt as AstStatement::While;
+            scan = scanExpression(src, w.e, &bindings, scan);
+            scan = scanStatements(src, listItems(src, w.xs), 0 - 1, clone(bindings), scan);
+        };
+        if stmt is AstStatement::PackLoop {
+            pl = stmt as AstStatement::PackLoop;
+            scan = scanExpression(src, pl.lo, &bindings, scan);
+            scan = scanExpression(src, pl.hi, &bindings, scan);
+            scan = scanWrite(scan, &bindings, nameText(src, pl.i));
+            scope = clone(bindings).remove(nameText(src, pl.a));
+            scan = scanStatements(src, listItems(src, pl.xs), 0 - 1, scope, scan);
+        };
     };
-    return out;
+    return scanExpression(src, tail, &bindings, scan);
 };
 
-fn expressionNamesAssigned(src: &List<AstNode>, e: Int, bodies: Bool, out: List<String>) -> List<String> ~ {
-    if !(nodeIn(src, e) is AstNode::Expression) { return out; };
+fn scanExpression(src: &List<AstNode>, e: Int, bindings: &HashMap<String, Int>, scan: AssignmentScan) -> AssignmentScan ~ {
+    if !(nodeIn(src, e) is AstNode::Expression) { return scan; };
     x = exprAt(src, e);
     if x is AstExpression::F {
         call = x as AstExpression::F;
-        out = expressionNamesAssigned(src, call.f, bodies, out);
-        for a in listItems(src, call.xs) { out = expressionNamesAssigned(src, a, bodies, out); };
-        return out;
+        scan = scanExpression(src, call.f, bindings, scan);
+        for a in listItems(src, call.xs) { scan = scanExpression(src, a, bindings, scan); };
+        return scan;
     };
     if x is AstExpression::IfExpr {
         branch = x as AstExpression::IfExpr;
-        return expressionNamesAssigned(src, branch.b, bodies, expressionNamesAssigned(src, branch.a, bodies, expressionNamesAssigned(src, branch.c, bodies, out)));
+        scan = scanExpression(src, branch.c, bindings, scan);
+        scan = scanExpression(src, branch.a, bindings, scan);
+        return scanExpression(src, branch.b, bindings, scan);
     };
     if x is AstExpression::BlockExpr {
         block = x as AstExpression::BlockExpr;
-        return expressionNamesAssigned(src, block.e, bodies, statementNamesAssigned(src, listItems(src, block.xs), bodies, out));
+        return scanStatements(src, listItems(src, block.xs), block.e, clone(bindings), scan);
     };
-    if x is AstExpression::Ascribed { return expressionNamesAssigned(src, (x as AstExpression::Ascribed).e, bodies, out); };
-    return out;
+    if x is AstExpression::Ascribed { return scanExpression(src, (x as AstExpression::Ascribed).e, bindings, scan); };
+    return scan;
+};
+
+fn functionAssigned(ls: &LowSt, v: Int) -> Bool ~ {
+    id = HashMap::lookup(&ls.fnBindings, &v, v);
+    return HashSet::contains(&ls.assigned, &id);
 };
 
 // The parameter types of a function a statement defines (ls.tyList)
@@ -856,7 +875,7 @@ fn registerOne(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
     var = nameText(src, (stmt as AstStatement::Assign).n);
     parts = fnParts(src, f);
     sizes = namesOf(src, signatureOf(src, parts.sig).ss);
-    assigned = HashSet::contains(&ls.topAssigned, &var) && size(sizes) = 0;
+    assigned = functionAssigned(&ls, f) && size(sizes) = 0;
     base = clone(var);
     if HashSet::contains(&ls.externs, &var) { base = lwCat("extern ", &var); };
     ls = uniqueName(ls, base);
@@ -998,7 +1017,9 @@ fn lowerProgramStatement(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
 };
 
 fn lowerProgram(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
-    ls = assignedNames(ls, src, stmts);
+    scan = AssignmentScan { writes: HashSet::new(), definitions: HashMap::new(), functions: true };
+    scan = scanStatements(src, stmts, 0 - 1, HashMap::new(), scan);
+    ls = LowSt { assigned: scan.writes, fnBindings: scan.definitions, ..ls };
     ls = LowSt { bLent: lentNames(src, stmts), ..ls };
     ls = registerTopLevel(ls, src, stmts);
     for s in stmts { if ls.ok { ls = lowerProgramStatement(ls, src, s); }; };

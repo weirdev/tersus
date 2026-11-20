@@ -174,6 +174,15 @@ fn quotedName(name: &String) -> String ~ {
     return String { bytes: push(out, toByte(34)) };
 };
 
+fn hexText(text: &String) -> String ~ {
+    bytes = [];
+    for b in &text.bytes {
+        c = toInt(b);
+        bytes = push(push(bytes, hexByte(c / 16)), hexByte(c % 16));
+    };
+    return String { bytes: bytes };
+};
+
 fn hexByte(d: Int) -> Byte ~ {
     if d >= 0 && d < 10 { return toByte(48 + d); };
     if d >= 10 && d < 16 { return toByte(55 + d); };
