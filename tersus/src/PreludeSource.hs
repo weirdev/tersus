@@ -14,6 +14,7 @@ module PreludeSource
     , libModules
     , nativeStorageModules
     , nativeHelperName
+    , stdName
     , libModuleOf
     , libPackageFiles
     , stdPackageSource
@@ -70,7 +71,14 @@ nativeStorageModules = ["lists", "box"]
 -- The canonical name of a function of the native storage helpers that native list and Box operations call (`boxNew` and
 -- `boxUnbox` are of box, the others of lists), as the std package names a declaration of a module's one file
 nativeHelperName :: String -> String
-nativeHelperName local = let modu = if take 3 local == "box" then "box" else "lists" in "std$" ++ modu ++ "$" ++ modu ++ "$" ++ local
+nativeHelperName local = stdName (if take 3 local == "box" then "box" else "lists") local
+
+-- The canonical name of a declaration of a std library (`stdName "map" "HashMap"`, `stdName "core/types" "List"`), as the std
+-- package names a declaration of a module's file
+stdName :: String -> String -> String
+stdName lib local = case break (== '/') lib of
+    (modu, '/' : file) -> "std$" ++ modu ++ "$" ++ file ++ "$" ++ local
+    _ -> "std$" ++ lib ++ "$" ++ lib ++ "$" ++ local
 
 libPackageFiles :: [(FilePath, String)]
 libPackageFiles = ("std/package.tersus", stdPackageSource) : [("std/" ++ libFilePath name ++ ".tersus", text) | (name, _, text) <- libModules]

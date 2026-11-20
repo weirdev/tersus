@@ -18,7 +18,7 @@ testStrings =
         given args body expected = testAssertEq (mapResult fst (runSourceIn noWorld{worldArgs = map encodeUtf8 args} Interpret body)) (Ok expected)
         reads input body expected = testAssertEq (runSourceWith input Interpret body) (Ok expected)
         parseError body = testAssertErrorContains "Parse error" (runSource Check body)
-        bytes xs = "String { bytes: [" ++ intercalate ", " (map show (xs :: [Int])) ++ "] }"
+        bytes xs = "std$string$string$String { bytes: [" ++ intercalate ", " (map show (xs :: [Int])) ++ "] }"
         true = "true"
         false = "false"
         fromIntCases =
@@ -99,17 +99,17 @@ testStrings =
                 , testCase "the bytes of a literal are known" (valid "s = \"hi!\"; affirm toInt(get(s, 0)) = 104; affirm toInt(get(s, 2)) = 33; return 0;")
                 , testCase "a wrong byte of a literal is refused" (rejected "s = \"hi\"; affirm toInt(get(s, 1)) = 106; return 0;" "Could not prove")
                 , testCase "an index out of range is refused" (rejected "s = \"ab\"; return get(s, 2);" "Could not prove: i < size(self.bytes)")
-                , testCase "a wrong size is refused" (rejected "s = \"ab\"; affirm size(s) = 3; return 0;" "Could not prove: <String as Sequence>::size(s) = 3")
-                , testCase "the size of a concat is the sum" (rejected "s = \"ab\".concat(\"cd\"); affirm size(s) = 3; return 0;" "Could not prove: <String as Sequence>::size(s) = 3")
+                , testCase "a wrong size is refused" (rejected "s = \"ab\"; affirm size(s) = 3; return 0;" "Could not prove: <std$string$string$String as std$prelude$prelude$Sequence>::size(s) = 3")
+                , testCase "the size of a concat is the sum" (rejected "s = \"ab\".concat(\"cd\"); affirm size(s) = 3; return 0;" "Could not prove: <std$string$string$String as std$prelude$prelude$Sequence>::size(s) = 3")
                 ]
             , TestList
                 "facts about strings"
                 [ testCase "a string written in a proof" (valid "c = \"ab\"; affirm c = \"ab\"; return 0;")
                 , testCase "is not written with a list of Ints" (rejected "c = \"ab\"; affirm c = String { bytes: [97, 98] }; return 0;" "expected List<Byte>, got List<Int>")
-                , testCase "and a different string is refused" (rejected "c = \"ab\"; affirm c = \"ac\"; return 0;" "Could not prove: c = String { bytes: [97, 99] }")
+                , testCase "and a different string is refused" (rejected "c = \"ab\"; affirm c = \"ac\"; return 0;" "Could not prove: c = std$string$string$String { bytes: [97, 99] }")
                 , testCase "an escape in a proof" (valid "c = \"a\\n\"; affirm c = \"a\\n\"; return 0;")
                 , testCase "a string in the input contract of a function" (valid "fn f(s: String) -> Int [{ affirm s = \"hi\"; }] [{ affirm return = 2; }] { return size(s); }; return f(\"hi\");")
-                , testCase "that a caller has to meet" (rejected "fn f(s: String) -> Int [{ affirm s = \"hi\"; }] [{ }] { return size(s); }; return f(\"ho\");" "Could not prove: s = String { bytes: [104, 105] }")
+                , testCase "that a caller has to meet" (rejected "fn f(s: String) -> Int [{ affirm s = \"hi\"; }] [{ }] { return size(s); }; return f(\"ho\");" "Could not prove: s = std$string$string$String { bytes: [104, 105] }")
                 , testCase "concat keeps the bytes of the first string" (valid "c = \"ab\".concat(\"cd\"); affirm toInt(get(c, 0)) = 97; affirm toInt(get(c, 1)) = 98; return 0;")
                 , testCase "and not any others" (rejected "c = \"ab\".concat(\"cd\"); affirm toInt(get(c, 0)) = 98; return 0;" "Could not prove")
                 , testCase "the bytes of the second follow the first, at the index that is named" (valid "a = \"ab\"; b = \"cd\"; c = a.concat(b); affirm get(c.bytes, size(a.bytes) + 1) = get(b.bytes, 1); return 0;")
@@ -125,7 +125,7 @@ testStrings =
                 , testCase "a Byte is pushed" (runs "s = \"ab\".push(toByte(99)); return size(s);" "3")
                 , testCase "a Byte that is made of an Int in range" (valid "n = 99; s = \"ab\".push(toByte(n)); return 0;")
                 , testCase "and not of one that is not" (rejected "fn f(n: Int) -> Int [{ }] [{ }] { s = \"ab\".push(toByte(n)); return size(s); }; return f(7);" "Funct input validation failed")
-                , testCase "a string is a Sequence<Byte>" (rejected "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(\"ab\");" "String implements Sequence<Byte>")
+                , testCase "a string is a Sequence<Byte>" (rejected "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(\"ab\");" "std$string$string$String implements std$prelude$prelude$Sequence<Byte>")
                 ]
             , TestList
                 "output"
@@ -234,7 +234,7 @@ testStrings =
                 , testCase "a function that does not read still gives the same value twice" (valid "fn double(x: Int) -> Int [{ }] [{ }] { return x + x; }; a = double(3); b = double(3); affirm a = b; return 0;")
                 , testCase "a limit that is negative is refused" (rejected "a = String::read(0 - 1); return 0;" "Could not prove: limit >= 0")
                 , testCase "and the size of what is read is at most the limit" (valid "a = String::readLine(5); affirm size(a) <= 5; return 0;")
-                , testCase "but not more than that" (rejected "a = String::readLine(5); affirm size(a) <= 4; return 0;" "Could not prove: <String as Sequence>::size(a) <= 4")
+                , testCase "but not more than that" (rejected "a = String::readLine(5); affirm size(a) <= 4; return 0;" "Could not prove: <std$string$string$String as std$prelude$prelude$Sequence>::size(a) <= 4")
                 ]
             , TestList "a proof does not call the outside" [ testCase name (rejected source expected) | (_callee, name, source, expected) <- proofCallCases ]
             , TestList

@@ -5,7 +5,7 @@ import data::reader::reader { parseAstLines, readAstRecords, readRecord, readRec
 import elaborate::builtins { loadBuiltins };
 import elaborate::check { checkStatements, fnSigOf, functionValue, localScopes, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
-import elaborate::libraries { Catalog, Hide, Lib, Probe, catalogPackage, declaredNames, hideKey, localName, definedFunctions, entryOf, implsEq, libIndex, librariesFor, needsDropTrait, ownEq, probeModule, readCatalog, sameEq, seenLibraries, topTypeNames, viewOf };
+import elaborate::libraries { Catalog, Hide, Lib, Probe, catalogPackage, declaredNames, hideKey, localName, definedFunctions, entryOf, libIndex, librariesFor, needsDropTrait, probeModule, readCatalog, seenLibraries, topTypeNames, viewOf };
 import elaborate::decls { fileDeclarations };
 import elaborate::resolve { Decl, Imp, Line, Maps, PFile, Pkg, countAt, finishPackage, mapsFor, moduleKey, noPackage, readLine, startsWithByte, wordIs };
 import elaborate::rewrite { Prepared, declaredTypeNames, prepareModule, storageBound };
@@ -17,7 +17,7 @@ import data::codec::codec { wireRoles };
 import data::reader::reader { before };
 import elaborate::wire { wireComplete, wireOwnBindings, wireEntries, wireLoad, wireOwnerBindings, wireValidateBindings, wireWrapInterface };
 import elaborate::traits { argListOf, boundsOf, checkDefinitions, emitInstances, isClosureValue };
-import elaborate::units { answerLoad, declaresEq };
+import elaborate::units { answerLoad };
 import elaborate::lowerout { MirOut, lowerUnit, noMir };
 
 // The elaborator written in Tersus: a `tersus-elaborate 1` request on standard input, a `tersus-elaborated 1`
@@ -482,29 +482,22 @@ fn statementsOf(program: &Program) -> List<Int> ~ {
 // status 1: the request does not give a library whole
 struct Given { st: St, bases: HashMap<String, Int>, status: Int };
 
-fn giveLibraries(st: St, catalog: &Catalog, selected: &List<String>, stmts: &List<Int>, seen: &HashMap<String, AstProgram>, inPackage: Bool, key: &String) -> Given ~ {
+fn giveLibraries(st: St, catalog: &Catalog, selected: &List<String>, stmts: &List<Int>, seen: &HashMap<String, AstProgram>, inPackage: Bool, key: &String, boundRoles: &List<String>) -> Given ~ {
     if st.status != 0 { return Given { st: st, bases: noBases(), status: 0 }; };
-    replaced = ownEq(&st.nodes, stmts) >= 0;
-    names = [];
-    for w in seenLibraries(&catalog.libs, selected) { if !replaced || w != "eq" { names = push(names, clone(w)); }; };
+    names = seenLibraries(&catalog.libs, selected);
     views = [];
     for w in &names {
         lib = libraryProgram(&catalog.libs, w, seen);
         if !lib.ok { return Given { st: st, bases: noBases(), status: 1 }; };
         views = push(views, lib.value);
     };
-    if replaced && !eqKept(&st.nodes, stmts, &views, &catalog.libs, seen) {
-        message = "Type error: a replacement Eq used with cached library implementations must have exactly the library Eq's parameters, method signatures and contracts";
-        if inPackage { message = catStrings(catStrings(catStrings("in module ", key), ": "), message); };
-        return Given { st: unresolvedState(st, message), bases: noBases(), status: 0 };
-    };
-    hide = ownDeclarations(&st.nodes, stmts, inPackage);
+    hide = ownDeclarations(&st.nodes, stmts, inPackage, boundRoles);
     loaded = loadViews(st, &views, &names, &catalog.libs, &hide);
     dropLib = "core";
     if !inPackage || !needsDropTrait(&loaded.st.nodes, stmts) || indexIn(selected, &dropLib) >= 0 || libIndex(&catalog.libs, &dropLib) < 0 { return loaded; };
     prelude = libraryProgram(&catalog.libs, &dropLib, seen);
     if !prelude.ok { return Given { status: 1, ..loaded }; };
-    dropHide = Hide { declared: HashSet::new(), own: [], dropOnly: true };
+    dropHide = Hide { declared: HashSet::new(), own: [], dropOnly: true, providers: HashSet::new(), boundRoles: [] };
     dropOnly = viewOf(&prelude.value, &dropHide);
     st = appendInterface(loaded.st, &dropOnly.program);
     base = st.n;
@@ -512,21 +505,13 @@ fn giveLibraries(st: St, catalog: &Catalog, selected: &List<String>, stmts: &Lis
     return Given { st: st, bases: loaded.bases, status: 0 };
 };
 
-fn eqKept(nodes: &List<AstNode>, stmts: &List<Int>, views: &List<AstProgram>, libs: &List<Lib>, seen: &HashMap<String, AstProgram>) -> Bool ~ {
-    retains = false;
-    for v in views { retains = retains || implsEq(v); };
-    if !retains { return true; };
-    eq = libraryProgram(libs, "eq", seen);
-    return eq.ok && sameEq(nodes, ownEq(nodes, stmts), &eq.value);
-};
-
-fn ownDeclarations(nodes: &List<AstNode>, stmts: &List<Int>, inPackage: Bool) -> Hide ~ {
+fn ownDeclarations(nodes: &List<AstNode>, stmts: &List<Int>, inPackage: Bool, boundRoles: &List<String>) -> Hide ~ {
     own = [];
     if inPackage { own = topTypeNames(nodes, stmts); } else { own = declaredNames(nodes, stmts); };
     for d in definedFunctions(nodes, stmts) { own = push(own, clone(d)); };
     ownSet = HashSet::new();
     for o in &own { ownSet = ownSet.insert(hideKey(o)); };
-    return Hide { declared: ownSet, own: own, dropOnly: false };
+    return Hide { declared: ownSet, own: own, dropOnly: false, providers: HashSet::new(), boundRoles: clone(boundRoles) };
 };
 
 // (a library interface the module sees whole is read where a defining context that carries it again reads it; one it
@@ -577,8 +562,8 @@ struct Unit {
     hasCatalog: Bool, catalog: Catalog, pkg: Pkg, stdPkg: Pkg, program: Program,
     wireVersion: Bool, wireProtocols: HashMap<String, List<String>>,
     // (ownRoles/ownProviders: the roles the package marker binds to this module's declarations, the only roles it
-    // provides; boundMsg: why a binding of the module names none of them)
-    ownRoles: List<String>, ownProviders: List<String>, boundMsg: String
+    // provides; boundMsg: why a binding of the module names none of them; packageRoles: the roles the marker binds at all)
+    ownRoles: List<String>, ownProviders: List<String>, boundMsg: String, packageRoles: List<String>
 };
 
 // What a request of version 2 says it is: its explicit protocol providers (AST_DATA.md, "Ownership transport")
@@ -648,7 +633,8 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     chosen = [];
     available = catalogNames(&catalog);
     if unit.hasCatalog {
-        for w in seenLibraries(&catalog.libs, librariesFor(&probe)) { if ownEq(&program.nodes, &raw) < 0 || w != "eq" { chosen = push(chosen, clone(w)); }; };
+        // (a package whose marker binds Eq has that Eq, and std's would be another provider)
+        for w in seenLibraries(&catalog.libs, librariesFor(&probe)) { if w != "eq" || indexIn(&unit.packageRoles, "Eq") < 0 { chosen = push(chosen, clone(w)); }; };
     };
     preparing = withLibraryImports(&pkg, &unit.stdPkg, &chosen, &modKey, &unit.pkgName, &program.nodes, &raw);
     prepared = preparedProgram(program, clone(raw), &preparing, &modKey);
@@ -676,8 +662,8 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     st = loadBuiltins(st, table);
     selected = [];
     // (selected among the libraries the module is given)
-    if unit.hasCatalog && st.status = 0 { for n in librariesFor(&probe) { if indexIn(&available, &n) >= 0 { selected = push(selected, clone(n)); }; }; };
-    given = giveLibraries(st, &catalog, &selected, &stmts, seenBlocks, pkg.present, &modKey);
+    if unit.hasCatalog && st.status = 0 { for n in librariesFor(&probe) { if indexIn(&available, &n) >= 0 && (n != "eq" || indexIn(&unit.packageRoles, "Eq") < 0) { selected = push(selected, clone(n)); }; }; };
+    given = giveLibraries(st, &catalog, &selected, &stmts, seenBlocks, pkg.present, &modKey, &unit.packageRoles);
     if given.status = 1 { return malformedAnswer(); };
     bases = clone(given.bases);
     st = givenState(given);
@@ -923,15 +909,14 @@ fn answerModule(moduleLine: &Line, version2: Bool) -> Int ~ {
     unit = Unit { pkgName: pkgName, modu: modu, hasModule: hasModule, predeclaring: predeclaring, viewing: viewing, extracting: extracting, libExtract: wordIs(&extract, 1, "lib"),
         ifaces: ifaces, ifaceKeys: ifaceKeys, definitions: definitions, definitionKeys: definitionKeys,
         hasCatalog: sections.given, catalog: sections.catalog, pkg: sections.pkg, stdPkg: stdPkg, program: sections.program,
-        wireVersion: wire.version, wireProtocols: wire.protocols, ownRoles: [], ownProviders: [], boundMsg: "" };
+        wireVersion: wire.version, wireProtocols: wire.protocols, ownRoles: [], ownProviders: [], boundMsg: "", packageRoles: [] };
     answer = elaborateUnit(&table.value, unit, &seenBlocks);
     if answer.status < 0 { return malformed(); };
     // (lowered with the interfaces of the libraries it selected, as a program is: units)
     if given && answer.status = 0 {
-        replaced = declaresEq(&answer.out);
         for n in seenLibraries(&givenLibs, &answer.selected) {
             i = libIndex(&givenLibs, &n);
-            if (!replaced || n != "eq") && i >= 0 && i < size(givenLibs) {
+            if i >= 0 && i < size(givenLibs) {
                 lib = get(&givenLibs, i);
                 parsed = parseAstLines(&lib.lines);
                 if !parsed.ok { return malformed(); };

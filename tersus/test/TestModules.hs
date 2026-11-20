@@ -23,7 +23,7 @@ import System.FilePath (takeDirectory, (</>))
 import qualified Bootstrap
 import qualified AstData
 import qualified PackageCompile
-import PreludeSource (parserPackageFiles, astReaderPackageFiles, toolPackageFiles, validationPackageFiles, typesSource, cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource)
+import PreludeSource (libPackageFiles, parserPackageFiles, astReaderPackageFiles, toolPackageFiles, validationPackageFiles, typesSource, cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource)
 import qualified MirHousekeeping
 import qualified Compile
 import FileParserProtocol
@@ -55,6 +55,7 @@ import Types
 import TestHarness
 import ElaboratorTool (noVerdict)
 import Utils (Result (..), bindResult)
+import Link (pruneProgram)
 
 parsed :: String -> Either String [Statement]
 parsed source = case parseStatementBlock source of
@@ -801,13 +802,15 @@ testModuleLinkDrop =
             Left err -> Just ("drop package should compile to owned MIR: " ++ err)
             Right program ->
                 let rendered = M.renderProgram program
-                 in testAssertTrue ("<app$geo$geo$Token as Drop>::drop" `isInfixOf` rendered)
+                 in testAssertTrue ("<app$geo$geo$Token as std$core$ownership$Drop>::drop" `isInfixOf` rendered)
                         <> testAssertTrue ("drop " `isInfixOf` rendered)
         , expectRuns dropSuppressedPreludeFiles "app/main.tersus" "2"
         , case ownedPkg dropSuppressedPreludeFiles "app/main.tersus" of
             Left err -> Just ("drop with a suppressed prelude should compile to owned MIR: " ++ err)
-            Right program -> testAssertTrue ("<app$geo$geo$Token as Drop>::drop" `isInfixOf` M.renderProgram program)
-        , testAssertErrorContains "Type error: unknown trait Drop" (compileSource (suppressedPreludeDrop ++ " t = Token::new(2); return t.n;"))
+            Right program -> testAssertTrue ("<app$geo$geo$Token as std$core$ownership$Drop>::drop" `isInfixOf` M.renderProgram program)
+        , case compileSource (suppressedPreludeDrop ++ " t = Token::new(2); return t.n;") `bindResult` runProgram of
+            Error err -> Just ("a single file with a prelude trait of its own still has std core's Drop: " ++ err)
+            Ok value -> testAssertEq value (Just (MInt 2))
         ]
   where
     dropFiles =
@@ -816,8 +819,8 @@ testModuleLinkDrop =
         , ("app/geo/geo.tersus", "struct Token { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl Token { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for Token { fn drop(self: Self) -> Int [{ }] [{ }] { return Addr::free(self.addr, self.blk); }; };")
         ]
     -- (the geo module declares a prelude trait of its own, so the prelude
-    -- is not selected for it, but its impl Drop still sees the Drop trait;
-    -- a single file that does the same does not)
+    -- is not selected for it, and its impl Drop sees std core's Drop trait,
+    -- as a single file that does the same does)
     dropSuppressedPreludeFiles =
         [ ("app/package.tersus", "")
         , ("app/main.tersus", "import app::geo; t = geo::Token::new(2); return t.n;")
@@ -853,7 +856,8 @@ testModuleLinkRoot =
         [ case (programPkg rootFiles "app/main.tersus", compileSource rootSource) of
             (Left err, _) -> Just ("root package should compile: " ++ err)
             (_, Error err) -> Just ("single-file equivalent should compile: " ++ err)
-            (Right packaged, Ok single) -> testAssertEq packaged single
+            -- (a single file is given std's core for its List and Box whether it reaches them or not)
+            (Right packaged, Ok single) -> testAssertEq (pruneProgram packaged) (pruneProgram single)
         ]
   where
     rootSource = "fn add(a: Int, b: Int) -> Int [{ }] [{ }] { return a + b; }; return add(1, 2);"
@@ -977,20 +981,21 @@ testModuleLinkLibCollision :: Test
 testModuleLinkLibCollision =
     testCaseSeq
         "module-link-lib-collision"
-        [ expectProgramErrorAll
+        -- (std's declarations have std's canonical names, so a program's own of the same spelling is another declaration)
+        [ expectRuns
             [ ("app/package.tersus", "")
             , ("app/main.tersus", "import app::geo; struct Entry<K, V> { k: K }; e = Entry<Int, Int> { k: 3 }; return e.k + geo::counts();")
             , ("app/geo/geo.tersus", "fn counts() -> Int [{ }] [{ }] { counts = HashMap::new(); counts = counts.insert(\"the\", 40); return counts.lookup(\"the\", 0); };")
             ]
             "app/main.tersus"
-            ["link error:", "Entry", "tersuslib::map", "module app", "different definitions"]
-        , expectProgramError
+            "43"
+        , expectRuns
             [ ("app/package.tersus", "")
             , ("app/main.tersus", "import app::geo; fn findNth(x: Int) -> Int [{ }] [{ }] { return x + 1; }; return findNth(1) + geo::setSize();")
             , ("app/geo/geo.tersus", "fn setSize() -> Int [{ }] [{ }] { s = HashSet::new().insert(1).insert(2); return s.size(); };")
             ]
             "app/main.tersus"
-            "link error: function findNth is defined by both module tersuslib::map and module app"
+            "4"
         , expectRuns
             [ ("app/package.tersus", "")
             , ("app/main.tersus", "import app::geo; struct Entry { x: Int }; e = Entry { x: 3 }; return e.x + geo::counts();")
@@ -1779,7 +1784,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Just fn -> let env = M.specEnv (M.fnSpec fn) in
                                     all (`Map.member` env) (Map.keys (M.progFunctions raw)) && not (Map.member "countParsed" env))
                                 ["containsValue", "commonContext", "driverReadAll"])
-                            , testAssertEq (Map.size (M.progFunctions raw)) 1052
+                            , testAssertEq (Map.size (M.progFunctions raw)) 1086
                             , testAssertEq (Map.keys (M.progFunctions checker)) (Map.keys (M.progFunctions (withoutGeneric raw)))
                             , testAssertTrue (all (`Map.member` M.progFunctions raw) declared)
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) declared)
@@ -2146,21 +2151,29 @@ testPhase1Packages = TestList "testPhase1Packages"
     , testCase "no-prelude packages still validate their source bodies" $ case phase1Load phase1Options (phase1Files "affirm 1 = 2; return 42;") of
         Left err -> Just err
         Right pkg -> phase1ResultRefusal "Could not prove:" (compileModulesToProgram (packageSnapshot pkg))
-    , testCase "a package directory cannot be named tersuslib" $
-        phase1Refusal "a package directory cannot be named tersuslib" (loadAt defaultLoadOptions{noPrelude = True}
-            [("tersuslib/package.tersus", ""), ("tersuslib/lists/lists.tersus", "fn dup<T>(x: &T) -> T { return clone(*x); };"), ("tersuslib/main.tersus", "import tersuslib::lists { dup }; return 0;")]
-            "tersuslib/main.tersus")
-    , testCase "nor is a sibling package named tersuslib imported" $
-        phase1Refusal "the package name tersuslib is reserved for the compiler libraries, which a program does not import by name" (loadAt defaultLoadOptions
+    -- (the compiler libraries are the package std, read from its root: tersuslib is a package name like any other)
+    , testCase "a package directory may be named tersuslib" $
+        case loadAt defaultLoadOptions{noPrelude = True}
+            [("tersuslib/package.tersus", ""), ("tersuslib/lists/lists.tersus", "fn dup(x: Int) -> Int { return x; };"), ("tersuslib/main.tersus", "import tersuslib::lists { dup }; return dup(4);")]
+            "tersuslib/main.tersus" of
+            Left err -> Just err
+            Right pkg -> testAssertEq (compileModulesToProgram (packageSnapshot pkg) `bindResult` runProgram) (Ok (Just (MInt 4)))
+    , testCase "a sibling package named tersuslib is an ordinary package, whose clones are checked under the usual rule" $
+        case loadAt defaultLoadOptions
             [("app/package.tersus", ""), ("app/main.tersus", "import tersuslib::lists { dup }; struct NC { v: List<Int> }; n = NC { v: [1, 2] }; m = dup(&n); return size(m.v);"), ("tersuslib/package.tersus", ""), ("tersuslib/lists/lists.tersus", "fn dup<T>(x: &T) -> T { return clone(*x); };")]
-            "app/main.tersus")
-    , testCase "nor is a root mapped to the name tersuslib" $
-        phase1Refusal "--package-root tersuslib=installed/spoof: the package name tersuslib is reserved" (loadAt defaultLoadOptions{packageRoots = Map.singleton "tersuslib" "installed/spoof"}
+            "app/main.tersus" of
+            Left err -> Just err
+            Right pkg -> phase1ResultRefusal "dup clones a T, and its bounds do not say T: Clone" (compileModulesToProgram (packageSnapshot pkg))
+    , testCase "a root mapped to the name tersuslib is an ordinary package root" $
+        case loadAt defaultLoadOptions{packageRoots = Map.singleton "tersuslib" "installed/spoof"}
             [("app/package.tersus", ""), ("app/main.tersus", "import tersuslib::lists { dup }; struct NC { v: List<Int> }; n = NC { v: [1, 2] }; m = dup(&n); return size(m.v);"), ("installed/spoof/package.tersus", ""), ("installed/spoof/lists/lists.tersus", "fn dup<T>(x: &T) -> T { return clone(*x); };")]
-            "app/main.tersus")
+            "app/main.tersus" of
+            Left err -> Just err
+            Right pkg -> phase1ResultRefusal "dup clones a T, and its bounds do not say T: Clone" (compileModulesToProgram (packageSnapshot pkg))
     , testCase "a standard root in a directory named tersuslib is the package std, which clones under the usual rule" $
         case loadAt defaultLoadOptions{installedStdRoot = Just "installed/tersuslib"}
-            [("app/package.tersus", ""), ("app/main.tersus", "import std::lists { dup }; struct NC { v: List<Int> }; n = NC { v: [1, 2] }; m = dup(&n); return size(m.v);"), ("installed/tersuslib/package.tersus", ""), ("installed/tersuslib/lists/lists.tersus", "fn dup<T>(x: &T) -> T { return clone(*x); };")]
+            ([("app/package.tersus", ""), ("app/main.tersus", "import std::extra { dup }; struct NC { v: List<Int> }; n = NC { v: [1, 2] }; m = dup(&n); return size(m.v);"), ("installed/tersuslib/extra/extra.tersus", "fn dup<T>(x: &T) -> T { return clone(*x); };")]
+                ++ [("installed/tersuslib/" ++ drop 4 path, text) | (path, text) <- libPackageFiles])
             "app/main.tersus" of
             Left err -> Just err
             Right pkg -> phase1ResultRefusal "dup clones a T, and its bounds do not say T: Clone" (compileModulesToProgram (packageSnapshot pkg))
@@ -2248,7 +2261,12 @@ phase2Impl body = "trait Mark { }; impl Mark for Int { }; struct Wrap<T> { value
 
 -- (the provider has the prelude for the Clone bound its clone of a T needs)
 phase2ImplFiles :: String -> Files
-phase2ImplFiles source = [(path, if path == "installed/vendor/package.tersus" then "" else text) | (path, text) <- phase2Files source (phase2Impl "return clone(self.value);") []]
+phase2ImplFiles source = withPreludes (phase2Files source (phase2Impl "return clone(self.value);") [])
+
+-- (the packages with the prelude: an array literal is made from a list, and a word's Clone is the Clone role's, which a
+-- package without the prelude does not bind)
+withPreludes :: Files -> Files
+withPreludes files = [(path, if "package.tersus" `isSuffixOf` path then "" else text) | (path, text) <- files]
 
 phase2WriteFiles :: String -> Files
 phase2WriteFiles field = phase2Files
@@ -2365,11 +2383,11 @@ testPhase2Packages = TestList "testPhase2Packages"
     , testCase "caller-owned types satisfy visible vendor bounds" $ phase2Runs (phase2CallerTypeFiles False) 42
     , testCase "bounded vendor implementations use caller implementations of visible traits" $ phase2Runs (phase2CallerTypeFiles True) 42
     , testCase "caller-only bare functions are not template defining dependencies" $ phase2Rejects phase2CallerOnlyFunction ["in module vendor::api", "Undefined variable: secret"]
-    , testCase "different checked function bodies remain a link conflict" $ expectProgramErrorAll
+    , testCase "an entry function spelled like a std helper with another body is the entry's own" $ expectRuns
         [ ("app/package.tersus", "")
         , ("app/main.tersus", "import app::geo; fn findNth(x: Int) -> Int { return x + 1; }; return findNth(1) + geo::setSize();")
         , ("app/geo/geo.tersus", "fn setSize() -> Int { s = HashSet::new().insert(1).insert(2); return s.size(); };")
-        ] "app/main.tersus" ["link error: function findNth", "tersuslib::map", "module app", "different definitions"]
+        ] "app/main.tersus" "4"
     , testCase "different linked contracts remain a link conflict" $ phase2Rejects phase2ConflictingContracts ["link error: function extern fn shared", "different definitions"]
     , testCase "private template closure does not expose a bare helper" $
         phase2Rejects [(path, if path == phase2Entry then "import vendor::api { value }; x = value(42); return pass(x);" else text) | (path, text) <- phase2Private] ["Undefined variable: pass"]
@@ -2490,7 +2508,7 @@ phase2PrerequisiteFiles leak badContract = phase2Files
     ("trait Mark { fn marked(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; fn value<T: Mark>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { return " ++ (if leak then "x.good()" else "Mark::marked(x)") ++ "; };") []
 
 phase2SizeArgumentFiles :: String -> String -> Files
-phase2SizeArgumentFiles size body = phase2Files
+phase2SizeArgumentFiles size body = withPreludes $ phase2Files
     "import vendor::api { Holder, Item, inspect }; h = Holder<Item, 3> { value: Item { }, cells: #[1, 2, 3] }; return inspect(h);"
     ("trait Feed<E> { fn feed(self: &Self) -> E; }; struct Item { }; impl Feed<Array<Int, " ++ size ++ ">> for Item { fn feed(self: &Self) -> Array<Int, " ++ size ++ "> { return " ++ body ++ "; }; }; trait Label { fn label(self: &Self) -> Int; }; struct Holder<T, n> { value: T, cells: Array<Int, n> }; impl<T: Feed<Array<Int, n>>, n> Label for Holder<T, n> { fn label(self: &Self) -> Int [{ }] [{ affirm return = n + 39; }] { return n + 39; }; }; fn inspect<U: Label>(x: &U) -> Int { return x.label(); };") []
 
@@ -2504,7 +2522,7 @@ phase2CheckedShadow files =
     <> phase2Rejects files ["does not model yet: two functions with one name"]
 
 phase2SizedReturnFiles :: String -> String -> Files
-phase2SizedReturnFiles body consumer = phase2Files
+phase2SizedReturnFiles body consumer = withPreludes $ phase2Files
     ("import vendor::api { Item, make }; p = Item { }; a = #[1, 2, 3]; " ++ consumer)
     ("trait Feed<E> { fn feed(self: &Self) -> E; }; struct Item { }; impl Feed<Array<Int, 3>> for Item { fn feed(self: &Self) -> Array<Int, 3> { return #[1, 2, 3]; }; }; fn make<T: Feed<Array<Int, n>>, n>(x: &T, a: &Array<Int, n>) -> Array<Int, n> { " ++ body ++ " };") []
 

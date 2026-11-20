@@ -414,17 +414,6 @@ fn joinedProgram(ls: &LS, files: &List<LFile>) -> Program ~ {
     return program;
 };
 
-// Whether the elaborated module declares the trait Eq itself (LibPackage.withoutReplacedEq)
-fn declaresEq(out: &AstProgram) -> Bool ~ {
-    root = nodeIn(&out.nodes, out.root);
-    if !(root is AstNode::Elaborated) { return false; };
-    for s in listItems(&out.nodes, (root as AstNode::Elaborated).value.statements) {
-        stmt = statementOf(&out.nodes, s);
-        if stmt is AstStatement::TraitDef && nameText(&out.nodes, (stmt as AstStatement::TraitDef).n) = "Eq" { return true; };
-    };
-    return false;
-};
-
 fn libKeys(catalog: &Catalog, names: &List<String>) -> List<String> ~ {
     out = [];
     for n in names {
@@ -490,7 +479,7 @@ fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
             ifaces: programsOf(&t, &depKeys), ifaceKeys: clone(depKeys), definitions: definitionPrograms, definitionKeys: clone(defining),
             hasCatalog: given, catalog: unitCatalog, pkg: clone(pkg), stdPkg: clone(stdPkg), program: joinedProgram(&ls, &pm.files),
             wireVersion: wire.version, wireProtocols: clone(wire.protocols),
-            ownRoles: bindingsOwn.roles, ownProviders: bindingsOwn.providers, boundMsg: bindingsOwn.msg };
+            ownRoles: bindingsOwn.roles, ownProviders: bindingsOwn.providers, boundMsg: bindingsOwn.msg, packageRoles: boundRoles(&pm.layout.bindings) };
         answer = elaborateUnit(table, unit, &seen);
         if answer.status < 0 { return malformed(); };
         if answer.status != 0 {
@@ -498,9 +487,7 @@ fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
             "end\n".print();
             return 0;
         };
-        names = [];
-        replaced = declaresEq(&answer.out);
-        for n in seenLibraries(&catalog.libs, &answer.selected) { if !replaced || n != "eq" { names = push(names, clone(n)); }; };
+        names = seenLibraries(&catalog.libs, &answer.selected);
         libContexts = [];
         for ctx in libraryContexts(&catalog.libs, &answer.selected) { libContexts = push(libContexts, libKeys(catalog, &ctx)); };
         for ctx in &defining { libContexts = push(libContexts, clone(ctx)); };
@@ -614,7 +601,7 @@ fn answerProgram(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
     unit = Unit { pkgName: "main", modu: "", hasModule: false, predeclaring: false, viewing: false, extracting: false, libExtract: false,
         ifaces: [], ifaceKeys: [], definitions: [], definitionKeys: [], hasCatalog: given, catalog: unitCatalog, pkg: noPackage(), stdPkg: libPackage(libs),
         program: joinBlock(Program { nodes: [], roots: [] }, &source.program),
-        wireVersion: wire.version, wireProtocols: clone(wire.protocols), ownRoles: [], ownProviders: [], boundMsg: "" };
+        wireVersion: wire.version, wireProtocols: clone(wire.protocols), ownRoles: [], ownProviders: [], boundMsg: "", packageRoles: [] };
     seen = HashMap::new();
     answer = elaborateUnit(table, unit, &seen);
     if answer.status < 0 { return malformed(); };
@@ -624,9 +611,7 @@ fn answerProgram(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
         return 0;
     };
     if answer.status = 0 {
-        names = [];
-        replaced = declaresEq(&answer.out);
-        for n in seenLibraries(&catalog.libs, &answer.selected) { if !replaced || n != "eq" { names = push(names, clone(n)); }; };
+        names = seenLibraries(&catalog.libs, &answer.selected);
         ifaces = [];
         for n in &names {
             i = libIndex(&catalog.libs, n);
@@ -674,7 +659,7 @@ fn compileLibrary(libs: &LibParse, pkg: &Pkg, table: &AstProgram, t: &Ifaces, do
     unit = Unit { pkgName: "std", modu: clone(name), hasModule: true, predeclaring: true, viewing: true, extracting: true, libExtract: true,
         ifaces: programsOf(t, &depKeys), ifaceKeys: depKeys, definitions: definitionPrograms, definitionKeys: contexts,
         hasCatalog: false, catalog: Catalog { ok: true, libs: [] }, pkg: clone(pkg), stdPkg: noPackage(), program: libProgramOf(libs, &name),
-        wireVersion: wire.version, wireProtocols: clone(wire.protocols), ownRoles: [], ownProviders: [], boundMsg: "" };
+        wireVersion: wire.version, wireProtocols: clone(wire.protocols), ownRoles: [], ownProviders: [], boundMsg: "", packageRoles: [] };
     libKeyText = moduleKey("std", &name, true);
     bindingsOwn = ownBindings(pkg, &libKeyText, &name, true, &marker.bindings);
     unit = Unit { ownRoles: bindingsOwn.roles, ownProviders: bindingsOwn.providers, boundMsg: bindingsOwn.msg, ..unit };
@@ -703,6 +688,12 @@ struct Own { roles: List<String>, providers: List<String>, msg: String };
 // The roles a module's own declarations are given by its package's bindings: each binding of the module names one
 // declaration of it, of the kind of its role (a type for List and Box, a trait for the others), by that declaration's
 // canonical name; a binding of the module that names none, or names more than one, is refused
+fn boundRoles(bindings: &List<MarkerBinding>) -> List<String> ~ {
+    roles = [];
+    for b in bindings { roles = push(roles, clone(b.role)); };
+    return roles;
+};
+
 fn ownBindings(pkg: &Pkg, key: &String, modu: &String, hasModu: Bool, bindings: &List<MarkerBinding>) -> Own ~ {
     roles = [];
     providers = [];

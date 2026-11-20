@@ -130,7 +130,7 @@ testArrays =
                 , testCase "an array that is too large for a frame" (rejected "return size(array(9000, 0));" "more than the 8192")
                 , testCase "arrays inside an array count" (rejected "fn f(a: Array<Array<Int, 100>, 100>) -> Int { return 0; }; return 0;" "takes 10000 words")
                 , testCase "an element that is a list" (runs "return array(2, [1]);" (VList [VList [VInt 1], VList [VInt 1]]))
-                , testCase "an element that is a struct" (runs "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct P { x: Int }; impl Clone for P { }; return size(array(2, P { x: 1 }));" (VInt 2))
+                , testCase "an element that is a struct" (runs "struct P { x: Int }; impl Clone for P { }; return size(array(2, P { x: 1 }));" (VInt 2))
                 , testCase "an element that is a function" (rejected "fn f() -> Int { return 1; }; return size(array(2, f));" "an array holds values that have a size (Int, Bool, a list, a struct, an enum, a Box or an array), not fn() -> Int")
                 , testCase "a literal is made of Int, Bool and arrays" (rejected "return size(#[[1], [2]]);" "an array literal holds Int, Bool or arrays of them, not List<Int>")
                 , testCase "an array of structs counts the words of the struct" (rejected "struct P { a: Int, b: Int, c: Int }; fn f(x: Array<P, 3000>) -> Int { return 0; }; return 0;" "takes 9000 words")

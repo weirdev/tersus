@@ -1,6 +1,6 @@
 import data::ast::ast { AstBody, AstBuiltin, AstEntry, AstExpression, AstNames, AstNode, AstArg, AstOptName, AstOptTermination, AstProgram, AstProof, AstRule, AstStatement, AstStatements, AstTermination, AstValidation, AstValue, AstEntries, AstInterface };
 import data::codec::codec { Size, Token, Type, catStrings, sizeAt, typeAt, wordAt };
-import data::reader::reader { nameValue, nodeKind, nodeRefs, parseAstLines, readRecords };
+import data::reader::reader { nameValue, nodeKind, nodeRefs, parseAstLines, readRecords, transportNames };
 import elaborate::core { baseNameOf };
 import elaborate::decls { traitFnNames };
 import elaborate::records { listItems, nameText, nodeIn };
@@ -293,7 +293,7 @@ fn librariesFor(p: &Probe) -> List<String> ~ {
     prelude = preludeFree && (strings || maps || sets || traitNamed(&p.mentioned));
     out = [];
     if !(declares(&p.declared, "List") && declares(&p.declared, "Box") && declares(&p.declared, "Clone")) { out = push(out, "core"); };
-    if !declares(&p.declared, "Eq") { out = push(out, "eq"); };
+    out = push(out, "eq");
     if prelude { out = push(out, "prelude"); };
     if strings { out = push(out, "string"); };
     if maps { out = push(out, "map"); };
@@ -393,11 +393,17 @@ fn interfaceNames(iface: &AstProgram, typeName: &String) -> Bool ~ {
     return false;
 };
 
+// (an interface names std's String, HashMap and HashSet by their canonical names, the std package's names of its modules'
+// declarations)
 fn mentionImported(p: Probe, ifaces: &List<AstProgram>) -> Probe ~ {
-    for name in push(push(push([], "String"), "HashMap"), "HashSet") {
+    mentions = push(push(push([], "String"), "HashMap"), "HashSet");
+    canonicalNames = push(push(push([], "std$string$string$String"), "std$map$map$HashMap"), "std$set$set$HashSet");
+    i = 0;
+    while i < size(mentions) [{ affirm i >= 0; affirm size(mentions) = size(canonicalNames); }] shrinks size(mentions) - i {
         for iface in ifaces {
-            if interfaceNames(iface, &name) { p = mentionRaw(p, &name); };
+            if interfaceNames(iface, &get(canonicalNames, i)) { p = mentionRaw(p, &get(mentions, i)); };
         };
+        i = i + 1;
     };
     return p;
 };
@@ -413,11 +419,13 @@ fn probeModule(nodes: &List<AstNode>, ids: &List<Int>, ifaces: &List<AstProgram>
 // anything was left out.
 struct View { program: AstProgram, changed: Bool };
 
-// (the libraries' names are canonical, so a declaration hides the library declaration of its spelling)
-struct Hide { declared: HashSet<String>, own: List<String>, dropOnly: Bool };
+// (the libraries' names are canonical, so a declaration hides the library declaration of its spelling; a library's provider
+// of a role the module's package does not bind (boundRoles) is the role's, which a declaration of its spelling neither replaces
+// nor hides)
+struct Hide { declared: HashSet<String>, own: List<String>, dropOnly: Bool, providers: HashSet<String>, boundRoles: List<String> };
 
 fn hides(h: &Hide, name: &String) -> Bool ~ {
-    return HashSet::contains(&h.declared, hideKey(name));
+    return !HashSet::contains(&h.providers, name) && HashSet::contains(&h.declared, hideKey(name));
 };
 
 // The name a declaration hides a library's by: a declaration's own spelling, but an impl's function (`<O as T>::f`)
@@ -548,22 +556,41 @@ fn catalogPackage(catalog: &Catalog) -> Pkg ~ {
 
 fn catalogPrefix(name: &String) -> String ~ { return catStrings(catStrings("std$", clone(name)), "$"); };
 
-fn viewOf(iface: &AstProgram, h: &Hide) -> View ~ {
+fn viewOf(iface: &AstProgram, h0: &Hide) -> View ~ {
+    h = Hide { declared: clone(h0.declared), own: clone(h0.own), dropOnly: h0.dropOnly, providers: roleProviders(iface, &h0.boundRoles, &h0.providers), boundRoles: clone(h0.boundRoles) };
     v = interfaceOf(iface);
     nodes = clone(iface.nodes);
     changed = false;
-    k = keptList(nodes, v.types, ViewField::NamedEntries, 0, h); nodes = k.nodes; changed = changed || k.changed; types = k.head;
-    k = keptList(nodes, v.ctors, ViewField::Constructors, 0, h); nodes = k.nodes; changed = changed || k.changed; ctors = k.head;
-    k = keptList(nodes, v.generics, ViewField::NamedEntries, 0, h); nodes = k.nodes; changed = changed || k.changed; generics = k.head;
-    k = keptList(nodes, v.invariants, ViewField::NamedEntries, 0, h); nodes = k.nodes; changed = changed || k.changed; invariants = k.head;
-    k = keptList(nodes, v.traits, ViewField::Traits, 0, h); nodes = k.nodes; changed = changed || k.changed; traits = k.head;
-    k = keptList(nodes, v.traitParams, ViewField::Traits, 0, h); nodes = k.nodes; changed = changed || k.changed; traitParams = k.head;
-    k = keptList(nodes, v.functions, ViewField::NamedEntries, 0, h); nodes = k.nodes; changed = changed || k.changed; functions = k.head;
-    k = keptList(nodes, v.impls, ViewField::Impls, 0, h); nodes = k.nodes; changed = changed || k.changed; impls = k.head;
-    k = keptList(nodes, v.assoc, ViewField::Impls, 0, h); nodes = k.nodes; changed = changed || k.changed; assoc = k.head;
-    k = keptList(nodes, v.implArgs, ViewField::Impls, 0, h); nodes = k.nodes; changed = changed || k.changed; implArgs = k.head;
-    k = keptList(nodes, v.implBounds, ViewField::Impls, 0, h); nodes = k.nodes; changed = changed || k.changed; implBounds = k.head;
-    return viewRest(nodes, iface.root, AstInterface { types: types, ctors: ctors, generics: generics, invariants: invariants, traits: traits, traitParams: traitParams, functions: functions, impls: impls, assoc: assoc, implArgs: implArgs, implBounds: implBounds, ..v }, changed, h);
+    k = keptList(nodes, v.types, ViewField::NamedEntries, 0, &h); nodes = k.nodes; changed = changed || k.changed; types = k.head;
+    k = keptList(nodes, v.ctors, ViewField::Constructors, 0, &h); nodes = k.nodes; changed = changed || k.changed; ctors = k.head;
+    k = keptList(nodes, v.generics, ViewField::NamedEntries, 0, &h); nodes = k.nodes; changed = changed || k.changed; generics = k.head;
+    k = keptList(nodes, v.invariants, ViewField::NamedEntries, 0, &h); nodes = k.nodes; changed = changed || k.changed; invariants = k.head;
+    k = keptList(nodes, v.traits, ViewField::Traits, 0, &h); nodes = k.nodes; changed = changed || k.changed; traits = k.head;
+    k = keptList(nodes, v.traitParams, ViewField::Traits, 0, &h); nodes = k.nodes; changed = changed || k.changed; traitParams = k.head;
+    k = keptList(nodes, v.functions, ViewField::NamedEntries, 0, &h); nodes = k.nodes; changed = changed || k.changed; functions = k.head;
+    k = keptList(nodes, v.impls, ViewField::Impls, 0, &h); nodes = k.nodes; changed = changed || k.changed; impls = k.head;
+    k = keptList(nodes, v.assoc, ViewField::Impls, 0, &h); nodes = k.nodes; changed = changed || k.changed; assoc = k.head;
+    k = keptList(nodes, v.implArgs, ViewField::Impls, 0, &h); nodes = k.nodes; changed = changed || k.changed; implArgs = k.head;
+    k = keptList(nodes, v.implBounds, ViewField::Impls, 0, &h); nodes = k.nodes; changed = changed || k.changed; implBounds = k.head;
+    return viewRest(nodes, iface.root, AstInterface { types: types, ctors: ctors, generics: generics, invariants: invariants, traits: traits, traitParams: traitParams, functions: functions, impls: impls, assoc: assoc, implArgs: implArgs, implBounds: implBounds, ..v }, changed, &h);
+};
+
+// The providers an interface's checked transport gives roles the package does not bind, beside those known already
+fn roleProviders(iface: &AstProgram, boundRoles: &List<String>, known: &HashSet<String>) -> HashSet<String> ~ {
+    out = clone(known);
+    root = nodeIn(&iface.nodes, iface.root);
+    if !(root is AstNode::OwnershipInterface) { return out; };
+    for e in listItems(&iface.nodes, (root as AstNode::OwnershipInterface).protocols) {
+        node = nodeIn(&iface.nodes, e);
+        if node is AstNode::Entry && (node as AstNode::Entry).value is AstEntry::NamesEntry {
+            entry = (node as AstNode::Entry).value as AstEntry::NamesEntry;
+            role = nameText(&iface.nodes, entry.n);
+            if indexIn(boundRoles, &role) < 0 {
+                for p in transportNames(&iface.nodes, entry.ns) { out = out.insert(clone(p)); };
+            };
+        };
+    };
+    return out;
 };
 
 fn viewRest(nodes: List<AstNode>, root: Int, v: AstInterface, changed: Bool, h: &Hide) -> View ~ {
@@ -617,166 +644,4 @@ fn needsDropTrait(nodes: &List<AstNode>, ids: &List<Int>) -> Bool ~ {
         };
     };
     return impls;
-};
-
-fn ownEq(nodes: &List<AstNode>, ids: &List<Int>) -> Int ~ {
-    for s in ids {
-        stmt = statementOf(nodes, s);
-        if stmt is AstStatement::TraitDef && nameText(nodes, (stmt as AstStatement::TraitDef).n) = "Eq" { return s; };
-    };
-    return 0 - 1;
-};
-
-fn implsEq(iface: &AstProgram) -> Bool ~ {
-    v = interfaceOf(iface);
-    for e in listItems(&iface.nodes, v.impls) {
-        entry = entryOf(&iface.nodes, e);
-        if entry is AstEntry::PairEntry && nameText(&iface.nodes, (entry as AstEntry::PairEntry).a) = "Eq" { return true; };
-    };
-    return false;
-};
-
-// A replacement Eq kept beside library impls checked against the library's Eq has to be that Eq exactly
-fn sameEq(nodes: &List<AstNode>, traitDef: Int, eq: &AstProgram) -> Bool ~ {
-    stmt = statementOf(nodes, traitDef);
-    if !(stmt is AstStatement::TraitDef) { return false; };
-    t = stmt as AstStatement::TraitDef;
-    v = interfaceOf(eq);
-    params = 0 - 1;
-    for e in listItems(&eq.nodes, v.traitParams) {
-        entry = entryOf(&eq.nodes, e);
-        if entry is AstEntry::NamesEntry && nameText(&eq.nodes, (entry as AstEntry::NamesEntry).n) = "Eq" { params = (entry as AstEntry::NamesEntry).ns; };
-    };
-    fns = 0 - 1;
-    for e in listItems(&eq.nodes, v.traits) {
-        entry = entryOf(&eq.nodes, e);
-        if entry is AstEntry::TraitEntry && nameText(&eq.nodes, (entry as AstEntry::TraitEntry).n) = "Eq" { fns = (entry as AstEntry::TraitEntry).fs; };
-    };
-    if params < 0 || fns < 0 { return false; };
-    return sameTree(nodes, t.ps, &eq.nodes, params) && sameTree(nodes, t.fs, &eq.nodes, fns);
-};
-
-fn sameTree(a: &List<AstNode>, i: Int, b: &List<AstNode>, j: Int) -> Bool ~ {
-    x = nodeIn(a, i);
-    y = nodeIn(b, j);
-    if nodeKind(&x) != nodeKind(&y) { return false; };
-    if x is AstNode::Name { return nameValue(a, i) = nameValue(b, j); };
-    if x is AstNode::Type && y is AstNode::Type { return (x as AstNode::Type).value = (y as AstNode::Type).value; };
-    if x is AstNode::Size && y is AstNode::Size { return (x as AstNode::Size).value = (y as AstNode::Size).value; };
-    if variantTag(&x) != variantTag(&y) { return false; };
-    rx = nodeRefs(&x);
-    ry = nodeRefs(&y);
-    if size(rx) != size(ry) { return false; };
-    k = 0;
-    while k < size(rx) && k < size(ry) [{ affirm k >= 0; }] ~ {
-        if !sameTree(a, get(rx, k), b, get(ry, k)) { return false; };
-        k = k + 1;
-    };
-    return true;
-};
-
-fn variantTag(node: &AstNode) -> String ~ {
-    if node is AstNode::Value { v = (node as AstNode::Value).value; return valueTag(&v); };
-    if node is AstNode::Statement { s = (node as AstNode::Statement).value; return statementTag(&s); };
-    if node is AstNode::Builtin { b = (node as AstNode::Builtin).value; return builtinTag(&b); };
-    if node is AstNode::Body { if (node as AstNode::Body).value is AstBody::NativeFunct { return "native"; }; return "builtin"; };
-    if node is AstNode::Expression {
-        e = (node as AstNode::Expression).value;
-        if e is AstExpression::Val { return "val"; };
-        if e is AstExpression::Var { return "var"; };
-        return "f";
-    };
-    if node is AstNode::Termination || node is AstNode::Validation || node is AstNode::Proof || node is AstNode::Rule { return proofTag(node); };
-    if node is AstNode::Arg { if (node as AstNode::Arg).value is AstArg::ArgSize { return "size"; }; return "type"; };
-    if node is AstNode::OptName { if (node as AstNode::OptName).value is AstOptName::NoName { return "none"; }; return "some"; };
-    if node is AstNode::OptTermination { if (node as AstNode::OptTermination).value is AstOptTermination::NoTermination { return "none"; }; return "some"; };
-    return "";
-};
-
-fn valueTag(v: &AstValue) -> String ~ {
-    if v is AstValue::VInt { return "int"; };
-    if v is AstValue::VList { return "list"; };
-    if v is AstValue::VBool { if (v as AstValue::VBool).b { return "true"; }; return "false"; };
-    if v is AstValue::VData { return "data"; };
-    if v is AstValue::VFnRef { return "fnref"; };
-    return "funct";
-};
-
-fn proofTag(node: &AstNode) -> String ~ {
-    if node is AstNode::Termination {
-        t = (node as AstNode::Termination).value;
-        if t is AstTermination::Shrinks { return "shrinks"; };
-        if t is AstTermination::Counting { return "counting"; };
-        if t is AstTermination::Parts { return "parts"; };
-        if t is AstTermination::MayDiverge { return "diverge"; };
-        return "recursing";
-    };
-    if node is AstNode::Validation {
-        v = (node as AstNode::Validation).value;
-        if v is AstValidation::Rewrite { return "rewrite"; };
-        if v is AstValidation::ProofAssert { return "assert"; };
-        if v is AstValidation::AssignProofVar { return "assign"; };
-        return "assume";
-    };
-    if node is AstNode::Proof {
-        p = (node as AstNode::Proof).value;
-        if p is AstProof::FApp { return "fapp"; };
-        if p is AstProof::ATerm { return "aterm"; };
-        if p is AstProof::CTerm { return "cterm"; };
-        if p is AstProof::Forall { return "forall"; };
-        return "bvar";
-    };
-    if node is AstNode::Rule {
-        r = (node as AstNode::Rule).value;
-        if r is AstRule::Refl { return "refl"; };
-        if r is AstRule::Eval { return "eval"; };
-        if r is AstRule::EvalAll { return "evalall"; };
-        if r is AstRule::CheckGtZero { return "gtzero"; };
-        if r is AstRule::CheckRel { return "rel"; };
-        return "user";
-    };
-    return "";
-};
-
-fn builtinTag(b: &AstBuiltin) -> String ~ {
-    return match b {
-        AstBuiltin::Ctor { n: n, args: args, fs: fs } => "ctor",
-        AstBuiltin::FieldBuiltin { owner: owner, n: n } => "field",
-        AstBuiltin::Is { n: n } => "is",
-        AstBuiltin::Project { n: n, f: f } => "project",
-        AstBuiltin::Cast { n: n } => "cast",
-        AstBuiltin::ToWord { signed: signed, bits: bits } => catStrings(catStrings("word ", boolText(signed)), intText(bits)),
-        AstBuiltin::Rel { r: r } => catStrings("rel ", intText(r)),
-        AstBuiltin::Primitive { name: name } => catStrings("primitive ", name),
-    };
-};
-
-fn boolText(b: Bool) -> String ~ { if b { return "true "; }; return "false "; };
-
-fn statementTag(s: &AstStatement) -> String ~ {
-    return match s {
-        AstStatement::Assign { n: n, e: e } => "assign",
-        AstStatement::AssignDeref { a: a, b: b } => "assignderef",
-        AstStatement::Let { n: n, e: e } => "let",
-        AstStatement::Return { e: e } => "return",
-        AstStatement::ValidationStatement { v: v } => "validation",
-        AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs } => "struct",
-        AstStatement::EnumDef { n: n, vs: vs } => "enum",
-        AstStatement::AxiomDef { n: n, ps: ps, ins: ins, outs: outs } => "axiom",
-        AstStatement::ProofDef { n: n, ps: ps, ins: ins, outs: outs, body: body } => "proof",
-        AstStatement::Block { xs: xs } => "block",
-        AstStatement::If { e: e, a: a, b: b } => "if",
-        AstStatement::While { e: e, vs: vs, t: t, xs: xs } => "while",
-        AstStatement::TraitDef { n: n, ps: ps, fs: fs } => "trait",
-        AstStatement::ImplDef { traitName: traitName, args: args, n: n, ty: ty, bs: bs, xs: xs } => "impl",
-        AstStatement::BoundedDef { bs: bs, s: s2 } => "bounded",
-        AstStatement::Mark { line: line, col: col } => catStrings(catStrings(catStrings("mark ", intText(line)), " "), intText(col)),
-        AstStatement::CopyDef { n: n } => "copy",
-        AstStatement::LinearDef { n: n } => "linear",
-        AstStatement::ExternDef { n: n } => "extern",
-        AstStatement::DropDef { n: n } => "drop",
-        AstStatement::Dissolve { n: n } => "dissolve",
-        AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => "instance",
-        AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, inv: inv, xs: xs } => "pack loop",
-    };
 };

@@ -9,7 +9,7 @@ import System.Exit (ExitCode (..))
 
 import Compile (lowerSource)
 import Mir
-import MirData (forNative, readProgram, writeProgramWithGhosts)
+import MirData (forNative, readProgram, writeOwnedProgramWithGhosts, writeProgramWithGhosts)
 import MirEval (MirValue (..), RunEnv (..), Outcome (..), runProgram, runProgramEnv)
 import TestOwnership (runOwned, usesArrays)
 import MirMono (monomorphize, monomorphizeForValidation)
@@ -24,7 +24,7 @@ import TestHarness
 import TestNative (nativeExamples, nativeMirCase, ownRoleEntry, ownRolePrograms, unvalidatedPrograms, validatedPrograms)
 import Pipeline (compileSource)
 import Types (Arg (..), Size (..), Type (..), instanceName)
-import TestStorage (pattern TList, pattern TBox)
+import TestStorage (pattern TList, pattern TBox, stdProtocols)
 import Utils
 
 restoreRoundTrip :: Program -> Result Program String
@@ -160,14 +160,14 @@ testMirOwnership = TestList "testMirOwnership"
 
 testOwnershipInterpreted :: Test
 testOwnershipInterpreted = TestList "testOwnershipInterpreted"
-    ([testCase label (sameAsNative program) | (label, program) <- smallOwnershipFixtures] ++
-     [ testCase "a reference write releases the value it replaces" (model storedOwnerFixture)
-     , testCase "a view of a replaced referent is a copy of its own" (model mutableViewFixture)
-     , testCase "a field write through a reference releases the field it replaces" (model storedFieldFixture)
-     , testCase "a view of a place written through a reborrow is a copy of its own" (firstFailure [model reborrowedWriteFixture, notPeeked (Local 4) reborrowedWriteFixture])
-     , testCase "a view of a place written through a reference is a copy of its own" (firstFailure [model writtenSourceFixture, notPeeked (Local 2) writtenSourceFixture])
-     , testCase "a view lent to a callee that writes its source is a copy of its own" (firstFailure [model calleeWriteFixture, notPeeked (Local 2) calleeWriteFixture])
-     , testCase "a borrowed view outlives a replacement of its source as a copy" (firstFailure [model borrowedViewFixture, notPeeked (Local 2) borrowedViewFixture])
+    ([testCase label (sameAsNative (stored program)) | (label, program) <- smallOwnershipFixtures] ++
+     [ testCase "a reference write releases the value it replaces" (model (stored storedOwnerFixture))
+     , testCase "a view of a replaced referent is a copy of its own" (model (stored mutableViewFixture))
+     , testCase "a field write through a reference releases the field it replaces" (model (stored storedFieldFixture))
+     , testCase "a view of a place written through a reborrow is a copy of its own" (firstFailure [model (stored reborrowedWriteFixture), notPeeked (Local 4) (stored reborrowedWriteFixture)])
+     , testCase "a view of a place written through a reference is a copy of its own" (firstFailure [model (stored writtenSourceFixture), notPeeked (Local 2) (stored writtenSourceFixture)])
+     , testCase "a view lent to a callee that writes its source is a copy of its own" (firstFailure [model (stored calleeWriteFixture), notPeeked (Local 2) (stored calleeWriteFixture)])
+     , testCase "a borrowed view outlives a replacement of its source as a copy" (firstFailure [model (stored borrowedViewFixture), notPeeked (Local 2) (stored borrowedViewFixture)])
      -- Lowered programs name a list and a Box as their structs (`named "List" 1 type T`), and the Tersus passes must see
      -- through those names: to the references a list or a Box holds, and to the element an index of either reaches
      , testCase "a lowered list that holds a reference keeps a view of its referent a copy" (firstFailure [heapModel loweredListReferenceFixture, notPeeked (Local 5) loweredListReferenceFixture])
@@ -175,8 +175,11 @@ testOwnershipInterpreted = TestList "testOwnershipInterpreted"
      , testCase "a write at an index of a lowered list through a reference releases the element" (heapModel loweredIndexWriteFixture)
      ])
   where
+    -- (a list of these programs is std's List, with the checked facts a compiled program has for it)
+    stored = checkedStorage
     -- (the interpreted emitter owns the program as the native tool does, and the owned program runs on the heap model to the executor's answer)
-    sameAsNative program = case (interpretedOwnership program, insertOwnership program) of
+    -- (on the copies monomorphisation makes, as insertOwnership gives the native tool the program)
+    sameAsNative program = case (interpretedOwnership (monomorphize program), insertOwnership program) of
         (Error e, _) -> Just e
         (_, Error e) -> Just ("native: " ++ e)
         (Ok owned, Ok native) -> firstFailure
@@ -201,13 +204,12 @@ interpretedEmitter = mapResult monomorphizeForValidation (toolProgram emitterEnt
 {-# NOINLINE interpretedEmitter #-}
 
 interpretedOwnership :: Program -> Result Program String
-interpretedOwnership program = interpretedEmitter `bindResult` \tool ->
-    runProgramEnv (RunEnv [] input (const Nothing)) tool `bindResult` \outcome ->
+-- (given the program as MirHousekeeping.ownershipPassWith gives the native tool it, with its checked ownership facts)
+interpretedOwnership program = interpretedEmitter `bindResult` \tool -> writeOwnedProgramWithGhosts (ownershipInput program) `bindResult` \owned ->
+    runProgramEnv (RunEnv [] ("pass ownership\n" ++ owned) (const Nothing)) tool `bindResult` \outcome ->
         if outValue outcome /= Nothing || not (null (outStderr outcome))
             then Error ("interpreted ownership failed: " ++ outStderr outcome)
             else readProgram (outStdout outcome) `bindResult` restoreOwnership program
-  where
-    input = "pass ownership\n" ++ writeProgramWithGhosts (ownershipInput program)
 
 smallOwnershipFixtures :: [(String, Program)]
 smallOwnershipFixtures = [("repeated consumes are owned as natively and run", plain), ("partial fields are owned as natively and run", fields), ("conditional drops are owned as natively and run", conditional)]
@@ -594,7 +596,8 @@ mutableNamedReference :: TestResult
 mutableNamedReference = checkNamedReference "update<Int>" TInt (monomorphize (namedReferenceFixture (TParam "T") TInt ["T"]))
 
 mutableReferenceListNormalization :: TestResult
-mutableReferenceListNormalization = case lowerLists (Ok []) (namedReferenceFixture boxed boxed []) of
+-- (the program's storage is std's: a Box of an array is its List in native code)
+mutableReferenceListNormalization = case lowerLists (Ok []) (namedReferenceFixture boxed boxed []){progProtocols = stdProtocols} of
     Error e -> Just e
     Ok output -> checkNamedReference "update" (TList TInt) output
   where

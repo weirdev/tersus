@@ -2,7 +2,7 @@ module TestDifferential (testDifferential, ergonomicsUnits) where
 
 import AstData (writeBuiltinTable)
 import BuiltinTable (builtinTable)
-import Compile (parseWithEquality)
+import Compile (parseWithEquality, parseWithEqualityParts)
 import Data.Char (ord)
 import Data.List (isInfixOf, isPrefixOf)
 import DataCodec (typeTokens)
@@ -108,7 +108,7 @@ protocolRoundTrip = do
                         interfacesLine = head [l | l <- rest, take 11 l == "interfaces "]
                      in unlines (before ++ take 1 rest ++ ["data " ++ show (length (lines table))] ++ lines table ++ [interfacesLine] ++ after)
              in firstFailure
-                    [ refused "a request with another header" (readRequest (swapLine "tersus-elaborate 1" "tersus-elaborate 2" request))
+                    [ refused "a request with another header" (readRequest (unlines ("tersus-elaborate 9" : drop 1 (lines request))))
                     , refused "an unknown extraction" (readRequest (unlines [if take 8 l == "extract " then "extract all" else l | l <- lines request]))
                     , refused "a count with a leading zero" (readRequest (swapLine (firstData request) ("data 0" ++ drop 5 (firstData request)) request))
                     , refused "a block cut short" (readRequest (unlines (init (lines request))))
@@ -230,7 +230,8 @@ elaboratorChecks = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles files) e
         , "    nodes = push(push(push([], AstNode::Name { value: AstName::End }), AstNode::Value { value: AstValue::VBool { b: true } }), AstNode::Values { value: AstValues::End });"
         , "    nodes = push(push(push(nodes, AstNode::Statements { value: AstStatements::End }), AstNode::Types { value: AstTypes::End }), AstNode::Elaborated { value: AstElaborated { statements: 3, types: 4 } });"
         , "    storage = push(push(push([], \"List\"), \"Box\"), \"Copy\");"
-        , "    m = lowerUnit(arenaOf(\"elaborated\", nodes, 5), &ifaces, arenaOf(\"builtins\", push([], AstNode::Entries { value: AstEntries::End }), 0), &storage);"
+        , "    noFacts = []; noFrames = [];"
+        , "    m = lowerUnit(arenaOf(\"elaborated\", nodes, 5), &ifaces, arenaOf(\"builtins\", push([], AstNode::Entries { value: AstEntries::End }), 0), &storage, &noFacts, &noFrames);"
         , "    if m.ok { return wordsLine(\"lowered\"); };"
         , "    return wordsLine(clone(m.msg));"
         , "};"
@@ -299,9 +300,10 @@ malformedLoads = case writeLoadRequest (sourceRequest LoadParse False False [] "
 -- Every function with bounds of a program is checked against its bounds, the compiler libraries put in front of it
 -- included (their checked bodies are what the copy step makes their copies from), and a request names no checked prefix
 checkedStatements :: TestResult
-checkedStatements = case parseWithEquality "trait Show { fn show(self: &Self) -> Int; }; fn same<T: Show>(a: T, b: T) -> Bool { return a = b; }; return 0;" of
+-- (the program's own statements, as a request gives them: a function with bounds is checked where it is defined)
+checkedStatements = case parseWithEqualityParts "trait Show { fn show(self: &Self) -> Int; }; fn same<T: Show>(a: T, b: T) -> Bool { return a = b; }; return 0;" of
     Left e -> Just e
-    Right stmts ->
+    Right (_, _, stmts) ->
         let request = Request (ModuleId "main" Nothing) False False NoInterface [] [] [] [stmts]
          in firstFailure
                 [ case sourceElaborator request of

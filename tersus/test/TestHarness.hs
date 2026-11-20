@@ -23,6 +23,7 @@ module TestHarness
     , testAssertEq
     , testAssertErrorContains
     , parseValFailStmtHelper
+    , libraryParts
     , parseEvalProgramHelper
     , parseEvalProgramFailHelper
     , parseValidProgramHelper
@@ -97,7 +98,9 @@ import System.Process (proc)
 
 import CacheLock (openBinaryTempFileCloexec, openLockFd)
 import Mir (Program)
-import Compile (lowerSource)
+import Compile (SourceParts, lowerSource)
+import LibPackage (libCatalog, libPackage)
+import ElaborateRequest (libraryName)
 import MirHousekeeping (eraseGhosts, toolProgram, validationEntry)
 import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, parserSeedSha256, seedSha256, stdlibSource, toolPackageFiles, validationPackageFiles, elaboratePackageFiles, frontendSeedSha256)
 import Hash (fingerprint)
@@ -319,10 +322,15 @@ parseValFailStmtHelper stmtStr =
     let parseOutput = parseStatement stmtStr
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) -> case validateStatements stmts of
+            Right (Block stmts) -> case libraryParts stmts `bindResult` validateParts of
                 Ok _ -> Just "Validation succeeded expected failure"
                 Error _ -> Nothing
             Right _ -> Just "Not a block statement"
+
+-- A program given as statements, with the compiler libraries a program read from source may be given: the elaborator selects
+-- among them as it does for a single file (a list or a String is a value of a library's type)
+libraryParts :: [Statement] -> Result SourceParts String
+libraryParts stmts = mapResult (\pkg -> ([libraryName l | l <- libCatalog pkg], [], stmts)) libPackage
 
 -- Control flow tests. A program runs on the MIR once it type checks; nothing here validates it.
 parseEvalProgramHelper :: String -> Maybe Value -> TestResult

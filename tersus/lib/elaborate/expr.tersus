@@ -8,7 +8,7 @@ import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, em
 import elaborate::records { codecTypeAt, exprOf, fromCodec, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, captureExpression, checkCallWrites, copyExpressionOrigins, joinBranchReferences, placeForm, placeRoot, recordCallFieldOrigins, refResultIndex, resetBranchReferences, refsOf };
 import elaborate::state { GenericCall, forwardInProofText, BoundInfo, NodeRewrite, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, maxInt, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, productFits, render, resolve, sameTy, simpleTy, sizeConst, teHeadAt, tyAt, typeError, unclonedParameter, undoTry, unify, withTy, wrapTy, zonk, protocolName, protocolIs, stubTraitParameter };
-import elaborate::traits { boundAsImpl, callResolved, emptyTemplate, fnBoundCall, implFunctionName, isClosureExpr, isClosureValue, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, synthesizeClosure, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
+import elaborate::traits { boundAsImpl, callResolved, emptyTemplate, fnBoundCall, implFunctionName, isClosureExpr, isClosureValue, ownerOfValue, pairKey, ownerThroughTrait, primitiveTraitCall, resolveAssociated, synthesizeClosure, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
     return St { te: TE { node: node, types: push([], t) }, ..st };
@@ -1475,7 +1475,7 @@ fn inferEquality(st: St, funct: Int, negated: Bool, args: &List<Int>) -> St ~ {
 fn equalityCall(st: St, t: Int, operands: &List<TE>) -> St ~ {
     provider = protocolName(&st, "Eq");
     if !HashSet::contains(&st.traits, &provider) {
-        return typeError(st, catStrings(render(st, t), " is compared with =, which needs the trait Eq of lib/std/eq/eq.tersus, which a program has unless it declares a trait Eq of its own"));
+        return typeError(st, catStrings(render(st, t), " is compared with =, which needs the trait the Eq role is bound to: std's (lib/std/eq/eq.tersus), or the one a package marker binds"));
     };
     st = traitArguments(st, "Eq", t);
     if st.status != 0 { return st; };
@@ -1508,7 +1508,8 @@ fn missingEq(st: St, t: Int) -> St ~ {
         return missingEq(st, st.ty);
     };
     if x.kind = 4 {
-        if HashSet::contains(&st.impls, catStrings("Eq ", x.name)) {
+        eqProvider = protocolName(&st, "Eq");
+        if HashSet::contains(&st.impls, pairKey(&eqProvider, &x.name)) {
             lacking = [];
             for a in x.args {
                 if !isSize(st, a) {

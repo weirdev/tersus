@@ -46,6 +46,15 @@ testClosures =
                         , ("app/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
                         ]
                 pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
+            , TestCase "an Fn bound in a module of its own" $ do
+                program <-
+                    programFromFiles
+                        "app/main.tersus"
+                        [ ("app/package.tersus", "")
+                        , ("app/main.tersus", "import app::lib { apply }; struct Adder { n: Int }; impl Fn(x: Int) -> Int for Adder { fn call(self: &Self, x: Int) -> Int { return x + self.n; }; }; a = Adder { n: 10 }; return apply(&a, 5);")
+                        , ("app/lib/lib.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
+                        ]
+                pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
             , TestList
                 "closures"
                 [ testCase "a closure reads a Copy capture, copied at creation" (runs "n = 10; f = fn(x: Int) -> Int => x + n; return f(5);" 15)
