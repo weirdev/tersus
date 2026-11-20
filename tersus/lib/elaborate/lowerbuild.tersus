@@ -1,6 +1,6 @@
 import data::ast::ast { AstArg, AstBody, AstBuiltin, AstExpression, AstName, AstNames, AstNode, AstOptName, AstOptTermination, AstProof, AstProofs, AstStatement, AstStatements, AstValidation, AstValidations, AstValue };
 import parser::syntax::syntax as ps;
-import data::codec::codec { Size, Token, Type, sizeAt, typeAt, wordAt };
+import data::codec::codec { FnContract, Size, Token, Type, sizeAt, typeAt, wordAt };
 import elaborate::records { codecSizeAt, codecTypeAt, listItems, nameText, nodeIn };
 import elaborate::state { intText };
 import elaborate::exports { breakOn, startsWith };
@@ -336,7 +336,7 @@ fn hsShowType(t: Type, d: Int) -> String ~ {
         Type::TBox { inner: e } => hsParen(d, lwCat3("TNamed \"Box\" [ArgType ", hsShowType(Box::unbox(e), 11), "]")),
         Type::TArray { elem: e, size: s } => hsParen(d, lwCat3(lwCat("TArrayOf ", hsShowType(Box::unbox(e), 11)), " ", hsShowSize(&s, 11))),
         Type::TFn { args: args, ret: r } => hsParen(d, lwCat3(lwCat("TFn ", hsShowTypes(&args)), " ", hsShowType(Box::unbox(r), 11))),
-        Type::TFnContract { args: args, ret: r, contract: contract } => hsParen(d, lwCat3(lwCat("TFn ", hsShowTypes(&args)), " ", hsShowType(Box::unbox(r), 11))),
+        Type::TFnContract { args: args, ret: r, contract: contract } => hsParen(d, lwSp(lwSp(lwCat("TFnContract ", hsShowTypes(&args)), hsShowType(Box::unbox(r), 11)), hsShowFnContract(Box::unbox(contract)))),
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => hsParen(d, lwCat3(lwCat("TNamed ", lwShow(&base)), " ", hsShowArgTokens(&argTokens))),
         Type::TVariant { name: name } => hsParen(d, lwCat("TVariant ", lwShow(&name))),
         Type::TVar { n: n } => hsParen(d, lwCat("TVar ", hsInt(n, 11))),
@@ -349,6 +349,32 @@ fn hsShowType(t: Type, d: Int) -> String ~ {
         Type::TUninit { inner: e } => hsParen(d, lwCat("TUninit ", hsShowType(Box::unbox(e), 11))),
         Type::TWord { signed: signed, bits: bits } => hsParen(d, lwCat3(lwCat("TWord ", hsBool(signed)), " ", hsInt(bits, 11))),
     };
+};
+
+fn hsShowFnContract(c: &FnContract) -> String ~ {
+    out = lwCat("(FnContract {fnParamNames = ", hsShowStrings(&c.names));
+    out = lwCat3(out, ", fnRequires = ", hsShowFnClauses(&c.requires));
+    return lwCat(lwCat3(out, ", fnEnsures = ", hsShowFnClauses(&c.ensures)), "})");
+};
+
+fn hsShowFnClauses(clauses: &List<List<Token>>) -> String ~ {
+    out = "[";
+    i = 0;
+    for clause in clauses {
+        if i > 0 { out = lwCat(out, ","); };
+        out = lwCat(out, "FnClause [");
+        j = 0;
+        for token in clause {
+            if j > 0 { out = lwCat(out, ","); };
+            tag = "FnWord ";
+            if token.quoted { tag = "FnName "; };
+            out = lwCat3(out, &tag, lwShow(&token.text));
+            j = j + 1;
+        };
+        out = lwCat(out, "]");
+        i = i + 1;
+    };
+    return lwCat(out, "]");
 };
 
 fn hsBool(b: Bool) -> String ~ {

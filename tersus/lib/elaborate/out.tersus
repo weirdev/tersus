@@ -141,9 +141,11 @@ fn typeTokenText(st: &St, t: Int) -> String ~ {
         return catStrings(out, typeTokenText(st, nth(&x.args, 0)));
     };
     if k = 14 {
-        out = catStrings(" fn ", intText(size(x.args) - 1));
+        tag = " fn ";
+        if size(x.name.bytes) > 0 { tag = " fnc "; };
+        out = catStrings(tag, intText(size(x.args) - 1));
         for a in x.args { out = catStrings(out, typeTokenText(st, a)); };
-        return out;
+        return catStrings(out, &x.name);
     };
     return catStrings(" var ", intText(x.n));
 };

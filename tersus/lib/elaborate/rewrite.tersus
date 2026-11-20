@@ -5,7 +5,7 @@ import elaborate::out { quotedName };
 import elaborate::records { listItems, nameText, nodeIn };
 import elaborate::check { indexOfByte };
 import elaborate::resolve { Maps, PFile, Pkg, TypeTarget, colonsAt, implParts, mapsFor, noMaps, startsWithByte };
-import elaborate::state { indexIn, intText, joinWith };
+import elaborate::state { fnContractSuffix, indexIn, intText, joinWith };
 import elaborate::traits { implFunctionName };
 
 // bound: the variables in scope; params: the type parameters in scope
@@ -173,8 +173,12 @@ fn typeText(m: &Maps, cn: &Canon, params: &HashSet<String>, t: &Type) -> Txt ~ {
             sz = sizeTokens(s);
             return Txt { text: catStrings(&x.text, &sz), ..x };
         },
-        Type::TFn { args: args, ret: r } => { inner = Box::unbox(clone(r)); return fnText(m, cn, params, args, &inner); },
-        Type::TFnContract { args: args, ret: r, contract: contract } => { inner = Box::unbox(clone(r)); return fnText(m, cn, params, args, &inner); },
+        Type::TFn { args: args, ret: r } => { inner = Box::unbox(clone(r)); return fnText(m, cn, params, args, &inner, ""); },
+        Type::TFnContract { args: args, ret: r, contract: contract } => {
+            inner = Box::unbox(clone(r));
+            c = Box::unbox(clone(contract));
+            return fnText(m, cn, params, args, &inner, fnContractSuffix(&c));
+        },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => { return namedText(m, cn, params, base, argc, argTokens); },
         Type::TVariant { name: name } => {
             target = variantTarget(m, cn, params, name);
@@ -189,8 +193,10 @@ fn typeText(m: &Maps, cn: &Canon, params: &HashSet<String>, t: &Type) -> Txt ~ {
     return txt(" int", false);
 };
 
-fn fnText(m: &Maps, cn: &Canon, params: &HashSet<String>, args: &List<Type>, ret: &Type) -> Txt ~ {
-    out = catStrings(" fn ", intText(size(args)));
+fn fnText(m: &Maps, cn: &Canon, params: &HashSet<String>, args: &List<Type>, ret: &Type, suffix: &String) -> Txt ~ {
+    tag = " fn ";
+    if size(suffix.bytes) > 0 { tag = " fnc "; };
+    out = catStrings(tag, intText(size(args)));
     changed = false;
     for a in args {
         x = typeText(m, cn, params, a);
@@ -200,7 +206,7 @@ fn fnText(m: &Maps, cn: &Canon, params: &HashSet<String>, args: &List<Type>, ret
     };
     x = typeText(m, cn, params, ret);
     if !x.ok { return x; };
-    return txt(catStrings(out, &x.text), changed || x.changed);
+    return txt(catStrings(catStrings(out, &x.text), suffix), changed || x.changed);
 };
 
 fn forallText(m: &Maps, cn: &Canon, params: &HashSet<String>, sizes: &List<String>, types: &List<String>, body: &Type) -> Txt ~ {

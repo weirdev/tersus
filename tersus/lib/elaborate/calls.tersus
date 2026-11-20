@@ -2,10 +2,10 @@ import data::ast::ast { AstArg, AstBody, AstBuiltin, AstExpression, AstNode, Ast
 import data::codec::codec { catStrings };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, builtinSchemeType, schemeType, substitute };
 import elaborate::core { baseNameOf, ctorInfo, ctorResultType, ensureInstance, fieldOf, hasColons, isBoxTy, isListTy, unrefOf };
-import elaborate::out { emit, emitBuiltinCall, emitName, emitVal, emitVar };
+import elaborate::out { emit, emitBuiltinCall, emitName, emitStatements, emitVal, emitVar };
 import elaborate::refs { copyExpressionOrigins };
 import elaborate::records { codecSize, codecTypeAt, exprOf, fromCodec, functionTypeFrom, listItems, nameText, namesText, nodeIn, sigData };
-import elaborate::state { Scopes, St, TE, Ty, addTy, argAt, expect, fail, fnTy, freshSize, freshVar, intText, kindOf, listTy, maxInt, minInt, namedTy, notModelled, nth, render, resolve, simpleTy, tyAt, typeError, unify, withTy, wordName, zonk };
+import elaborate::state { Scopes, St, TE, Ty, addTy, argAt, expect, fail, fnTy, freshSize, freshVar, intText, kindOf, listTy, maxInt, minInt, namedTy, notModelled, nth, render, resolve, sameTy, simpleTy, tyAt, typeError, unify, withTy, wordName, zonk };
 
 // Variables: the scopes innermost first, then the functions every body sees, then the standard library (lookupVar)
 fn scopeLookup(st: &St, name: &String) -> Int ~ {
@@ -511,6 +511,20 @@ fn coerceCore(st: St, wanted: Int, arg: TE) -> St ~ {
     a = st.ty;
     wx = tyAt(st, w);
     ax = tyAt(st, a);
+    if wx.kind = 14 && ax.kind = 14 && wx.name != ax.name {
+        named = ex is AstExpression::Var;
+        if ex is AstExpression::Val { named = builtinOfValue(st, (ex as AstExpression::Val).v) >= 0; };
+        if !named || size(wx.name.bytes) = 0 || size(ax.name.bytes) > 0 { return St { te: arg, ..st }; };
+        st = addTy(st, Ty { name: "", ..wx });
+        plain = st.ty;
+        st = unify(st, plain, a);
+        if !st.ok || !sameTy(st, plain, a) { return typeError(st, "a function value must have the exact parameter and result types of its contract"); };
+        // A converted call head must call the typed pointer, not the original declaration directly.
+        statements = [];
+        st = emitStatements(st, &statements);
+        st = emit(st, AstNode::Expression { value: AstExpression::BlockExpr { xs: st.nid, e: arg.node } });
+        return St { te: TE { node: st.nid, types: push(push([], w), w) }, ..st };
+    };
     if wx.kind = 11 && ax.kind = 10 { return typeError(st, "a read reference cannot initialize an update reference"); };
     if isBoxTy(st, w) && isBoxTy(st, a) {
         wi = tyAt(st, nth(&wx.args, 0));

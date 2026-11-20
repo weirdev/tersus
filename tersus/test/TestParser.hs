@@ -20,8 +20,8 @@ import PreludeSource (elaboratePackageFiles, toolPackageFiles, validationPackage
 import qualified Modules
 import PreludeSource (typesSource, cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource)
 import qualified ParserSeed
-import Syntax (Expression (..), Statement (..), Value (..))
-import Types (Type (..))
+import Syntax (Expression (..), FunctBody (..), Statement (..), Value (..))
+import Types (Arg (..), FnClause (..), FnClauseToken (..), FnContract (..), Signature (..), Type (..))
 import qualified TestParserFragments as Fragment
 import TestHarness
 import Utils
@@ -481,9 +481,77 @@ largeConstructorFallback = pure $ testAssertEq
     (Fragment.parseStatementBlock ("struct P { x: Int };\n" ++ concat ["x" ++ show i ++ " = P;\n" | i <- [0 :: Int .. 1023]]))
     (Right (StructDef "P" [] [("x", TInt)] [] : [Assign ("x" ++ show i) (Var "P") | i <- [0 :: Int .. 1023]]))
 
+contractedFunctionTypes :: IO TestResult
+contractedFunctionTypes = do
+    result <- TersusParser.parseFileNative emptyDecls $ unlines
+        [ "struct Callbacks { cb: fn(x: Int, Bool) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] };"
+        , "fn make() -> (fn(x: Int, Bool) -> Int [{ affirm x > 0; }] [{ affirm return > x; }]) [{ affirm true; }] [{ affirm true; }] ~ { return 0; };"
+        , "struct Envelope<T> { value: T };"
+        , "struct Nested { outer: fn(Int) -> fn(Int) -> Int [{ affirm true; }], inner: fn(Int) -> (fn(Int) -> Int [{ affirm true; }]),"
+        , "                generic: Envelope<fn(Int) -> Int [{ affirm true; }]> };"
+        ]
+    case result of
+        Right (parsed, decls) -> case fileBody parsed of
+            [StructDef "Callbacks" [] [("cb", cb)] [], Assign "make" (Val (VFunct [] [_] [_] (NativeFunct (Signature [] ret [] [] [] []) _ _) [])),
+                StructDef "Envelope" ["T"] [("value", TParam "T")] [],
+                StructDef "Nested" [] [("outer", outer), ("inner", inner), ("generic", generic)] []] -> do
+                    roundTrip <- TersusParser.parseFileNative decls "return 0;"
+                    pure $ firstFailure
+                        [ testAssertEq (cb, ret, outer, inner, generic)
+                            (named, named, TFnContract [TInt] thin requiresOnly, TFn [TInt] requiresOnlyType, TNamed "Envelope" [ArgType requiresOnlyType])
+                        , testAssertEq (snd <$> roundTrip) (Right decls)
+                        ]
+            statements -> pure (Just ("unexpected contracted-type AST: " ++ show statements))
+        Left e -> pure (Just e)
+  where
+    gt left right = FnClause ([FnWord "app", FnWord "Gt", FnWord "2"] ++ left ++ right)
+    var n = [FnWord "name", FnName n]
+    named = TFnContract [TInt, TBool] TInt (FnContract ["x", ""] [gt (var "x") [FnWord "int", FnWord "0"]] [gt (var "return") (var "x")])
+    thin = TFn [TInt] TInt
+    requiresOnly = FnContract [""] [FnClause [FnWord "bool", FnWord "true"]] []
+    requiresOnlyType = TFnContract [TInt] TInt requiresOnly
+
+rejectFunctionTypeContracts :: IO TestResult
+rejectFunctionTypeContracts = fmap firstFailure $ forM cases $ \(suffix, wanted) -> do
+    result <- TersusParser.parseFileNative emptyDecls ("fn use(f: fn(x: Int) -> Int " ++ suffix ++ ") -> Int ~ { return 0; };")
+    pure $ case result of
+        Left e | wanted `isInfixOf` e -> Nothing
+        Left e -> Just ("expected " ++ wanted ++ ", got: " ++ e)
+        Right _ -> Just ("unexpectedly parsed function type suffix: " ++ suffix)
+  where
+    cases =
+        [ ("", "needs a contract")
+        , ("[{ define p = 0; }]", "only supports affirm")
+        , ("[{ affirm x / 2 > 0; }]", "unsupported proof")
+        , ("[{ affirm x > 0 || x < 0; }]", "proof is not made of")
+        ]
+
+wireFunctionTypeContracts :: TestResult
+wireFunctionTypeContracts = case File.writeFileRequest emptyDecls "" of
+    Error e -> Just e
+    Ok text -> firstFailure [rejected text decl want | (decl, want) <- cases]
+  where
+    rejected text decl want =
+        case File.readFileRequest (unlines [if line == "selfType none" then "selfType some " ++ decl else line | line <- lines text]) of
+            Error e | want `isInfixOf` e -> Nothing
+            Error e -> Just ("expected " ++ want ++ ", got: " ++ e)
+            Ok _ -> Just ("unexpectedly parsed wire type: " ++ decl)
+    cases =
+        [ ("fnc 1 int int 0 0 0", "names do not match")
+        , ("fnc 2 int int int 2 \"x\" \"x\" 0 0", "parameter names repeat")
+        , ("fnc 0 int 0 1 0 0", "clause with no tokens")
+        , ("fnc 0 int 0 1 1 q word 0", "a name was expected")
+        , ("fnc 1 var -1 int 1 \"x\" 0 0", "negative or overflowing")
+        ]
+
 testParser :: Test
 testParser = TestList "testParser"
     [ TestCase "native stdout roundtrip and exact equality" (compareWith seedPlainData tersusPlain "return 1;\n")
+    , TestCase "thin function returns keep their declaration contracts byte-for-byte"
+        (compareWith seedPlainData tersusPlain "fn thin() -> fn(Int) -> fn(Int) -> Int [{ affirm true; }] [{ affirm true; }] ~ { return 0; };")
+    , TestCase "function type contracts survive AST and declaration transport" contractedFunctionTypes
+    , TestCase "function type contracts reject unsupported proof syntax" rejectFunctionTypeContracts
+    , testCase "malformed function type contracts are rejected in declaration transport" wireFunctionTypeContracts
     , TestCase "large located arena exceeds former recursive stack limit" (compareWith seedData tersusData (concat ["x" ++ show i ++ " = " ++ show i ++ ";\n" | i <- [0 :: Int .. 4095]] ++ "return 0;\n"))
     , TestCase "many function-body arenas retain canonical order" (compareWith seedData tersusData (concat ["fn f" ++ show i ++ "() -> Int ~ { return " ++ show i ++ "; };\n" | i <- [0 :: Int .. 255]] ++ "return 0;\n"))
     , TestCase "native response framing and OS failures" responseVerdicts

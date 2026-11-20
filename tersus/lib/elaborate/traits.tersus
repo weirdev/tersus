@@ -506,6 +506,29 @@ fn namedFnRecord(st: &St, fnName: &String) -> NativeFn ~ {
 };
 
 
+// Arena copies share the declaration's name record, but a different assignment may bind a value instead.
+fn directFnArgRecord(st: &St, fnName: &String) -> NativeFn ~ {
+    found = nativeFn(&st.nodes, 0 - 1);
+    declaration = 0 - 1;
+    for node in &st.nodes {
+        if node is AstNode::Statement {
+            stmt = (node as AstNode::Statement).value;
+            if stmt is AstStatement::Assign {
+                a = stmt as AstStatement::Assign;
+                if nameText(&st.nodes, a.n) = clone(fnName) {
+                    if declaration >= 0 && a.n != declaration { return nativeFn(&st.nodes, 0 - 1); };
+                    ex = exprOf(st, a.e);
+                    if !(ex is AstExpression::Val) { return nativeFn(&st.nodes, 0 - 1); };
+                    rec = nativeFn(&st.nodes, (ex as AstExpression::Val).v);
+                    if !rec.ok || isClosureValue(st, (ex as AstExpression::Val).v) { return nativeFn(&st.nodes, 0 - 1); };
+                    if !found.ok { found = rec; declaration = a.n; };
+                };
+            };
+        };
+    };
+    return found;
+};
+
 fn tesOfTypes(tys: &List<Int>) -> List<TE> ~ {
     out = [];
     for t in tys { out = push(out, TE { node: 0 - 1, types: push([], t) }); };
@@ -560,70 +583,65 @@ fn emitTraitArgs(st: St, traitArgs: &List<Int>) -> St ~ {
     return St { nid: tail, ..st };
 };
 
-// A value of the wrapper type for a named function, borrowed as the bound's parameter asks (wrapperValue); st.te
-fn wrapperValue(st: St, wrapperName: &String, wrapperTy: Int, expected: Int) -> St ~ {
-    noNames = [];
-    noVals = [];
-    noProofs = [];
-    st = emitName(st, clone(wrapperName));
-    wnameNode = st.nid;
-    st = emitNames(st, &noNames);
-    fsNode = st.nid;
-    st = emit(st, AstNode::Args { value: AstArgs::End });
-    argsNode = st.nid;
-    st = emit(st, AstNode::Builtin { value: AstBuiltin::Ctor { n: wnameNode, args: argsNode, fs: fsNode } });
-    bNode = st.nid;
-    st = emit(st, AstNode::Body { value: AstBody::BuiltinFunct { b: bNode } });
-    bodyNode = st.nid;
-    st = emitNames(st, &noNames);
-    psNode = st.nid;
-    st = emitValidations(st, &noVals);
-    insNode = st.nid;
-    st = emitValidations(st, &noVals);
-    outsNode = st.nid;
-    st = emitProofs(st, &noProofs);
-    exportsNode = st.nid;
-    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: psNode, ins: insNode, outs: outsNode, body: bodyNode, exports: exportsNode } });
-    st = emitVal(st, st.nid);
-    functNode = st.nid;
+fn wrapperValue(st: St, wrapperName: &String, wrapperTy: Int, expected: Int, captures: &List<TE>, fields: &List<String>) -> St ~ {
     noArgs = [];
-    st = emitCall(st, functNode, &noArgs);
-    callNode = st.nid;
+    st = emitCtorValue(st, clone(wrapperName), &noArgs, fields);
+    st = emitVal(st, st.nid);
+    fieldNodes = nodesOf(captures);
+    st = emitCall(st, st.nid, &fieldNodes);
+    st = typed(st, st.nid, wrapperTy, captures);
+    value = clone(st.te);
     st = zonk(st, expected);
     ek = kindOf(st, st.ty);
     if ek = 10 || ek = 11 {
         key = "BorrowOf";
         if ek = 11 { key = "BorrowMutOf"; };
-        borrowArgs = push([], callNode);
+        borrowArgs = push([], value.node);
         st = emitBuiltinCall(st, key, &borrowArgs);
         borrowNode = st.nid;
         st = wrapTy(st, ek, wrapperTy);
-        return St { ok: true, te: TE { node: borrowNode, types: push(push([], st.ty), wrapperTy) }, ..st };
+        values = push([], value);
+        return typed(St { ok: true, ..st }, borrowNode, st.ty, &values);
     };
-    return St { ok: true, te: TE { node: callNode, types: push([], wrapperTy) }, ..st };
+    return St { ok: true, te: value, ..st };
 };
 
-// A named function given for a function-trait bound is wrapped in a struct with no fields that implements the
-// minted trait, its call calling the function itself (wrapNamedFnArg); st.te the argument to give, st.ok whether
-// it was wrapped (anything else keeps the ordinary bound check and its error)
-fn wrapNamedFnArg(st: St, tm: &Template, b: &BoundInfo, expected: Int, argTE: TE) -> St ~ {
+struct ClosureCap { name: String, ty: Int, field: Int, updated: Bool, moved: Bool, linear: Bool };
+
+fn wrapFnArg(st: St, b: &BoundInfo, expected: Int, argTE: TE) -> St ~ {
+    st = zonk(st, teHead(&argTE));
+    valueTy = st.ty;
+    value = tyAt(&st, valueTy);
+    if value.kind != 14 { return St { ok: false, ..st }; };
     ex = exprOf(&st, argTE.node);
-    if !(ex is AstExpression::Var) { return St { ok: false, ..st }; };
-    fnName = nameText(&st.nodes, (ex as AstExpression::Var).n);
-    if !HashMap::contains(&st.fns, &fnName) { return St { ok: false, ..st }; };
+    fnName = "";
+    if ex is AstExpression::Var { fnName = nameText(&st.nodes, (ex as AstExpression::Var).n); };
     inScopeTy = scopeLookup(&st, &fnName);
-    if inScopeTy >= 0 && (inScopeTy != HashMap::lookup(&st.fns, &fnName, 0 - 1) || size(st.current.bytes) > 0) { return St { ok: false, ..st }; };
-    if HashMap::contains(&st.templates, &fnName) { return St { ok: false, ..st }; };
-    st = lookupVar(st, &fnName);
-    if st.status != 0 { return St { ok: false, status: 0, msg: "", ..st }; };
-    st = zonk(st, st.ty);
-    if kindOf(st, st.ty) = 13 { return St { ok: false, ..st }; };
-    rec = namedFnRecord(&st, &fnName);
-    if !rec.ok { return St { ok: false, ..st }; };
-    st = fnSigOf(st, rec.ps, rec.sig);
-    if st.status != 0 { return St { ok: false, status: 0, msg: "", ..st }; };
-    namedFs = clone(st.fnSig);
-    if size(namedFs.sizes) > 0 || size(namedFs.types) > 0 || size(namedFs.writes) > 0 || size(namedFs.froms) > 0 { return St { ok: false, ..st }; };
+    direct = HashMap::contains(&st.fns, &fnName) && (inScopeTy < 0 || (size(st.current.bytes) = 0 && inScopeTy = HashMap::lookup(&st.fns, &fnName, 0 - 1)));
+    rec = nativeFn(&st.nodes, 0 - 1);
+    valuePtys = argsOfFn(&value);
+    valueRty = nth(&value.args, size(value.args) - 1);
+    sourceParams = [];
+    if direct {
+        if st.defChecking || HashMap::contains(&st.templates, &fnName) { return St { ok: false, ..st }; };
+        rec = directFnArgRecord(&st, &fnName);
+        if !rec.ok { return St { ok: false, ..st }; };
+        st = fnSigOf(st, rec.ps, rec.sig);
+        if st.status != 0 { return St { ok: false, status: 0, msg: "", ..st }; };
+        namedFs = clone(st.fnSig);
+        if size(namedFs.sizes) > 0 || size(namedFs.types) > 0 || size(namedFs.writes) > 0 || size(namedFs.froms) > 0 { return St { ok: false, ..st }; };
+        valuePtys = namedFs.ptys;
+        valueRty = namedFs.rty;
+        sourceParams = namedFs.params;
+    } else {
+        if st.defChecking || mentionsParameter(&st, valueTy) || closureHasUnknown(&st, valueTy) { return typeError(st, "adapting a function value to a function trait requires a concrete signature outside a bounded function body"); };
+        for t in &valuePtys {
+            if kindOf(&st, t) = 11 { return typeError(st, "a function value with an update parameter cannot satisfy a function-trait bound"); };
+        };
+        st = holdsRef(st, valueRty);
+        if st.status != 0 { return st; };
+        if st.ok { return typeError(st, "a function value returning a reference cannot satisfy a function-trait bound"); };
+    };
     traitFnsList = HashMap::lookup(&st.traitFns, &b.n, []);
     tfAt = traitFnNamed(st, &traitFnsList, "call");
     if tfAt < 0 { return St { ok: false, ..st }; };
@@ -632,18 +650,18 @@ fn wrapNamedFnArg(st: St, tm: &Template, b: &BoundInfo, expected: Int, argTE: TE
     st = fnSigOf(st, tf.ps, tf.sig);
     if st.status != 0 { return St { ok: false, status: 0, msg: "", ..st }; };
     callFs = clone(st.fnSig);
-    if size(namedFs.ptys) + 1 != size(callFs.ptys) { return St { ok: false, ..st }; };
+    if size(valuePtys) + 1 != size(callFs.ptys) { return St { ok: false, ..st }; };
     argNames = [];
     argVals = [];
     j = 1;
-    while j < size(callFs.ptys) [{ affirm j >= 1; affirm j <= size(callFs.ptys); affirm j - 1 <= size(namedFs.ptys); }] shrinks size(callFs.ptys) - j {
-        st = matchTraitArg(st, &traitParams, get(callFs.ptys, j), get(namedFs.ptys, j - 1), argNames, argVals);
+    while j < size(callFs.ptys) [{ affirm j >= 1; affirm j <= size(callFs.ptys); affirm j - 1 <= size(valuePtys); }] shrinks size(callFs.ptys) - j {
+        st = matchTraitArg(st, &traitParams, get(callFs.ptys, j), get(valuePtys, j - 1), argNames, argVals);
         if !st.ok { return St { ok: false, status: 0, msg: "", ..st }; };
         argNames = clone(st.names);
         argVals = typesHeads(&st.tes);
         j = j + 1;
     };
-    st = matchTraitArg(st, &traitParams, callFs.rty, namedFs.rty, argNames, argVals);
+    st = matchTraitArg(st, &traitParams, callFs.rty, valueRty, argNames, argVals);
     if !st.ok { return St { ok: false, status: 0, msg: "", ..st }; };
     argNames = clone(st.names);
     argVals = typesHeads(&st.tes);
@@ -653,15 +671,27 @@ fn wrapNamedFnArg(st: St, tm: &Template, b: &BoundInfo, expected: Int, argTE: TE
         if at < 0 || at >= size(argVals) { return St { ok: false, ..st }; };
         traitArgs = push(traitArgs, get(argVals, at));
     };
-    wrapperName = catStrings(catStrings(catStrings(clone(fnName), "$fn$"), clone(b.n)), "");
-    for t in &traitArgs { wrapperName = catStrings(catStrings(wrapperName, "$a"), render(st, t)); };
+    wrapperName = "";
+    fieldNames = [];
+    captures = [];
+    if direct {
+        wrapperName = catStrings(catStrings(clone(fnName), "$fn$"), clone(b.n));
+        for t in &traitArgs { wrapperName = catStrings(catStrings(wrapperName, "$a"), render(st, t)); };
+    } else {
+        wrapperName = catStrings(catStrings(catStrings("$fnvalue$", &st.unitKey), "$"), intText(st.next));
+        st = St { next: st.next + 1, ..st };
+        fieldNames = push([], "$target");
+        captures = push([], argTE);
+    };
     st = namedTy(st, clone(wrapperName), []);
     wrapperTy = st.ty;
     if !HashSet::contains(&st.impls, pairKey(&b.n, &wrapperName)) {
-        // (the signature the trait gives the wrapper's call, with Self the wrapper and its parameters the function's)
-        wrapperParams = [];
-        if size(callFs.params) > 0 { wrapperParams = push(wrapperParams, clone(get(callFs.params, 0))); };
-        for p in &namedFs.params { wrapperParams = push(wrapperParams, clone(p)); };
+        wrapperParams = clone(callFs.params);
+        if direct {
+            wrapperParams = [];
+            if size(callFs.params) > 0 { wrapperParams = push(wrapperParams, clone(get(callFs.params, 0))); };
+            for p in &sourceParams { wrapperParams = push(wrapperParams, clone(p)); };
+        };
         wrapperPtys = [];
         i = 0;
         while i < size(callFs.ptys) [{ affirm i >= 0; affirm i <= size(callFs.ptys); }] shrinks size(callFs.ptys) - i {
@@ -673,11 +703,6 @@ fn wrapNamedFnArg(st: St, tm: &Template, b: &BoundInfo, expected: Int, argTE: TE
         st = substSelfAs(st, &wrapperName, wrapperTy, callFs.rty);
         st = substTraitArgs(st, &traitParams, &traitArgs, st.ty);
         wrapperFs = FnSig { params: wrapperParams, ptys: clone(wrapperPtys), rty: st.ty, sizes: [], types: [], writes: [], froms: [] };
-        outerOuts = clone(st.outs);
-        outerTe = clone(st.te);
-        outerTes = clone(st.tes);
-        outerCurrent = clone(st.current);
-        outerNames = clone(st.names);
         noNames = [];
         noVals = [];
         noProofs = [];
@@ -687,23 +712,38 @@ fn wrapNamedFnArg(st: St, tm: &Template, b: &BoundInfo, expected: Int, argTE: TE
         structParams = st.nid;
         st = emit(st, AstNode::Fields { value: AstFields::End });
         structFields = st.nid;
+        if !direct {
+            st = emitName(st, "$target");
+            targetName = st.nid;
+            st = emitType(st, valueTy);
+            st = emit(st, AstNode::Field { value: AstField { n: targetName, ty: st.nid } });
+            st = emit(st, AstNode::Fields { value: AstFields::Cons { head: st.nid, tail: structFields } });
+            structFields = st.nid;
+        };
         st = emitValidations(st, &noVals);
         st = emit(st, AstNode::Statement { value: AstStatement::StructDef { n: structName, ps: structParams, fs: structFields, vs: st.nid } });
-        structStmt = st.nid;
-        st = checkItem(st, true, structStmt);
+        st = closureAbsorb(st, st.nid);
         if st.status != 0 { return st; };
-        genOut = clone(st.genericOut);
-        genTypes = clone(st.genericTypes);
-        for o in &st.outs { genOut = push(genOut, o); };
-        for ty in &st.te.types { genTypes = push(genTypes, ty); };
-        st = St { genericOut: genOut, genericTypes: genTypes, ..st };
-        // (the wrapper's call, whose body is the one direct call of the named function)
-        st = emitVar(st, clone(fnName));
+        term = rec.term;
+        ins = rec.ins;
+        outs = rec.outs;
+        if direct {
+            st = emitVar(st, clone(fnName));
+        } else {
+            st = emit(st, AstNode::OptTermination { value: AstOptTermination::NoTermination });
+            term = st.nid;
+            ins = tf.ins;
+            outs = tf.outs;
+            target = ClosureCap { name: "$target", ty: valueTy, field: valueTy, updated: false, moved: false, linear: false };
+            st = closureCaptureExpr(st, &target, true);
+        };
         callFunct = st.nid;
         callArgs = [];
-        for p in &namedFs.params {
-            st = emitVar(st, clone(p));
+        at = 1;
+        while at < size(wrapperFs.params) [{ affirm at >= 1; }] shrinks size(wrapperFs.params) - at {
+            st = emitVar(st, clone(get(wrapperFs.params, at)));
             callArgs = push(callArgs, st.nid);
+            at = at + 1;
         };
         st = emitCall(st, callFunct, &callArgs);
         st = emit(st, AstNode::Statement { value: AstStatement::Return { e: st.nid } });
@@ -712,13 +752,13 @@ fn wrapNamedFnArg(st: St, tm: &Template, b: &BoundInfo, expected: Int, argTE: TE
         bodyNode = st.nid;
         st = emitSignature(st, &wrapperFs);
         sigNode = st.nid;
-        st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: sigNode, term: rec.term, stmts: bodyNode } });
+        st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: sigNode, term: term, stmts: bodyNode } });
         fnBody = st.nid;
         st = emitNames(st, &wrapperFs.params);
         fnParams = st.nid;
         st = emitProofs(st, &noProofs);
         fnExports = st.nid;
-        st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: fnParams, ins: rec.ins, outs: rec.outs, body: fnBody, exports: fnExports } });
+        st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: fnParams, ins: ins, outs: outs, body: fnBody, exports: fnExports } });
         fnValue = st.nid;
         st = emitVal(st, fnValue);
         fnExpr = st.nid;
@@ -741,21 +781,14 @@ fn wrapNamedFnArg(st: St, tm: &Template, b: &BoundInfo, expected: Int, argTE: TE
         implTy = st.nid;
         st = emit(st, AstNode::Bounds { value: AstBounds::End });
         st = emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: traitNode, args: implArgsNode, n: implName, ty: implTy, bs: st.nid, xs: implFnsNode } });
-        implStmt = st.nid;
-        st = checkItem(st, true, implStmt);
+        st = closureAbsorb(st, st.nid);
         if st.status != 0 { return st; };
-        genOut = clone(st.genericOut);
-        genTypes = clone(st.genericTypes);
-        for o in &st.outs { genOut = push(genOut, o); };
-        for ty in &st.te.types { genTypes = push(genTypes, ty); };
-        st = St { genericOut: genOut, genericTypes: genTypes, outs: outerOuts, te: outerTe, tes: outerTes, current: outerCurrent, names: outerNames, ..st };
     };
-    return wrapperValue(st, &wrapperName, wrapperTy, expected);
+    return wrapperValue(st, &wrapperName, wrapperTy, expected, &captures, &fieldNames);
 };
 
-fn wrapNamedArgs(st: St, tm: &Template, pts: &List<Int>, inferred: &List<TE>) -> St ~ {
+fn wrapFnArgs(st: St, tm: &Template, pts: &List<Int>, inferred: &List<TE>) -> St ~ {
     args = clone(inferred);
-    if st.defChecking { return St { tes: args, ..st }; };
     for b in &tm.bounds {
         if isFnTraitName(&b.n) && !isPackTypeName(&b.p) {
             found = 0 - 1;
@@ -767,7 +800,7 @@ fn wrapNamedArgs(st: St, tm: &Template, pts: &List<Int>, inferred: &List<TE>) ->
                 i = i + 1;
             };
             if found >= 0 && found < size(args) && found < size(pts) {
-                st = wrapNamedFnArg(st, tm, b, get(pts, found), clone(get(args, found)));
+                st = wrapFnArg(st, b, get(pts, found), clone(get(args, found)));
                 if st.status != 0 { return st; };
                 if st.ok { args = set(args, found, clone(st.te)); };
             };
@@ -778,8 +811,6 @@ fn wrapNamedArgs(st: St, tm: &Template, pts: &List<Int>, inferred: &List<TE>) ->
 
 // ---- closure expressions: a closure value the parser writes (a VFunct with a $closure marker in its exports) becomes
 // a struct of its captures, a body function of that struct, and an impl of a minted Fn trait per bound it meets
-
-struct ClosureCap { name: String, ty: Int, field: Int, updated: Bool, moved: Bool, linear: Bool };
 
 // A function defined at the top is called by name from a closure body, as from any body, and is not captured
 fn namesTopFunction(st: &St, name: &String) -> Bool ~ {
@@ -1931,7 +1962,7 @@ fn templateCall(st: St, name: String, tm0: Template, inferred: &List<TE>) -> St 
     if size(pts) - size(tm.sizes) != size(inferred) {
         return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " takes "), intText(size(pts) - size(tm.sizes))), " arguments, got "), intText(size(inferred))));
     };
-    st = wrapNamedArgs(st, &tm, &pts, inferred);
+    st = wrapFnArgs(st, &tm, &pts, inferred);
     if st.status != 0 { return st; };
     givenArgs = clone(st.tes);
     st = templateArguments(st, &name, &pts, &givenArgs);

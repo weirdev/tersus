@@ -35,12 +35,20 @@ fn lowerOperandWith(ls: LowSt, src: &List<AstNode>, e: Int, ty: Int) -> LowSt ~ 
 fn varOperand(ls: LowSt, src: &List<AstNode>, name: String, ty: Int) -> LowSt ~ {
     found = lookupBinding(&ls, &name);
     if found.found {
-        if found.b.isLocal { return LowSt { op: copyOp(found.b.local), ty: ty, ..ls }; };
-        return LowSt { op: fnConst(&found.b.fname), ty: ty, ..ls };
+        if found.b.isLocal {
+            declared = tyOf(&ls, found.b.ty);
+            expected = tyOf(&ls, ty);
+            hasContract = (declared.kind = 14 && size(declared.name.bytes) > 0) || (expected.kind = 14 && size(expected.name.bytes) > 0);
+            if hasContract && declared.text != expected.text {
+                return lfail(ls, "A local function value cannot change its function contract or signature");
+            };
+            return LowSt { op: copyOp(found.b.local), ty: ty, ..ls };
+        };
+        return materializeFunction(ls, &found.b.fname, ty);
     };
     if HashMap::contains(&ls.globals, &name) {
         g = HashMap::lookup(&ls.globals, &name, "");
-        return LowSt { op: fnConst(&g), ty: ty, ..ls };
+        return materializeFunction(ls, &g, ty);
     };
     if HashMap::contains(&ls.std, &name) {
         b = HashMap::lookup(&ls.std, &name, 0 - 1);
@@ -54,8 +62,20 @@ fn valueOperand(ls: LowSt, src: &List<AstNode>, v: Int, ty: Int) -> LowSt ~ {
     b = lwBuiltinOfValue(src, v);
     if b >= 0 { return builtinFunction(ls, src, b, ty); };
     if valueAt(src, v) is AstValue::VFunct { return lfail(ls, "A function is defined by a statement, not written in an expression"); };
+    value = valueAt(src, v);
+    if value is AstValue::VFnRef {
+        return materializeFunction(ls, nameText(src, (value as AstValue::VFnRef).n), ty);
+    };
     ls = constantOf(ls, src, v);
     return LowSt { ty: ty, ..ls };
+};
+
+fn materializeFunction(ls: LowSt, name: &String, ty: Int) -> LowSt ~ {
+    ls = tempLocal(ls, ty);
+    local = ls.root;
+    rv = useRv(fnConst(name));
+    ls = emitAssign(ls, local, &rv);
+    return LowSt { op: copyOp(local), ty: ty, ..ls };
 };
 
 fn constantOf(ls: LowSt, src: &List<AstNode>, v: Int) -> LowSt ~ {
@@ -65,7 +85,7 @@ fn constantOf(ls: LowSt, src: &List<AstNode>, v: Int) -> LowSt ~ {
         AstValue::VBool { b: b } => { if b { return LowSt { op: constOp("bool true"), ..ls }; }; return LowSt { op: constOp("bool false"), ..ls }; },
         AstValue::VList { xs: xs } => { return listConstant(ls, src, xs); },
         AstValue::VData { n: n, xs: xs } => { return dataConstant(ls, src, nameText(src, n), xs); },
-        AstValue::VFnRef { n: n } => { return LowSt { op: fnConst(nameText(src, n)), ..ls }; },
+        AstValue::VFnRef { n: n } => { return lfail(ls, "A function is not an aggregate constant"); },
         AstValue::VFunct { ps: ps, ins: ins, outs: outs, body: body, exports: exports } => { return lfail(ls, "A function is not a constant"); },
     };
     return ls;
@@ -137,18 +157,24 @@ fn builtinFunction(ls: LowSt, src: &List<AstNode>, b: Int, ft: Int) -> LowSt ~ {
     ls = terminate(ls, returnTerm());
     ls = buildFunction(ls, src, 0 - 1, 0 - 1, 0 - 1, 0 - 1, [], [], [], []);
     Swapped { ls: back, b: done } = swapBuilder(ls, outer);
-    return LowSt { op: fnConst(&name), ty: ft, ..back };
+    return materializeFunction(back, &name, ft);
 };
 
 fn builtinParams(ls: LowSt, types: &List<Int>, n: Int) -> LowSt ~ {
     params = [];
+    borrowed = [];
+    mutBorrowed = [];
     i = 0;
     while i < n [{ affirm i >= 0; }] shrinks n - i {
-        ls = tempLocal(ls, intAt(types, i));
-        params = push(params, ls.root);
+        param = intAt(types, i);
+        ls = tempLocal(ls, unrefTy(&ls, param));
+        local = ls.root;
+        params = push(params, local);
+        if isRefTy(&ls, param) { borrowed = push(borrowed, local); };
+        if isMutRefTy(&ls, param) { mutBorrowed = push(mutBorrowed, local); };
         i = i + 1;
     };
-    return LowSt { bParams: params, ..ls };
+    return LowSt { bParams: params, bBorrowed: borrowed, bMutBorrowed: mutBorrowed, ..ls };
 };
 
 fn builtinLabel(bi: &Bi) -> String ~ {

@@ -9,7 +9,7 @@ import elaborate::libraries { Catalog, Hide, Lib, Probe, declaredNames, localNam
 import elaborate::decls { fileDeclarations };
 import elaborate::resolve { Decl, Imp, Line, Maps, PFile, Pkg, countAt, finishPackage, mapsFor, moduleKey, noPackage, readLine, startsWithByte, wordIs };
 import elaborate::rewrite { Prepared, prepareModule };
-import elaborate::out { emit, emitStatements, emitTypes, quotedName };
+import elaborate::out { emit, emitStatements, emitTypes, hexByte, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
 import elaborate::state { CtorInfo, FnSig, Generic, ImplArgs, St, TE, Template, indexIn, intText, noBoundedParts, notModelled, oneScope , protocolName };
@@ -26,7 +26,7 @@ import elaborate::lowerout { MirOut, lowerUnit, noMir };
 fn newState() -> St ~ {
     return St {
         nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0, localNames: HashMap::new(), rewrittenNodes: [], trialRound: false,
-        wireVersion: false, wireProtocols: HashMap::new(), wireOwnership: HashMap::new(),
+        wireVersion: false, wireProtocols: HashMap::new(), wireOwnership: HashMap::new(), unitKey: "",
         types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(),
         traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), traitSelf: [], inTrait: false, assoc: HashMap::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), ownerViews: [], logging: false, implDefined: [], ghostCache: HashMap::new(), refCache: HashMap::new(), storeCache: HashMap::new(), boundedParts: noBoundedParts(), big: [], undo: [], sizeUndo: [], templates: HashMap::new(), references: HashMap::new(), referenceList: [], boundStubs: HashMap::new(), boundStubSigs: [], builtinStubs: HashSet::new(), genericOut: [], genericTypes: [], fns: HashMap::new(), scopes: oneScope(),
         ret: 0 - 1, programReturn: 0 - 1, sizeScope: [], typeScope: [], readOnly: [], mutParams: [], writes: [], aliasNames: [], aliasPlaces: [], originNames: [], originRoots: [], refResultNames: [], refResultParams: [], refResultFroms: [], resultFrom: [], params: [], current: "", inGhost: false,
@@ -621,6 +621,15 @@ fn malformedAnswer() -> Answer ~ {
     return Answer { status: 0 - 1, msg: "", out: noProgram("elaborated"), iface: noProgram("interface"), facts: noProgram("ownership"), extracting: false, selected: [], storage: [], lowered: 0, mir: noMir("") };
 };
 
+fn generatedUnitKey(key: &String) -> String ~ {
+    bytes = [];
+    for b in &key.bytes {
+        c = toInt(b);
+        bytes = push(push(bytes, hexByte(c / 16)), hexByte(c % 16));
+    };
+    return String { bytes: bytes };
+};
+
 fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, AstProgram>) -> Answer ~ {
     st = newState();
     modKey = moduleKey(&unit.pkgName, &unit.modu, unit.hasModule);
@@ -642,7 +651,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     preparing = withLibraryImports(&pkg, &unit.stdPkg, &chosen, &modKey, &unit.pkgName, &program.nodes, &raw);
     prepared = preparedProgram(program, raw, &preparing, &modKey);
     stmts = prepared.stmts;
-    st = St { nodes: prepared.nodes, wireVersion: unit.wireVersion, wireProtocols: clone(unit.wireProtocols), storageCopies: unit.libExtract && (unit.pkgName = "std" || unit.pkgName = "tersuslib") && unit.hasModule && (unit.modu = "lists" || unit.modu = "box"), ..st };
+    st = St { nodes: prepared.nodes, unitKey: generatedUnitKey(&modKey), wireVersion: unit.wireVersion, wireProtocols: clone(unit.wireProtocols), storageCopies: unit.libExtract && (unit.pkgName = "std" || unit.pkgName = "tersuslib") && unit.hasModule && (unit.modu = "lists" || unit.modu = "box"), ..st };
     if unit.libExtract && unit.hasModule && (unit.pkgName = "std" || unit.pkgName = "tersuslib") && unit.modu = "prelude" {
         for s in &stmts {
             stmt = stmtOf(&st, s);

@@ -1,7 +1,7 @@
 import data::ast::ast { AstBody, AstExpression, AstName, AstNode, AstProof, AstSignature, AstValue };
 import data::codec::codec { Size, Type, sizeAt, typeAt, wordAt };
 import data::reader::reader { nameValue, nodeKind, nodeRefs };
-import elaborate::state { St, TE, Ty, addTy, arrayTy, boxTy, fnTy, listTy, namedTy, notModelled, nth, simpleTy, sizeConst, wordTy, wrapTy };
+import elaborate::state { St, TE, Ty, addTy, arrayTy, boxTy, fnContractSuffix, fnTy, fnTyWithContract, listTy, namedTy, notModelled, nth, simpleTy, sizeConst, wordTy, wrapTy };
 
 // The elements of a list record of an arena, in order
 fn listItems(nodes: &List<AstNode>, start: Int) -> List<Int> ~ {
@@ -85,7 +85,8 @@ fn fromCodec(st: St, t: &Type) -> St ~ {
             for a in args { st = fromCodec(st, a); params = push(params, st.ty); };
             inner = Box::unbox(clone(r));
             st = fromCodec(st, &inner);
-            return fnTy(st, params, st.ty);
+            c = Box::unbox(clone(contract));
+            return fnTyWithContract(st, params, st.ty, fnContractSuffix(&c));
         },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
             args = [];
