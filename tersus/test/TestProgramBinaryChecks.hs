@@ -55,6 +55,8 @@ binaryChecks dir = do
         rejected = either (const True) (const False) . decodeEntry key
     _ <- evaluate (force decoded)
     assert "rich roundtrip structural equality" (decoded == richProgram)
+    assert "an entry of the limit's length is written" (encodeEntryUpTo (BL.length bytes) key richProgram == Just bytes)
+    assert "an entry a byte over the limit is not" (encodeEntryUpTo (BL.length bytes - 1) key richProgram == Nothing)
     assert "rich roundtrip full Show equality (Value Eq ignores builtin contracts)" (show decoded == show richProgram)
     let unusual = richProgram{M.progMain = (M.progMain richProgram){M.fnName = map chr [0,127,255,0xd7ff,0xd800,0xdfff,0x10ffff]}}
         unusualDecoded = either error id (decodeEntry key (encodeEntry key unusual))

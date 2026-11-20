@@ -3,7 +3,7 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 module TestProgramBinary
-    ( encodeEntry, decodeEntry, readEntryBytes, maxEntryBytes, codecVersion ) where
+    ( encodeEntry, encodeEntryWithin, encodeEntryUpTo, decodeEntry, readEntryBytes, maxEntryBytes, codecVersion ) where
 
 import Control.DeepSeq (NFData)
 import Data.Binary (Binary, encode)
@@ -147,15 +147,29 @@ checksum :: BL.ByteString -> Word64
 checksum = BL.foldl' (\h b -> (h `xor` fromIntegral b) * 1099511628211) 14695981039346656037
 
 encodeEntry :: String -> M.Program -> BL.ByteString
-encodeEntry key program = runPut $ do
+encodeEntry key program = entryOf key (encode program)
+
+-- The entry, unless it would exceed maxEntryBytes; the program's encoding is cut short as soon as it does, where
+-- the entry's length and checksum would have needed all of it
+encodeEntryWithin :: String -> M.Program -> Maybe BL.ByteString
+encodeEntryWithin = encodeEntryUpTo maxEntryBytes
+
+encodeEntryUpTo :: Int64 -> String -> M.Program -> Maybe BL.ByteString
+encodeEntryUpTo limit key program
+    | BL.length (BL.take (room + 1) payload) > room = Nothing
+    | otherwise = Just (entryOf key payload)
+  where
+    payload = encode program
+    room = limit - fromIntegral (BS.length header + length key + 17)
+
+entryOf :: String -> BL.ByteString -> BL.ByteString
+entryOf key payload = runPut $ do
     putByteString header
     putByteString (BC.pack key)
     putLazyByteString (BL.singleton 10)
     putWord64be (fromIntegral (BL.length payload))
     putWord64be (checksum payload)
     putLazyByteString payload
-  where
-    payload = encode program
 
 decodeEntry :: String -> BL.ByteString -> Either String M.Program
 decodeEntry key bytes
