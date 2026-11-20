@@ -51,7 +51,9 @@ fn appendNumericRecords(out: List<List<Token>>, rows: &List<FullRecord>) -> List
 };
 fn programLines(p: &FullProgram) -> List<List<Token>> ~ {
     out = push([], push(push([], word("tersus-mir")), word("3")));
-    out = appendRecords(out, &p.types); out = appendRecords(out, &p.generics); out = appendRecords(out, &p.invariants); out = appendRecords(out, &p.bounded); out = appendRecords(out, &p.instances);
+    out = appendRecords(out, &p.types); out = appendRecords(out, &p.generics); out = appendRecords(out, &p.invariants); out = appendRecords(out, &p.bounded); out = appendRecords(out, &p.boundedFacts); out = appendRecords(out, &p.instances);
+    out = appendRecords(out, &p.protocols);
+    if p.checked { out = push(out, push(push([], word("ownership")), intToken(size(p.ownership)))); out = appendRecords(out, &p.ownership); };
     for f in sortFunctions(clone(p.functions)) { out = functionLines(out, &f, false); };
     out = functionLines(out, &p.entry, true);
     for l in &p.trailer { out = push(out, clone(l)); };

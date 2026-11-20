@@ -40,6 +40,8 @@ fn runLink(lines: &List<List<Token>>) -> Bool ~ {
     p = fullAtForLink(takeRows(lines, 2, size(lines)), wordIs(&command, 0, "environments"));
     if !p.ok { return linkError("the linking request contains unreadable MIR3"); };
     program = p.value;
+    // (a type's checked facts follow the types pruning keeps: not pruned yet, so refused)
+    if wordIs(&command, 0, "prune") && (program.checked || size(program.boundedFacts) > 0) { return linkError("link error: checked ownership records are not pruned yet"); };
     if wordIs(&command, 0, "prune") {
         if boxedClosureInRows(lines) { return linkError("cannot prune MIR3 with boxed closure types"); };
         program = pruneProgram(program);

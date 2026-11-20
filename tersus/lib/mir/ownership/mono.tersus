@@ -39,6 +39,8 @@ fn runMonoOwnership(lines: &List<List<Token>>) -> Bool ~ {
     for i in 1..size(lines) { input = push(input, clone(get(lines, i))); };
     parsed = fullAt(&input);
     if !parsed.ok { "the input is not full MIR version 3\n".printError(); return false; };
+    // (the copies' checked facts are the instances': not specialized yet, so refused)
+    if parsed.value.checked || size(parsed.value.boundedFacts) > 0 { "checked ownership records are not specialized yet\n".printError(); return false; };
     specialized = monomorphize(parsed.value);
     receipt = outputFull(&specialized);
     emitFull(&receipt);
