@@ -178,7 +178,8 @@ fn withoutImported(base: &Decls, imported: &Decls, parsed: Decls, own: &Decls) -
 // ---- ParsedFile.declsFromStatements ----
 
 fn hasByte(text: &String, c: Int) -> Bool ~ {
-    return any(&text.bytes, fn(byte: Byte) => toInt(byte) = c);
+    for b in &text.bytes { if toInt(b) = c { return true; }; };
+    return false;
 };
 
 fn fromColon(text: &String) -> String ~ {

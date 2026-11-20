@@ -930,7 +930,12 @@ fn undoTry(st: St, next: Int) -> St ~ {
 fn endTry(st: St) -> St ~ { return St { logging: false, undo: [], sizeUndo: [], ..st }; };
 
 fn indexOfByteIn(text: &String, b: Int) -> Int ~ {
-    return find(&text.bytes, fn(byte: Byte) => toInt(byte) = b);
+    i = 0;
+    for c in &text.bytes {
+        if toInt(c) = b { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
 };
 
 // What a contract, a validation statement or a define that forwards the pack is told
