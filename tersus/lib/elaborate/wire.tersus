@@ -303,7 +303,8 @@ fn wireInstantiations(st: St) -> St ~ {
                 if !wireGround(&st, st.ty) { ground = false; };
                 values = push(values, st.ty);
             };
-            if ground && size(range) = 2 && size(values) = size(c.sizeNames) + size(c.typeNames) {
+            // (a body range starts at a type of the arena: one that does not is not a body, and makes no copies)
+            if ground && size(range) = 2 && get(range, 0) >= 0 && size(values) = size(c.sizeNames) + size(c.typeNames) {
                 texts = [];
                 for v in &values { texts = push(texts, typeTokenText(&st, v)); };
                 key = catStrings(catStrings(clone(c.callee), " "), joinWith(&texts, ";"));

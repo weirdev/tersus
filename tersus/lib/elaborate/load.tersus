@@ -1110,7 +1110,7 @@ fn markerConfig(marker: &String, text: &String) -> Config ~ {
                 if size(segment.bytes) = 0 { return configError(marker, &t, false, "expecting the name of a module, file or declaration"); };
                 path = push(path, clone(segment));
                 t = advance(t, size(segment.bytes));
-                if byteAtCursor(&t) = 58 && t.pos + 1 < size(t.text.bytes) && toInt(get(&t.text.bytes, t.pos + 1)) = 58 { t = advance(t, 2); } else { scanningName = false; };
+                if byteAtCursor(&t) = 58 && t.pos >= 0 && t.pos + 1 < size(t.text.bytes) && toInt(get(&t.text.bytes, t.pos + 1)) = 58 { t = advance(t, 2); } else { scanningName = false; };
             };
             if size(path) < 2 || size(path) > 3 { return configError(marker, &start, false, "a binding names module::Name, module::file::Name or file::Name"); };
             bindings = push(bindings, MarkerBinding { role: word, path: path, rooted: false });
@@ -1130,6 +1130,7 @@ fn wordAtCursor(t: &Cursor) -> String ~ {
     if !((first >= 65 && first <= 90) || (first >= 97 && first <= 122) || first = 95) { return ""; };
     out = [];
     p = t.pos;
+    if p < 0 { return ""; };
     while p >= 0 && p < size(t.text.bytes) && identByte(toInt(get(&t.text.bytes, p))) [{ affirm p >= 0; }] shrinks size(t.text.bytes) - p {
         out = push(out, get(&t.text.bytes, p));
         p = p + 1;
