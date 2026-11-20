@@ -12,7 +12,8 @@ import Data.Map.Strict (Map)
 
 import Mir
 import Pretty (renderType)
-import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName, mentionsParameter, substitute)
+import Types (Arg (..), Name, Size (..), Type (..), Variable, instanceName, mentionsParameter, substitute)
+import TestStorage (pattern TList, pattern TBox)
 
 -- A function with type parameters (`fn first<T>(a: &List<T>) -> T`) is made the same way, a copy for each list of types. A call does not
 -- say them: they are what the types of the arguments and of the local that gets the result make the types of the parameters and of the
@@ -90,7 +91,7 @@ monoWith finish completeTypes program
         tys <- mapM (`lookup` bindings) (fnTypeParams f)
         Just (name, tys, [])
     dropName (name, _, _) f
-        | isDropFunction name, self : _ <- fnParams f, Just (TNamed base args) <- localType <$> Map.lookup self (fnLocals f) = f{fnName = "<" ++ instanceName base args ++ " as Drop>::drop"}
+        | isDropName name, self : _ <- fnParams f, Just (TNamed base args) <- localType <$> Map.lookup self (fnLocals f) = f{fnName = "<" ++ instanceName base args ++ " as Drop>::drop"}
         | otherwise = f
 
 -- The copies to make, with those that the copies need
@@ -276,3 +277,7 @@ namedTypesByName program = Map.fromList [(instanceName b a, TNamed b a) | ty <- 
         TFn as r -> concatMap subs (r : as)
         TForall _ _ u -> subs u
         _ -> []
+
+-- (master's name of a drop, which this oracle selects drops by)
+isDropName :: Name -> Bool
+isDropName name = let suffix = " as Drop>::drop" in reverse suffix == take (length suffix) (reverse name)

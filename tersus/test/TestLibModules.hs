@@ -248,9 +248,9 @@ testNativeStorageModules = TestList "testNativeStorageModules"
     , -- (native code is made of what the program reaches: std's core, which every program is given, is pruned first)
       testCase "native lowering is a no-op without storage and does not force helpers" $ case Compile.lowerSource True "return 7;" of
         Error e -> Just e
-        Ok p -> case lowerLists (error "unused helper graph forced") (pruneProgram p) of
+        Ok p -> case pruneProgram p `bindResult` lowerLists (error "unused helper graph forced") of
             Error e -> Just e
-            Ok native -> testAssertEq native (pruneProgram p)
+            Ok native -> testAssertEq (Ok native) (pruneProgram p)
     , testCase "a list selects only list helpers" (selectedHelpers "return [1];" "lists" "box")
     , testCase "a scalar Box selects only Box helpers" (selectedHelpers "return Box::unbox(Box::new(3));" "box" "lists")
     -- (a Box of an array is a List in native code: the operation calls no scalar Box helper, whatever helper definitions the
@@ -290,7 +290,7 @@ testNativeStorageModules = TestList "testNativeStorageModules"
                 -- (the raw program's generic Box still has its ghost permission, which the helpers' erased one does not)
                 Error e | not ((box ++ "<'T> is defined by both") `isInfixOf` e && ghostBox p) -> Just e
                 -- (native lowering is given the program pruned to what it reaches, as nativeProgramUsing gives it)
-                Error _ -> case lowerLists (Ok units) (pruneProgram p) of
+                Error _ -> case pruneProgram p `bindResult` lowerLists (Ok units) of
                     Error e -> Just e
                     -- (where the generic Box is the helpers' erased one: a Box of an array is a list in native code)
                     Ok native -> testAssertEq (Map.lookup (box ++ "<'T>") (M.progTypes native)) (Just (M.StructDecl [("addr", TAddr (TParam "T"))]))
@@ -324,7 +324,7 @@ testNativeStorageModules = TestList "testNativeStorageModules"
                 , libPrograms = foldr (\(Modules.ModuleId _ (Just name), _, p) -> Map.insert name p) (libPrograms pkg) native
                 }
     lowerNative source = erasedHelpers `bindResult` \units ->
-        Compile.lowerSource False source `bindResult` (lowerLists (Ok units) . pruneProgram)
+        Compile.lowerSource False source `bindResult` pruneProgram `bindResult` lowerLists (Ok units)
     erasedHelpers = nativeStorage `bindResult` \(units, _) ->
         flatResultMap (\(modu, p) -> mapResult ((,) modu) (eraseStorageHelper p)) units
     -- (the helpers of a module, by their canonical names)
@@ -342,7 +342,7 @@ testNativeStorageModules = TestList "testNativeStorageModules"
         Left e -> Just e
         Right (Modules.PackageResult pkg) -> case Package.compileModules (Modules.packageSnapshot pkg) `bindResult` Package.lowerCompiledPackage of
             Error e -> Just e
-            Ok raw -> case (erasedHelpers `bindResult` \units -> expandRefWrites (pruneProgram raw) `bindResult` lowerLists (Ok units)) `bindResult` insertOwnership of
+            Ok raw -> case (erasedHelpers `bindResult` \units -> (pruneProgram raw `bindResult` expandRefWrites) `bindResult` lowerLists (Ok units)) `bindResult` insertOwnership of
                 Error e -> Just e
                 Ok owned -> case readProgram (writeProgram owned) of
                     Error e -> Just e

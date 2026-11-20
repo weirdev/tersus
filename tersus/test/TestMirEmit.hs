@@ -17,13 +17,12 @@ import qualified TersusParser
 
 import Cli (World (..), noWorld, runProgramIn)
 import Compile (lowerSource)
-import MirHousekeeping (insertOwnership)
+import MirHousekeeping (insertOwnership, monomorphizeWith, ownershipTool)
 import qualified MirEval as Eval
 import Types (OwnershipFacts (..), Type (..))
 import TestStorage (pattern TList, pattern TBox)
 import Mir
 import MirData (readProgram, writeOwnedProgram, writeProgram)
-import MirMono (monomorphize)
 import TestHarness
 import TestMirReader (programExecutable)
 import TestNative (clangAvailable, nativeExamples, runExecutableBytes, validatedPrograms)
@@ -199,15 +198,15 @@ checkedRecords =
                 pure (testAssertTrue (("storage " ++ quoted stdList) `isInfixOf` text) <> emitted given <> testAssertEq (back checked) given <> testAssertTrue (back unnamed /= given))
     , TestCase "an instance without facts whose declaration is only Copy is refused before the ownership pass" $ withFacts $ \program facts ->
         let changed = program{progOwnership = Just (Map.delete "W<Int>" (Map.insert "W" (OwnershipFacts (Just "std$core$ownership$Copy") Nothing Nothing Nothing) facts))}
-         in testAssertEq (uncoveredInstances (monomorphize changed)) ["W<Int>"]
+         in testAssertEq (mapResult uncoveredInstances (monomorphized changed)) (Ok ["W<Int>"])
                 <> refusedWith "Type error: W<Int> has no checked ownership facts, and its declaration's facts may not apply to it" (insertOwnership changed)
     , TestCase "a declared type without facts is refused by the owned MIR's writer" $ withFacts $ \program facts ->
         let changed = program{progOwnership = Just (Map.delete "P" facts)}
-         in refusedWith "Type error: P has no checked ownership facts" (writeOwnedProgram (monomorphize changed))
+         in refusedWith "Type error: P has no checked ownership facts" (monomorphized changed `bindResult` writeOwnedProgram)
                 <> refusedWith "Type error: P has no checked ownership facts" (insertOwnership changed)
     , TestCase "a checked Clone whose function the program does not have is refused, not written as none" $ withFacts $ \program facts ->
         let changed = program{progOwnership = Just (Map.adjust (\f -> f{ownershipClone = Just ("std$core$ownership$Clone", "absent")}) "P" facts)}
-         in refusedWith "Type error: the checked Clone of P is absent, which the program does not have" (writeOwnedProgram (monomorphize changed))
+         in refusedWith "Type error: the checked Clone of P is absent, which the program does not have" (monomorphized changed `bindResult` writeOwnedProgram)
                 <> refusedWith "Type error: the checked Clone of P is absent, which the program does not have" (insertOwnership changed)
     , TestCase "a storage list of one address field is refused as it is read" $ storageRefusal
         (replace "struct \"app$Seq<Int>\" 3 \"addr\" addr int \"len\" int \"cap\" int" "struct \"app$Seq<Int>\" 1 \"addr\" addr int")
@@ -219,6 +218,8 @@ checkedRecords =
   where
     source = "struct V { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl V { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for V { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; v = V::new(3); return v.n;"
     -- (a validated program whose declared P has a checked Clone and whose W<Int> is an instance, and its facts)
+    -- (native code's copies, as the native pass makes them)
+    monomorphized p = unsafePerformIO (monomorphizeWith ownershipTool p)
     withFacts use = do
         validated <- validatedOnce "struct P { a: Int };\nimpl Clone for P { };\nstruct W<T> { v: T };\np = P { a: 1 };\nq = clone(p);\nw = W<Int> { v: q.a };\nreturn w.v;"
         pure $ case validated of
