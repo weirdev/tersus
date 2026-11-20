@@ -108,7 +108,11 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     data (`MirHousekeeping`); they are the production path.
     `mir/ownership/` holds the ownership and reference-write passes; the
     emitter's executable runs them when its input starts with `pass ownership`
-    or `pass expand`. The emitter's declaration-only `types.tersus`,
+    or `pass expand`. `mir/mono/` specializes native generic functions over
+    the complete `mir/full/` MIR3 codec; the emitter dispatches `pass mono`.
+    The native seed contains this dispatcher; validation specialization in
+    `MirMono.monomorphizeForValidation` retains contracts and ghosts in Haskell.
+    The emitter's declaration-only `types.tersus`,
     `values.tersus`, `operations.tersus`, `functions.tersus` and
     `helpers.tersus` files are siblings of `emit.tersus` in one `mir::emit`
     module; only `emit.tersus` runs. `data/` holds the shared token, type and
@@ -125,7 +129,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   `testExamples` (see Testing Guidelines).
 - `tersus/bootstrap/emitter.sha256`: the SHA-256 pin of the seed IR the Tersus
   emitter is bootstrapped from; the seed itself is a GitHub release asset
-  (see Build, Test, and Development Commands).
+  (see Build, Test, and Development Commands). An optional second word is the
+  build association: an ordinary Stack or Cabal build that reaches it uses the
+  published seed instead of making the emitter from source (`STEP31.md`).
 - `tersus/bootstrap/parser.sha256`: the SHA-256 pin of the native parser LLVM
   seed; `TERSUS_PARSER_SEED_FILE` supplies verified local bytes before release.
 - `tersus/bootstrap/frontend.sha256`: the SHA-256 pin of the elaborator's LLVM

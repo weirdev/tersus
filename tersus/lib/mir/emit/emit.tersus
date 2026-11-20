@@ -3,9 +3,12 @@ import mir::emit::values { Gen };
 import mir::emit::functions { emitBody, emitFunction, externDeclaration, failedFn };
 import mir::emit::helpers { cloneFunctions, dropFunctions, printFunctions };
 import mir::support::support { noStrings, showInt, renderType, isAggregate };
-import data::codec::codec { Type };
+import data::codec::codec { Type, Token, Parsed, tokenize, isWord };
+import data::reader::reader { readRecord, readRecords, tokenizeMir };
 import mir::reader::reader { TypeDecl, Function, Program, programAt, readLines, storageProblemIn };
 import mir::ownership::ownership { isOwnershipRequest, runOwnership };
+import mir::mono::mono { isMonoRequest, runMono };
+import mir::ownership::mono { isMonoOwnershipRequest, runMonoOwnership };
 
 // The lowering from the MIR to LLVM IR, written in Tersus (step 31 of the roadmap, see STEP31.md): the compiler's only emitter. It was written function by function
 // oracle. It reads the MIR as data from the standard input (what `tersus mir --data` prints) and writes the LLVM IR.
@@ -56,12 +59,12 @@ fn declarations() -> List<String> [{ }] [{ }] {
 };
 
 // The C-level main: runs the program and prints its return value, if it returned one
-struct Entry { ok: Bool, error: String, lines: List<String>, types: List<Type> };
+struct EmitResult { ok: Bool, error: String, lines: List<String>, types: List<Type> };
 
-impl Clone for Entry { };
+impl Clone for EmitResult { };
 
-fn failedEntry(message: &String) -> Entry [{ }] [{ }] {
-    return Entry { ok: false, error: clone(message), lines: noStrings(), types: noTypes() };
+fn failedEntry(message: &String) -> EmitResult [{ }] [{ }] {
+    return EmitResult { ok: false, error: clone(message), lines: noStrings(), types: noTypes() };
 };
 
 // The lines of the body of `main`, with the indentation (a label has none)
@@ -80,12 +83,12 @@ fn wrapMain(body: &List<String>) -> List<String> [{ }] [{ }] {
     return out;
 };
 
-fn entryPoint(types: &List<TypeDecl>, p: &Program, main: &Function) -> Entry ~ {
+fn entryPoint(types: &List<TypeDecl>, p: &Program, main: &Function) -> EmitResult ~ {
     if !main.hasReturn {
         body = noStrings();
         body = push(body, "call void @tersus_main()");
         body = push(body, "ret i32 0");
-        return Entry { ok: true, error: "", lines: wrapMain(body), types: noTypes() };
+        return EmitResult { ok: true, error: "", lines: wrapMain(body), types: noTypes() };
     };
     ty = main.returns;
     roots = noTypes();
@@ -106,7 +109,7 @@ fn entryPoint(types: &List<TypeDecl>, p: &Program, main: &Function) -> Entry ~ {
         body = push(body, "br label %done");
         body = push(body, "done:");
         body = push(body, "ret i32 0");
-        return Entry { ok: true, error: "", lines: wrapMain(body), types: roots };
+        return EmitResult { ok: true, error: "", lines: wrapMain(body), types: roots };
     };
     t = llvmType(ty);
     if !t.ok { return failedEntry(t.text); };
@@ -132,7 +135,7 @@ fn entryPoint(types: &List<TypeDecl>, p: &Program, main: &Function) -> Entry ~ {
     body = push(body, "br label %done");
     body = push(body, "done:");
     body = push(body, "ret i32 0");
-    return Entry { ok: true, error: "", lines: wrapMain(body), types: roots };
+    return EmitResult { ok: true, error: "", lines: wrapMain(body), types: roots };
 };
 
 fn printLines(lines: &List<String>) -> Int [{ }] [{ }] {
@@ -192,7 +195,7 @@ fn bodies(program: &Program) -> List<String> ~ {
 
 // The whole IR of the program: the declarations, the functions in order,
 // main, and the entry point
-fn ir(program: &Program) -> Entry ~ {
+fn ir(program: &Program) -> EmitResult ~ {
     cx = contextOf(program);
     pieces = [];
     roots = noTypes();
@@ -222,11 +225,11 @@ fn ir(program: &Program) -> Entry ~ {
     for l in printFunctions(program.types, &cx.storage, closed) { lines = push(lines, clone(l)); };
     for l in e.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
-    return Entry { ok: true, error: "", lines: lines, types: closed };
+    return EmitResult { ok: true, error: "", lines: lines, types: closed };
 };
 
 // The IR so far: the declarations, the made functions of the types of the locals and what they contain, and the entry point
-fn outline(program: &Program) -> Entry ~ {
+fn outline(program: &Program) -> EmitResult ~ {
     entry = entryPoint(program.types, program, program.entry);
     if !entry.ok { return entry; };
     roots = noTypes();
@@ -243,20 +246,47 @@ fn outline(program: &Program) -> Entry ~ {
     for l in printFunctions(program.types, &cx.storage, closed) { lines = push(lines, clone(l)); };
     for l in entry.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
-    return Entry { ok: true, error: "", lines: lines, types: closed };
+    return EmitResult { ok: true, error: "", lines: lines, types: closed };
 };
 
 // The program is read from the standard input and its IR is written. The first argument says what: `ir` (or none) is all of it, `outline` the
 // declarations, the made functions and the entry point, and `bodies` the code of each function. What cannot be read or made is
 // reported on the standard error. An input whose first line is `pass ownership` or `pass expand` asks for that ownership pass
 // instead (lib/mir/ownership), so that the seed of the emitter also has them.
+fn readEmitterInput() -> Parsed<List<List<Token>>> ~ {
+    bad = Parsed<List<List<Token>>> { value: [], pos: 0, ok: false };
+    first = readRecord(); if !first.ok { return bad; };
+    if first.pos = 0 { return Parsed<List<List<Token>>> { value: [], pos: 0, ok: true }; };
+    header = tokenize(&first.value); if !header.ok { return bad; };
+    if size(header.value) = 0 { return Parsed<List<List<Token>>> { value: [], pos: 0, ok: true }; };
+    full = isWord(&header.value, 0, "pass") && (isWord(&header.value, 1, "mono") || isWord(&header.value, 1, "mono-ownership"));
+    if full {
+        strict = tokenizeMir(&first.value); if !strict.ok { return bad; };
+        records = readRecords(0 - 1); if !records.ok { return bad; };
+        rows = push([], strict.value);
+        for line in &records.value {
+            tokens = tokenizeMir(line); if !tokens.ok { return bad; };
+            rows = push(rows, tokens.value);
+        };
+        return Parsed<List<List<Token>>> { value: rows, pos: 0, ok: true };
+    };
+    legacy = readLines(); if !legacy.ok { return bad; };
+    rows = push([], header.value);
+    for row in &legacy.value { rows = push(rows, clone(row)); };
+    return Parsed<List<List<Token>>> { value: rows, pos: 0, ok: true };
+};
+
 mode = String::arg(0, 100);
-read = readLines();
+read = readEmitterInput();
 if !read.ok {
     "the input is not the MIR as data: a bad name\n".printError();
     return 1;
 };
-if isOwnershipRequest(read.value) {
+if isMonoOwnershipRequest(read.value) {
+    if !runMonoOwnership(read.value) { return 1; };
+} else { if isMonoRequest(read.value) {
+    if !runMono(read.value) { return 1; };
+} else { if isOwnershipRequest(read.value) {
     if !runOwnership(read.value) { return 1; };
 } else {
     program = programAt(read.value);
@@ -282,4 +312,4 @@ if isOwnershipRequest(read.value) {
             return 1;
         };
     };
-};
+}; }; };

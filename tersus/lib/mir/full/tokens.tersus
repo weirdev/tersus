@@ -1,0 +1,209 @@
+import data::codec::codec { Token, Parsed, parseInt, isWord, catStrings, quoteName, indexOf, wordAt };
+import mir::reader::reader { binaryWords, listWords };
+import data::reader::reader { validDecimal };
+
+fn textAt(ts: &List<Token>, i: Int) -> String ~ {
+    if i < 0 || i >= size(ts) { return ""; };
+    return clone(get(ts, i).text);
+};
+fn quotedAt(ts: &List<Token>, i: Int) -> Bool ~ {
+    return i >= 0 && i < size(ts) && get(ts, i).quoted;
+};
+fn wordIs(ts: &List<Token>, i: Int, w: &String) -> Bool ~ { return isWord(ts, i, w); };
+fn integerAt(ts: &List<Token>, i: Int) -> Parsed<Int> ~ {
+    if i < 0 || i >= size(ts) || get(ts, i).quoted { return Parsed<Int> { value: 0, pos: 0, ok: false }; };
+    r = parseInt(get(ts, i).text);
+    return Parsed<Int> { pos: i + 1, ..r };
+};
+fn numberAt(ts: &List<Token>, i: Int) -> Int ~ {
+    n = integerAt(ts, i);
+    if !n.ok || n.value < 0 || n.value > size(ts) { return 0 - 1; };
+    return n.value;
+};
+fn word(w: String) -> Token ~ { return Token { quoted: false, text: w }; };
+fn name(n: String) -> Token ~ { return Token { quoted: true, text: n }; };
+fn intToken(i: Int) -> Token ~ { return word(String::fromInt(i)); };
+fn decimalText(text: &String) -> String ~ {
+    n = size(text.bytes); at = 0; negative = n > 0 && get(text.bytes, 0) = toByte(45);
+    if negative { at = 1; };
+    while at < n && get(text.bytes, at) = toByte(48) [{ affirm at >= 0; }] ~ { at = at + 1; };
+    if at >= n { return "0"; };
+    value = text.slice(at, n); if negative { return catStrings("-", value); }; return value;
+};
+fn normalizeNumbers(ts: List<Token>) -> List<Token> ~ {
+    for i in 0..size(ts) {
+        t = get(&ts, i);
+        if !t.quoted && validDecimal(&t.text) {
+            value = decimalText(&t.text);
+            if value != t.text { ts = set(ts, i, Token { quoted: false, text: value }); };
+        };
+    };
+    return ts;
+};
+fn normalizeTypes(ts: List<Token>) -> List<Token> ~ {
+    out = [];
+    for t in &ts {
+        if !t.quoted && (t.text = "list" || t.text = "box") {
+            n = "List"; if t.text = "box" { n = "Box"; };
+            out = push(push(push(push(out, word("named")), name(n)), intToken(1)), word("type"));
+        } else { out = push(out, clone(t)); };
+    };
+    return out;
+};
+fn sliceTokens(ts: &List<Token>, lo: Int, hi: Int) -> List<Token> ~ {
+    out = [];
+    if lo < 0 || hi < lo || hi > size(ts) { return out; };
+    for i in lo..hi { out = push(out, clone(get(ts, i))); };
+    return out;
+};
+fn appendTokens(a: List<Token>, b: &List<Token>) -> List<Token> ~ {
+    for t in b { a = push(a, clone(t)); };
+    return a;
+};
+fn tokenLine(ts: &List<Token>) -> String ~ {
+    bytes = [];
+    first = true;
+    for t in ts {
+        if !first { bytes = push(bytes, toByte(32)); };
+        first = false;
+        text = clone(t.text);
+        if t.quoted { text = quoteName(t.text); };
+        for b in &text.bytes { bytes = push(bytes, b); };
+    };
+    return String { bytes: bytes };
+};
+fn namesEnd(ts: &List<Token>, p: Int) -> Int ~ {
+    n = numberAt(ts, p);
+    if n < 0 || p + 1 + n > size(ts) { return 0 - 1; };
+    for i in p + 1..p + 1 + n { if !quotedAt(ts, i) { return 0 - 1; }; };
+    return p + 1 + n;
+};
+fn intsEnd(ts: &List<Token>, p: Int) -> Int ~ {
+    n = numberAt(ts, p);
+    if n < 0 || p + 1 + n > size(ts) { return 0 - 1; };
+    for i in p + 1..p + 1 + n { if !integerAt(ts, i).ok { return 0 - 1; }; };
+    return p + 1 + n;
+};
+fn sizeEnd(ts: &List<Token>, p: Int) -> Int ~ {
+    if wordIs(ts, p, "any") { return p + 1; };
+    if wordIs(ts, p, "p") && quotedAt(ts, p + 1) { return p + 2; };
+    if wordIs(ts, p, "v") && integerAt(ts, p + 1).ok { return p + 2; };
+    if wordIs(ts, p, "c") && !quotedAt(ts, p + 1) && validDecimal(textAt(ts, p + 1)) { return p + 2; };
+    return 0 - 1;
+};
+fn argEnd(ts: &List<Token>, p: Int) -> Int ~ {
+    if wordIs(ts, p, "size") { return sizeEnd(ts, p + 1); };
+    if wordIs(ts, p, "type") { return typeEnd(ts, p + 1); };
+    return 0 - 1;
+};
+fn argsEnd(ts: &List<Token>, p: Int, n: Int) -> Int ~ {
+    at = p;
+    if n < 0 || n > size(ts) { return 0 - 1; };
+    for i in 0..n { at = argEnd(ts, at); if at < 0 { return at; }; };
+    return at;
+};
+fn typeEnd(ts: &List<Token>, p: Int) -> Int ~ {
+    if p < 0 || p >= size(ts) || quotedAt(ts, p) { return 0 - 1; };
+    w = textAt(ts, p);
+    if w = "int" || w = "byte" || w = "bool" || w = "i8" || w = "i16" || w = "i32" || w = "u16" || w = "u32" { return p + 1; };
+    if w = "variant" || w = "param" { if quotedAt(ts, p + 1) { return p + 2; }; return 0 - 1; };
+    if w = "var" { if integerAt(ts, p + 1).ok { return p + 2; }; return 0 - 1; };
+    if w = "named" {
+        if !quotedAt(ts, p + 1) { return 0 - 1; };
+        return argsEnd(ts, p + 3, numberAt(ts, p + 2));
+    };
+    if w = "forall" {
+        at = namesEnd(ts, p + 1);
+        at = namesEnd(ts, at);
+        return typeEnd(ts, at);
+    };
+    if w = "fn" {
+        n = numberAt(ts, p + 1);
+        if n < 0 { return 0 - 1; };
+        at = p + 2;
+        for i in 0..n { at = typeEnd(ts, at); if at < 0 { return at; }; };
+        return typeEnd(ts, at);
+    };
+    if w = "list" || w = "box" || w = "array" || w = "addr" || w = "block" || w = "uninit" || w = "ref" || w = "mutref" {
+        at = typeEnd(ts, p + 1);
+        if w = "array" { return sizeEnd(ts, at); };
+        return at;
+    };
+    return 0 - 1;
+};
+fn constantEnd(ts: &List<Token>, p: Int) -> Int ~ {
+    if wordIs(ts, p, "int") && !quotedAt(ts, p + 1) && validDecimal(textAt(ts, p + 1)) { return p + 2; };
+    if wordIs(ts, p, "bool") && (wordIs(ts, p + 1, "true") || wordIs(ts, p + 1, "false")) { return p + 2; };
+    if wordIs(ts, p, "fn") && quotedAt(ts, p + 1) { return p + 2; };
+    data = wordIs(ts, p, "data");
+    if !(data || wordIs(ts, p, "list") || wordIs(ts, p, "array")) { return 0 - 1; };
+    at = p + 1;
+    if data { if !quotedAt(ts, at) { return 0 - 1; }; at = at + 1; };
+    n = numberAt(ts, at);
+    if n < 0 { return 0 - 1; };
+    at = at + 1;
+    for i in 0..n {
+        if data { if !quotedAt(ts, at) { return 0 - 1; }; at = at + 1; };
+        at = constantEnd(ts, at);
+        if at < 0 { return at; };
+    };
+    return at;
+};
+fn operandEnd(ts: &List<Token>, p: Int) -> Int ~ {
+    if wordIs(ts, p, "copy") || wordIs(ts, p, "move") { if integerAt(ts, p + 1).ok { return p + 2; }; return 0 - 1; };
+    if wordIs(ts, p, "const") { return constantEnd(ts, p + 1); };
+    return 0 - 1;
+};
+fn operandsEnd(ts: &List<Token>, p: Int, n: Int) -> Int ~ {
+    if n < 0 || n > size(ts) { return 0 - 1; };
+    at = p;
+    for i in 0..n { at = operandEnd(ts, at); if at < 0 { return at; }; };
+    return at;
+};
+fn stepsEnd(ts: &List<Token>, p: Int) -> Int ~ {
+    n = numberAt(ts, p);
+    if n < 0 { return 0 - 1; };
+    at = p + 1;
+    for i in 0..n {
+        if wordIs(ts, at, "field") && quotedAt(ts, at + 1) && quotedAt(ts, at + 2) { at = at + 3; } else {
+            if !wordIs(ts, at, "index") { return 0 - 1; };
+            at = operandEnd(ts, at + 1);
+            if at < 0 { return at; };
+        };
+    };
+    return at;
+};
+fn rvalueEnd(ts: &List<Token>, p: Int) -> Int ~ {
+    w = textAt(ts, p);
+    if quotedAt(ts, p) { return 0 - 1; };
+    if w = "use" || w = "makebox" || w = "unbox" || w = "unsize" || w = "clone" || w = "deref" { return operandEnd(ts, p + 1); };
+    if w = "binary" || w = "listop" {
+        if p + 1 < 0 || p + 1 >= size(ts) { return 0 - 1; };
+        op = wordAt(ts, p + 1);
+        if !op.ok { return 0 - 1; };
+        if w = "binary" {
+            if indexOf(binaryWords(), &op.value) < 0 { return 0 - 1; };
+            return operandsEnd(ts, p + 2, 2);
+        };
+        if indexOf(listWords(), &op.value) < 0 { return 0 - 1; };
+        return operandsEnd(ts, p + 3, numberAt(ts, p + 2));
+    };
+    if w = "makelist" { return operandsEnd(ts, p + 2, numberAt(ts, p + 1)); };
+    if w = "makedata" {
+        if !quotedAt(ts, p + 1) { return 0 - 1; };
+        n = numberAt(ts, p + 2);
+        if n < 0 { return 0 - 1; };
+        at = p + 3;
+        for i in 0..n { if !quotedAt(ts, at) { return 0 - 1; }; at = operandEnd(ts, at + 1); if at < 0 { return at; }; };
+        return at;
+    };
+    if w = "readfield" || w = "isvariant" || w = "asvariant" {
+        at = operandEnd(ts, p + 1);
+        if !quotedAt(ts, at) { return 0 - 1; };
+        if w = "readfield" { if !quotedAt(ts, at + 1) { return 0 - 1; }; return at + 2; };
+        return at + 1;
+    };
+    if w = "takefield" && integerAt(ts, p + 1).ok && quotedAt(ts, p + 2) && quotedAt(ts, p + 3) { return p + 4; };
+    if (w = "borrow" || w = "borrowmut") && integerAt(ts, p + 1).ok { return stepsEnd(ts, p + 2); };
+    return 0 - 1;
+};

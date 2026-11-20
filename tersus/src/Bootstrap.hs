@@ -7,6 +7,7 @@ module Bootstrap
     , stageOne
     , cachedSeed
     , cachedEmitter
+    , cachedSourceEmitter
     , tersusLlvm
     , llvmOfOwned
     , emitWith
@@ -18,7 +19,7 @@ import Native (buildExecutable, runWithInput)
 import MirHousekeeping (emitterEntry, ownedToolWith)
 import Pipeline (ownedSource)
 import Seed (cachedSeed, compilerSnapshotHash, seedHash, seedSha256, seedUrl, stageZero)
-import ValidatorNative (cachedBootstrapEmitter)
+import ValidatorNative (cachedBootstrapEmitter, cachedBootstrapSourceEmitter)
 import Utils
 
 -- The lowering to LLVM IR that is written in Tersus (lib/mir/emit/emit.tersus, step 31 and STEP31.md) is the compiler's only emitter. An executable of it reads the MIR of a
@@ -58,6 +59,9 @@ emitWith = runWithInput
 -- Stage 1 in the cache, built (from stage 0, which is built too if it is not there) if it is not there yet
 cachedEmitter :: IO (Result FilePath String)
 cachedEmitter = cachedBootstrapEmitter
+
+cachedSourceEmitter :: IO (Result FilePath String)
+cachedSourceEmitter = cachedBootstrapSourceEmitter
 
 -- The LLVM IR of a program, by the emitter in Tersus
 tersusLlvm :: String -> IO (Result String String)

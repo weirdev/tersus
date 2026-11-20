@@ -21,6 +21,10 @@ module PreludeSource
     , toolPackageFiles
     , stdlibSource
     , compilerSourceHash
+    , compilerSourceFiles
+    , emitterSourceFiles
+    , emitterSeedConstruction
+    , emitterConstructionOf
     , validationPackageFiles
     , seedSha256
     , parserSeedSha256
@@ -32,19 +36,32 @@ import Data.List (isSuffixOf, sort)
 import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import System.Directory (listDirectory)
+import System.FilePath (takeFileName)
 
 compilerSourceHash :: String
-compilerSourceHash =
+compilerSourceHash = fingerprint (concatMap (\(path, contents) -> [takeFileName path, contents]) compilerSourceFiles)
+
+compilerSourceFiles :: [(FilePath, String)]
+compilerSourceFiles =
     $( do
         addDependentFile "tersus.cabal"
-        files <- runIO (sort . filter (\file -> any (`isSuffixOf` file) [".hs", ".hsc"]) <$> listDirectory "src")
+        files <- runIO (sort . filter (\file -> any (`isSuffixOf` file) [".hs", ".hsc", ".hs-boot"]) <$> listDirectory "src")
         inputs <- mapM (\file -> do
             let path = "src/" ++ file
             addDependentFile path
             contents <- runIO (readFile path)
-            pure [file, contents]) files
-        lift (fingerprint (concat inputs))
+            pure (path, contents)) files
+        lift inputs
      )
+
+emitterSourceFiles :: [(FilePath, String)]
+emitterSourceFiles = compilerSourceFiles ++ toolPackageFiles ++ validationPackageFiles ++ elaboratePackageFiles
+    ++ [("lib/" ++ name ++ ".tersus", text) | (name, _, text) <- libModules]
+    ++ [("lib/stdlib.tersus", stdlibSource)]
+    ++ $(do
+        let paths = ["dev/emitter-seed/Main.hs", "package.yaml", "tersus.cabal"]
+        files <- mapM (\path -> do addDependentFile path; body <- runIO (readFile path); pure (path, body)) paths
+        lift files)
 
 libModules :: [(String, String, String)]
 libModules =
@@ -164,6 +181,12 @@ mirPackageFiles = dataPackageFiles ++
                 [ "lib/mir/package.tersus"
                 , "lib/mir/reader/reader.tersus"
                 , "lib/mir/support/support.tersus"
+                , "lib/mir/full/full.tersus"
+                , "lib/mir/full/tokens.tersus"
+                , "lib/mir/full/records.tersus"
+                , "lib/mir/full/read.tersus"
+                , "lib/mir/full/write.tersus"
+                , "lib/mir/full/environments.tersus"
                 , "lib/mir/emit/emit.tersus"
                 , "lib/mir/emit/types.tersus"
                 , "lib/mir/emit/values.tersus"
@@ -172,7 +195,12 @@ mirPackageFiles = dataPackageFiles ++
                 , "lib/mir/emit/helpers.tersus"
                 , "lib/mir/mir_reader/mir_reader.tersus"
                 , "lib/mir/writer/writer.tersus"
+                , "lib/mir/mono/mono.tersus"
+                , "lib/mir/mono/tokens.tersus"
+                , "lib/mir/mono/functions.tersus"
+                , "lib/mir/mono/types.tersus"
                 , "lib/mir/ownership/ownership.tersus"
+                , "lib/mir/ownership/mono.tersus"
                 , "lib/mir/ownership/common.tersus"
                 , "lib/mir/ownership/analysis.tersus"
                 , "lib/mir/ownership/rewrite.tersus"
@@ -201,13 +229,22 @@ validationPackageFiles =
      )
 
 -- The SHA-256 pinned in bootstrap/emitter.sha256: the seed IR itself is a GitHub release asset (see Bootstrap), so only this digest is kept in the repository
+emitterSeedPin :: String
+emitterSeedPin = $(do
+    addDependentFile "bootstrap/emitter.sha256"
+    contents <- runIO (readFile "bootstrap/emitter.sha256")
+    lift contents)
+
 seedSha256 :: String
-seedSha256 =
-    $( do
-        addDependentFile "bootstrap/emitter.sha256"
-        contents <- runIO (readFile "bootstrap/emitter.sha256")
-        lift (head (words contents))
-     )
+seedSha256 = head (words emitterSeedPin)
+
+emitterSeedConstruction :: String
+emitterSeedConstruction = emitterConstructionOf emitterSeedPin
+
+emitterConstructionOf :: String -> String
+emitterConstructionOf record = case words record of
+    [_, construction] -> construction
+    _ -> ""
 
 parserSeedSha256 :: String
 parserSeedSha256 =
@@ -237,7 +274,7 @@ frontendSeedSha256 =
 dataPackageFiles :: [(FilePath, String)]
 dataPackageFiles =
     $( do
-        let paths = ["lib/data/package.tersus", "lib/data/codec/codec.tersus", "lib/data/ast/ast.tersus", "lib/data/reader/reader.tersus", "lib/data/arena/arena.tersus"]
+        let paths = ["lib/data/package.tersus", "lib/data/unicode/unicode.tersus", "lib/data/codec/codec.tersus", "lib/data/ast/ast.tersus", "lib/data/reader/reader.tersus", "lib/data/arena/arena.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
         lift files
      )
@@ -246,14 +283,14 @@ dataPackageFiles =
 parserUnicodeSource :: String
 parserUnicodeSource =
     $( do
-        let path = "lib/parser/syntax/unicode.tersus"
+        let path = "lib/data/unicode/unicode.tersus"
         addDependentFile path
         contents <- runIO (readFile path)
         lift contents
      )
 
 parserPackageFiles :: [(FilePath, String)]
-parserPackageFiles = dataPackageFiles ++ [("lib/parser/syntax/unicode.tersus", parserUnicodeSource)] ++
+parserPackageFiles = dataPackageFiles ++
     $( do
         let paths = ["lib/parser/package.tersus", "lib/parser/parser.tersus", "lib/parser/syntax/syntax.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
@@ -270,7 +307,7 @@ astReaderPackageFiles = dataPackageFiles ++
 
 -- The elaborator written in Tersus (REPLACING_HASKELL.md), the compiler's type checker
 elaboratePackageFiles :: [(FilePath, String)]
-elaboratePackageFiles = dataPackageFiles ++ [("lib/parser/syntax/unicode.tersus", parserUnicodeSource)] ++
+elaboratePackageFiles = dataPackageFiles ++
     $( do
         let paths = ["lib/parser/package.tersus", "lib/parser/syntax/syntax.tersus", "lib/elaborate/package.tersus", "lib/elaborate/builtins.tersus", "lib/elaborate/calls.tersus", "lib/elaborate/check.tersus", "lib/elaborate/core.tersus", "lib/elaborate/decls.tersus", "lib/elaborate/elaborate.tersus", "lib/elaborate/expr.tersus", "lib/elaborate/exports.tersus", "lib/elaborate/libraries.tersus", "lib/elaborate/load.tersus", "lib/elaborate/lower.tersus", "lib/elaborate/lowerbuild.tersus", "lib/elaborate/lowerexpr.tersus", "lib/elaborate/loweriface.tersus", "lib/elaborate/lowerout.tersus", "lib/elaborate/lowerplace.tersus", "lib/elaborate/lowerstate.tersus", "lib/elaborate/out.tersus", "lib/elaborate/proofs.tersus", "lib/elaborate/records.tersus", "lib/elaborate/refs.tersus", "lib/elaborate/resolve.tersus", "lib/elaborate/rewrite.tersus", "lib/elaborate/snapshot.tersus", "lib/elaborate/state.tersus", "lib/elaborate/traits.tersus", "lib/elaborate/units.tersus", "lib/elaborate/wire.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths

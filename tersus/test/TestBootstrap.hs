@@ -2,12 +2,12 @@ module TestBootstrap (testBootstrap) where
 
 import Control.Exception (bracket)
 import Data.Char (isHexDigit)
-import Data.List (sort)
+import Data.List (isPrefixOf, sort)
 import System.Directory (createDirectory, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, doesDirectoryExist, doesFileExist)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.Process (CreateProcess (..), proc)
-import Native (readProcessOutput)
+import Native (cacheDirectory, readProcessOutput)
 import System.IO (hClose)
 import CacheLock (openTempFileCloexec)
 import System.FilePath (takeFileName, (</>))
@@ -20,7 +20,7 @@ import Cli (Command (..), makesIr)
 import MirData (writeProgram)
 import Pipeline (ownedSource)
 import Hash (fingerprint)
-import MirHousekeeping (Tool (..), emitterEntry, emitterOwnedProgram, ownedToolWith, ownershipTool)
+import MirHousekeeping (Tool (..), emitterConstruction, emitterEntry, emitterIdentityAgainst, emitterOwnedProgram, ownedToolWith, ownershipTool)
 import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, stdlibSource)
 import TestHarness
 import TestNative (clangAvailable)
@@ -127,7 +127,8 @@ bootstrap = do
             case built0 of
                 Error e -> pure (Just ("stage 0: " ++ e))
                 Ok zero -> do
-                    built1 <- cachedEmitter
+                    selection <- ordinarySelection
+                    built1 <- cachedSourceEmitter
                     case built1 of
                         Error e -> pure (Just ("stage 1: " ++ e))
                         Ok one -> do
@@ -137,7 +138,7 @@ bootstrap = do
                             pure $ case nativeParser of
                                 Left err -> Just ("native parser bootstrap smoke: " ++ err)
                                 Right _ -> case fixpoint of
-                                    [] -> kept
+                                    [] -> firstFailure [selection, kept, testAssertTrue (zero /= one)]
                                     found -> Just (unlines (take 5 found))
   where
     -- Stage 0 and stage 1 each expand and own the emitter's source and write its IR: the same owned MIR, the same IR, and that IR
@@ -145,12 +146,14 @@ bootstrap = do
     -- (the pipeline's owned emitter is stage 1's: its ownership tool is the stage 1 executable, which is checked first)
     sameEmitter zero one = do
         fromZero <- ownedToolWith zero emitterEntry
+        current <- cachedEmitter
         tool <- ownershipTool
-        case tool of
-            ToolNative path | path /= one -> pure ["the pipeline's ownership tool is not stage 1: " ++ path]
-            ToolNative _ -> compareOwned fromZero
-            ToolFailed e -> pure ["the pipeline's ownership tool: " ++ e]
-            ToolInterpreted _ -> pure ["the pipeline's ownership tool is interpreted, not stage 1"]
+        case (current, tool) of
+            (Ok expected, ToolNative path) | path /= expected -> pure ["the pipeline's ownership tool is not the selected current emitter: " ++ path]
+            (Ok _, ToolNative _) -> compareOwned fromZero
+            (Error e, _) -> pure ["the selected current emitter: " ++ e]
+            (_, ToolFailed e) -> pure ["the pipeline's ownership tool: " ++ e]
+            (_, ToolInterpreted _) -> pure ["the pipeline's ownership tool is interpreted, not native"]
       where
         compareOwned fromZero = case (fromZero, emitterOwnedProgram) of
             (Error e, _) -> pure ["stage 0 owning the emitter: " ++ e]
@@ -169,6 +172,35 @@ bootstrap = do
         describe (Ok text) (Ok expected) = "wrote " ++ show (length text) ++ " bytes for " ++ show (length expected) ++ firstDifference text expected
         describe (Error e) _ = "failed: " ++ take 300 e
         describe _ (Error e) = "stage 0 failed: " ++ take 300 e
+
+-- What the ordinary build decides for itself, in the cold cache and before any
+-- emitter is made from source: with the association this build would write for
+-- the pin it uses the published emitter and prepares no source emitter input,
+-- and with any other association it makes one from source. A build with no
+-- configured profile knows no association at all, so it always makes one.
+ordinarySelection :: IO TestResult
+ordinarySelection = do
+    construction <- emitterConstruction
+    case construction of
+        Error e -> pure (Just ("the construction of this build: " ++ e))
+        Ok Nothing -> missesAnotherAssociation
+        Ok (Just association) -> do
+            selected <- emitterIdentityAgainst association
+            directory <- cacheDirectory
+            names <- case directory of
+                Ok dir -> listDirectory dir
+                Error _ -> pure []
+            missed <- missesAnotherAssociation
+            pure (firstFailure
+                [ testAssertEq (mapResult (\(pinned, key, _) -> (pinned, key)) selected) (Ok (True, seedHash))
+                , testAssertTrue (not (any (\name -> any (`isPrefixOf` name) ["content-key-", "emitter-"]) names))
+                , missed
+                ])
+  where
+    -- (after the selection above: this one is a miss, so it prepares the emitter's source itself)
+    missesAnotherAssociation = do
+        missedBy <- emitterIdentityAgainst (replicate 64 'b')
+        pure (testAssertEq (mapResult (\(pinned, _, _) -> pinned) missedBy) (Ok False))
 
 isPinnedSeed :: String -> IO Bool
 isPinnedSeed ir = do
@@ -196,7 +228,7 @@ cache zero one = do
                     names <- sort <$> listDirectory directory
                     before <- mapM (getModificationTime . (directory </>)) names
                     reusedZero <- cachedSeed
-                    reusedOne <- cachedEmitter
+                    reusedOne <- cachedSourceEmitter
                     ir <- tersusLlvm source
                     expected <- case ownedSource source of
                         Error e -> pure (Error e)

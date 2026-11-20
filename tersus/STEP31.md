@@ -22,9 +22,9 @@ so emitter names stay bare and the single foreign `String.then` stays module-loc
 The codec, reader and phase-neutral support remain separate ordinary dependencies.
 The emitter imports the ownership dispatcher in `lib/mir/ownership/`.
 MIR v1 input still produces LLVM IR; `pass expand` or `pass ownership` followed
-by MIR v2 produces the transformed MIR v2. The emitter seed includes this
-dispatcher so ownership also runs natively during cold builds. The historical
-slices below describe the original implementation.
+by MIR v2 produces the transformed MIR v2. `pass mono` reads and writes the
+complete MIR3 codec in `lib/mir/full/`. Linking remains in Haskell.
+The historical slices below describe the original implementation.
 
 ## Bootstrap and seed regeneration
 
@@ -33,8 +33,10 @@ Stage 0 runs the ownership passes on every program the host builds for itself
 (the emitter, checker, eraser, parser and validator) and emits the emitter to
 build stage 1. Stage 1 emits the other tools and runs the passes on user
 programs. The fixpoint below makes the two stages own alike.
-The Haskell `MirMono` adapter still specializes programs between list lowering
-and ownership. `MirOwnershipData` retains metadata outside runtime serialization.
+Native `pass mono` specializes programs between list lowering and ownership,
+using the same emitter selected for the build. `MirMono` retains only the
+validation specialization; `MirOwnershipData` retains ownership metadata outside
+runtime serialization.
 
 `TestBootstrap` compares stage-0-owned and stage-1-owned emitter MIR produced
 independently from the same raw source. It then compares both stages' emitted
@@ -68,6 +70,52 @@ over a seed file that the running compiler is using. Run `stack test` and
 `testBootstrap`, then upload the matching `emitter.ll` release asset tagged
 `bootstrap-<first 12 digits of the digest>` with the pin committed alongside it.
 The parser override remains `TERSUS_PARSER_SEED_FILE` with its independent pin.
+
+### The build association
+
+The pin record may carry a second word: the association of the published seed
+with the build that made it. An ordinary Cabal or Stack build observes the
+command line GHC itself was given while it compiled the compiler's library
+(`EmitterProvenance.ordinaryBuildProfile`) — the whole invocation of the
+configured package, so the package's own options, what configuring resolved
+(the package ids, the unit id, the language and warning flags) and whatever
+the build command adds on top (`stack build --ghc-options=…`) are all in it.
+Where the build writes says nothing about what it writes, so an output
+directory is only that. What it reads is not interchangeable, and each read is
+bound to the authority it comes with: a directory whose source the compiler
+already captures and compares (`src`, listings included) by its place in the
+tree; one of the build's own output directories as the output it is; a
+directory generated under an output directory by what GHC can read from it,
+so a header or module that changes under the same name is another build; a
+package database and the compiler's own directory by the records of the
+packages they hold, which carry their ABI and configuration; and a package
+environment or a CPP header by what it contains, which is how the macros
+Cabal generates are part of the description. How many modules a build
+compiles at a time (`-j`) is left out, being how fast it builds and not how.
+A read of anything else — another tree's source, an outside include or
+library directory, an in-tree directory nothing binds, a build directory
+outside the package — is not something the description covers, and neither is
+an invocation that is not an ordinary build of a configured package (`ghci`,
+`runghc`, a bare `ghc`, an external interpreter). Then the build has no
+profile at all.
+
+Because the package records name where they were installed, a description
+holds across checkouts and rebuilds of one installation of the toolchain, and
+not across two; a build on another installation reaches another association
+and makes the emitter from source.
+
+That description is hashed with the package identities GHC selected, the
+compiler's target, and the source and pins the seed was made from. When the
+digest is the association the pin carries and the working source is still the
+one the running host captured, the host uses the published seed and prepares
+no emitter of its own; with no association, a different one, changed source or
+no profile, it builds the emitter from source instead. `cachedSourceEmitter`,
+which regeneration uses, always builds from source whatever the pin says.
+
+`stack run emitter-seed -- certify <output.ll> <candidate.pin>` writes that
+record: it regenerates the seed, requires the result to be the pinned digest,
+and refuses unless the build has a profile and its source did not change while
+it ran.
 
 ## What gets rewritten
 

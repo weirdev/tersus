@@ -1,0 +1,30 @@
+import data::codec::codec { Token, Parsed };
+import data::ast::ast { AstNode };
+import mir::full::read { parseFull };
+import mir::full::write { outputFull, emitFull, clearMetadata };
+
+fn fullAt(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ { return parseFull(lines); };
+fn printFull(program: &FullProgram) -> Int ~ { return emitFull(outputFull(program)); };
+fn clearFunctionMetadata(program: FullProgram) -> FullProgram ~ { return clearMetadata(program); };
+
+struct FullRecord { name: String, tokens: List<Token> };
+impl Clone for FullRecord { };
+
+struct FullBlock { id: Int, lines: List<List<Token>> };
+impl Clone for FullBlock { };
+
+struct FullFunction {
+    header: List<Token>, spec: List<Token>, env: List<Token>,
+    locals: List<FullRecord>, loops: List<FullRecord>, blocks: List<FullBlock>
+};
+impl Clone for FullFunction { };
+
+// Payload tokens hold AST node IDs internally; only the wire uses payload ordinals.
+// Shared environments remain referenced until their canonical wire variants are written.
+struct FullProgram {
+    types: List<FullRecord>, generics: List<FullRecord>, invariants: List<FullRecord>,
+    bounded: List<FullRecord>, instances: List<FullRecord>,
+    functions: List<FullFunction>, entry: FullFunction,
+    trailer: List<List<Token>>, arena: List<AstNode>, shared: List<List<Token>>
+};
+impl Clone for FullProgram { };
