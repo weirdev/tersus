@@ -1,7 +1,7 @@
 import data::codec::codec { Token };
 import mir::full::full { FullRecord, FullFunction, FullProgram, fullAt, printFull, clearFunctionMetadata };
 import mir::full as full;
-import mir::mono::tokens { MonoBinding, monoLookup };
+import mir::mono::tokens { MonoBinding, monoLookup, monoBind };
 import mir::mono::functions { MonoKey, MonoRedirect, monoGeneric, monoSection, monoReturn, monoLocal, monoMatch, monoFunctionIndex, monoRedirect, monoInstantiate, monoInstanceName, monoNamedTypes, monoKeyCompare };
 import mir::mono::types { monoProgramNamed, monoFiltered };
 
@@ -72,11 +72,12 @@ fn monoWithInstances(program: FullProgram, plain: &List<FullFunction>, done: &Li
     return FullProgram { functions: fs, ..program };
 };
 
-fn monoFinalFunctions(plain: &List<FullFunction>, done: &List<MonoInstance>) -> List<FullFunction> ~ {
+fn monoFinalFunctions(plain: &List<FullFunction>, done: &List<MonoInstance>, rename: Bool) -> List<FullFunction> ~ {
     winners = HashMap::new();
     renamed = [];
     for i in 0..size(done) {
-        function = monoDropName(get(done, i));
+        function = clone(get(done, i).function);
+        if rename { function = monoDropName(get(done, i)); };
         name = full::tokens::textAt(function.header, 1);
         old = HashMap::lookup(&winners, name, 0 - 1);
         replace = true;
@@ -104,6 +105,80 @@ fn monoFinalFunctions(plain: &List<FullFunction>, done: &List<MonoInstance>) -> 
     return kept;
 };
 
+// The size arguments a pattern's size parameters stand for in an actual type (`size p "n"` against `size c 3`)
+fn monoMatchSizes(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>) -> List<MonoBinding> ~ {
+    if size(pat) = 0 || size(actual) = 0 { return bs; };
+    if full::tokens::wordIs(pat, 0, "ref") || full::tokens::wordIs(pat, 0, "mutref") { return monoMatchSizes(bs, full::tokens::sliceTokens(pat, 1, size(pat)), actual); };
+    if full::tokens::wordIs(actual, 0, "ref") || full::tokens::wordIs(actual, 0, "mutref") { return monoMatchSizes(bs, pat, full::tokens::sliceTokens(actual, 1, size(actual))); };
+    if full::tokens::textAt(pat, 0) != full::tokens::textAt(actual, 0) { return bs; };
+    if full::tokens::wordIs(pat, 0, "array") {
+        pe = full::tokens::typeEnd(pat, 1); ae = full::tokens::typeEnd(actual, 1);
+        if pe < 0 || ae < 0 { return bs; };
+        bs = monoMatchSizes(bs, full::tokens::sliceTokens(pat, 1, pe), full::tokens::sliceTokens(actual, 1, ae));
+        if full::tokens::wordIs(pat, pe, "p") && full::tokens::wordIs(actual, ae, "c") { bs = monoBind(bs, full::tokens::textAt(pat, pe + 1), push([], full::tokens::word(full::tokens::textAt(actual, ae + 1)))); };
+        return bs;
+    };
+    if !full::tokens::wordIs(pat, 0, "named") || full::tokens::textAt(pat, 1) != full::tokens::textAt(actual, 1) { return bs; };
+    n = full::tokens::numberAt(pat, 2);
+    if n < 0 || n != full::tokens::numberAt(actual, 2) { return bs; };
+    p = 3; a = 3;
+    for i in 0..n {
+        pe = full::tokens::argEnd(pat, p); ae = full::tokens::argEnd(actual, a);
+        if pe < 0 || ae < 0 { return bs; };
+        if full::tokens::wordIs(pat, p, "size") && full::tokens::wordIs(pat, p + 1, "p") && full::tokens::wordIs(actual, a, "size") && full::tokens::wordIs(actual, a + 1, "c") {
+            bs = monoBind(bs, full::tokens::textAt(pat, p + 2), push([], full::tokens::word(full::tokens::textAt(actual, a + 2))));
+        };
+        if full::tokens::wordIs(pat, p, "type") && full::tokens::wordIs(actual, a, "type") { bs = monoMatchSizes(bs, full::tokens::sliceTokens(pat, p + 1, pe), full::tokens::sliceTokens(actual, a + 1, ae)); };
+        p = pe; a = ae;
+    };
+    return bs;
+};
+
+// The copy of a declared type's checked Drop, Clone or Deref (role 0, 1 or 2) for the instance: none when its fact names no
+// function with type or size parameters, or when the instance does not give every parameter (MirMono.roleKey)
+fn monoRoleKey(originals: &List<FullFunction>, owned: &FullRecord, role: Int, held: &List<MonoBinding>, originalNamed: &List<MonoBinding>) -> List<MonoKey> ~ {
+    fname = full::tokens::textAt(owned.tokens, 4 + 2 * role);
+    if size(fname.bytes) = 0 { return []; };
+    idx = monoFunctionIndex(originals, fname);
+    if idx < 0 { return []; };
+    target = get(originals, idx);
+    if !monoGeneric(target) { return []; };
+    params = monoSection(target.header, "params");
+    if size(params) = 0 { return []; };
+    actual = monoLookup(held, owned.name);
+    if size(actual) = 0 { actual = monoLookup(originalNamed, owned.name); };
+    if size(actual) = 0 { actual = push(push(push([], full::tokens::word("named")), full::tokens::name(clone(owned.name))), full::tokens::word("0")); };
+    selfTy = monoLocal(target, get(params, 0));
+    bs = monoMatch([], selfTy, actual); sbs = monoMatchSizes([], selfTy, actual);
+    types = [];
+    for t in monoSection(target.header, "typeparams") { ty = monoLookup(bs, t); if size(ty) = 0 { return []; }; types = push(types, ty); };
+    sizes = [];
+    for s in monoSection(target.header, "sizeparams") { k = monoLookup(sbs, s); if size(k) = 0 { return []; }; sizes = push(sizes, full::tokens::textAt(k, 0)); };
+    return push([], MonoKey { name: fname, types: types, sizes: sizes });
+};
+
+struct MonoRole { owner: String, role: Int, key: MonoKey };
+impl Clone for MonoRole { };
+
+fn monoRoleFound(owners: &List<MonoRole>, owner: &String, role: Int) -> Bool ~ {
+    for o in owners { if o.owner = owner && o.role = role { return true; }; };
+    return false;
+};
+
+// The checked facts with each owner's role copies named (MirMono.monoWith's retarget): a provider stays, its function is the copy
+fn monoRetarget(ownership: &List<FullRecord>, owners: &List<MonoRole>) -> List<FullRecord> ~ {
+    out = [];
+    for r in ownership {
+        row = clone(r.tokens);
+        for o in owners {
+            at = 4 + 2 * o.role;
+            if o.owner = r.name && at < size(row) { row = set(row, at, full::tokens::name(monoInstanceName(o.key))); };
+        };
+        out = push(out, FullRecord { name: clone(r.name), tokens: row });
+    };
+    return out;
+};
+
 fn monomorphize(program: FullProgram) -> FullProgram ~ {
     anyGeneric = false;
     for f in &program.functions { if monoGeneric(f) { anyGeneric = true; }; };
@@ -121,19 +196,43 @@ fn monomorphize(program: FullProgram) -> FullProgram ~ {
     };
     done = monoBuild(program.functions, pending, []);
     originals = clone(program.functions);
+    checked = program.checked; ownership = clone(program.ownership);
     rewritten = FullProgram { entry: main.function, functions: [], ..program };
     // MirMono discovers implicit drops in at most four rounds; preserve that boundary.
+    // (with checked facts, the drop, clone and deref of a declared instance are the copies of the functions its facts name, and
+    // the facts then name the copies; without them, a drop is the function named for the type's base)
+    owners = [];
     round = 0;
     while round < 4 [{ affirm round >= 0; affirm round <= 4; }] ~ {
         p = monoFiltered(monoWithInstances(clone(rewritten), plain, done), originalNamed);
         keys = [];
-        for d in p.types {
-            for key in monoDropKey(originals, originalNamed, d.name) { if !monoBuilt(done, key) { keys = push(keys, clone(key)); }; };
+        if checked {
+            held = monoProgramNamed(p, true);
+            for d in p.types {
+                at = 0 - 1;
+                for i in 0..size(ownership) { if get(&ownership, i).name = d.name { at = i; }; };
+                if at >= 0 && at < size(ownership) {
+                    for role in 0..3 {
+                        if !monoRoleFound(owners, d.name, role) {
+                            row = clone(get(&ownership, at));
+                            for key in monoRoleKey(originals, &row, role, &held, &originalNamed) {
+                                owners = push(owners, MonoRole { owner: clone(d.name), role: role, key: clone(key) });
+                                if !monoBuilt(done, key) { keys = push(keys, clone(key)); };
+                            };
+                        };
+                    };
+                };
+            };
+        } else {
+            for d in p.types {
+                for key in monoDropKey(originals, originalNamed, d.name) { if !monoBuilt(done, key) { keys = push(keys, clone(key)); }; };
+            };
         };
         if size(keys) = 0 { round = 4; }
         else { done = monoBuild(originals, keys, done); round = round + 1; };
     };
-    out = FullProgram { functions: monoFinalFunctions(plain, done), ..rewritten };
+    rewritten = FullProgram { ownership: monoRetarget(&ownership, &owners), ..rewritten };
+    out = FullProgram { functions: monoFinalFunctions(plain, done, !checked), ..rewritten };
     return monoFiltered(out, originalNamed);
 };
 
@@ -149,8 +248,6 @@ fn runMono(lines: &List<List<Token>>) -> Bool ~ {
     for i in 1..size(lines) { input = push(input, clone(get(lines, i))); };
     parsed = fullAt(input);
     if !parsed.ok { "the input is not full MIR version 3\n".printError(); return false; };
-    // (the copies' checked facts are the instances': not specialized yet, so refused)
-    if parsed.value.checked || size(parsed.value.boundedFacts) > 0 { "checked ownership records are not specialized yet\n".printError(); return false; };
     printFull(monomorphize(parsed.value));
     return true;
 };
