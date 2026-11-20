@@ -320,7 +320,8 @@ fn contextFacts(st: St, iface: &AstProgram, base: Int) -> St ~ {
 };
 
 fn canonicalName(name: &String) -> Bool ~ {
-    return any(&name.bytes, fn(byte: Byte) => byte = toByte(36));
+    for b in &name.bytes { if b = toByte(36) { return true; }; };
+    return false;
 };
 
 fn isRefCodec(t: &Type) -> Bool ~ { return t is Type::TRef || t is Type::TMutRef; };
