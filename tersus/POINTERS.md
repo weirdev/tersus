@@ -108,6 +108,18 @@ The validator knows a block through ghost functions, usable in contracts, `affir
 | `Addr::resize(p, n, b)` | `whole(b)`, `n >= 0`, no slot from `n` filled | `(q, ghost b2)`: `base(b2) = q`, `cap(b2) = n`, `whole(b2)`, a new origin, slots below `min(n, cap(b))` as they were |
 | `Addr::free(p, b)` | `whole(b)`, no slot filled | `0` (there is no unit type); `b` is consumed |
 
+The move checker records the loans of what is written into a slot on its
+permission, not on its address. `take` and `get` give the slot value those loans;
+split, join, resize and the operations that empty slots conservatively keep
+loans on the resulting permissions. Freeing the block ends its loans, not those
+of values already taken or copied out. A slot that may contain an update
+reference must be taken, not viewed with `get`. Writable views into permission
+slots are deferred until shared-path enforcement can justify them. This does
+not prevent ordinary reads of reference-free slots. A result's `from` annotation
+names ordinary reference origins, not the contents of its permission slots;
+a returned permission can also carry loans from the call's other lending or
+reference-bearing inputs.
+
 Every operation that gives a block back says the rest: the same `base`, `cap`, `origin` and `whole` (except `resize`), and every slot it does not name as it was.
 
 - **Dropping a value and freeing a block are different things.** `dropValue` ends the value in one slot: it runs that value's drop, which frees what the value owns (a list's elements, the block of a `Vec` in the slot) and leaves the slot empty. The block's memory stays allocated. `free` returns the memory of a whole allocation to the allocator, and runs nothing. A block is emptied with `take`, `dropValue` or `dropRange`, and then freed. This is Rust's `drop_in_place` and `dealloc`.
@@ -138,7 +150,7 @@ A block comes from one of these, and from nothing else:
 | `Block::cast` of a block the program holds | yes, when the layouts match (below) |
 | a ghost field or tuple part of a value that is taken apart | yes: it is a move |
 | `Block::assume(p, n)` | no: an assumption |
-| the contract of an `extern fn` that returns one | no: an assumption |
+| the contract of an `extern fn` that returns one | no: an assumption; the slot type must not hold references |
 
 Since a program cannot write a `Block` and cannot copy one, it can only use memory it was given a permission for. This is what makes `Box`, `Vec` and the rest safe to build by hand: a struct literal with a ghost `Block` field needs a block from one of these sources, and the struct's invariant ties it to the address.
 

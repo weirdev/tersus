@@ -635,15 +635,21 @@ mid-implementation:
    like any program.*
    *Done (2026-10-31): disjoint index loans (two borrows of different
    elements of one list may be live together when both indices are known;
-   an unknown index counts as any element), and the `Block` unification
-   is settled by construction: a reference cannot be made from raw
-   memory — an `Addr` and its `Block` permission confer no reference
-   permission — so references and `Block` permissions never alias and
-   neither can bypass the other; `Addr::write`, `take`, `free`, splits
-   and joins remain governed by the permission alone. Native calls pass
+   an unknown index counts as any element). Native calls pass
    borrowed/update parameters by address and return references as addresses;
    `mir_verify.tersus` checks the borrow, deref and assignref rows. Native
    validation remains limited to the supported reference layouts above.*
+   *Loan-carrying permissions: `Block<T>` follows the loans of the values
+   written into its slots. The bridge treats references stored in slots as
+   escaped, but does not discard the permission's own facts on pointee writes.
+   Returned permissions cannot carry callee-local loans. Allocation and
+   `Block::assume` start with empty slots; casting into a reference-bearing
+   permission requires empty slots. Foreign calls cannot receive or return
+   reference-bearing permissions; an obligation for untracked provenance is
+   deferred. Writable `Addr::get` views and their permission-child handling
+   are deferred (reference-safety design D9/DB20); take the value with
+   `Addr::take` instead. The separate shared-path checks must precede
+   generic boundary enforcement.*
 6. **Concurrency and suspension.** Add transfer/share rules, synchronization
    contracts and frame/cancellation rules before enabling these uses.
 

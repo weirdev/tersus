@@ -1,15 +1,20 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module TestBorrow (testBorrow) where
 
-import Data.List (intercalate)
+import Data.List (intercalate, isInfixOf)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 
-import Compile (elaborateStatements)
+import Compile (elaborateStatements, lowerSource)
 import qualified Mir as M
-import MirMoves (finishLowered)
+import MirMoves (checkMoves, finishLowered)
 import Syntax
 import TestHarness
 import TestParserFragments (parseStatementBlock)
+import Types (Arg (..), Type (..), instanceName, pattern TBox, pattern TList)
 import Utils (Result (..))
+import ValidatorNative (validateCompiled)
 
 -- &T: a parameter that the function only reads. A call lends the value, so it is not copied for the call and the caller keeps it; in
 -- the function the parameter is its type, which it cannot assign.
@@ -26,7 +31,9 @@ testBorrow =
         total = "fn total(a: &List<Int>) -> Int [{ define s = size(a); affirm s >= 0; }] [{ }] { t = 0; i = 0; while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i { t = t + get(a, i); i = i + 1; }; return t; }; "
      in TestList
             "testBorrow"
-            [ TestList
+            [ loanTableCases
+            , permissionCases
+            , TestList
                 "lending"
                 [ testCase "a list is lent" (runs (total ++ "l = push(push([], 3), 4); return total(l);") (VInt 7))
                 , testCase "and the caller keeps it" (runs (total ++ "l = push(push([], 3), 4); return total(l) + total(l) + size(l);") (VInt 16))
@@ -444,3 +451,153 @@ undeclaredHolder = case parseStatementBlock source of
   where
     source = "struct HB { n: Int }; fn put(h: &mut HB, r: &mut Int) -> Int { return 0; }; fn f(c: Int) -> Int { x = 1; h = HB { n: 0 }; k = put(&mut h, &mut x); v = x; return v + h.n; }; return f(1);"
     withoutDeclaration lowered = lowered{M.lowProgram = (M.lowProgram lowered){M.progTypes = Map.delete "HB" (M.progTypes (M.lowProgram lowered))}}
+
+loanTableCases :: Test
+loanTableCases = TestList "MIR loan rules"
+    ( [ testCase label (withLoan [(1, TInt), (2, r), (3, input), (4, output)] setup (M.Assign (l 4) rv) use)
+      | (label, input, output, setup, rv, use) <- transferCases
+      ]
+    ++ [ testCase "TakeField is not available before ownership" (refuse "the loans of result are not modelled" [(3, holder), (4, r)] [mkHolder, M.Assign (l 4) (M.TakeField (l 3) "LoanHolder" "ref")])
+       , testCase "Peek is not available before ownership" (refuse "the loans of result are not modelled" [(3, holder), (4, r)] [mkHolder, M.Peek (l 4) (M.ReadField (cp 3) "LoanHolder" "ref")])
+       , testCase "a scalar TakeField has no reference loans" (testAssertEq (check [] Map.empty [(3, scalar), (4, TInt)] (end [M.Assign (l 4) (M.TakeField (l 3) "Scalar" "n")])) [])
+       , testCase "an unsourced non-generic reference result is refused" unsourced
+       , testCase "a permission returning a local loan is refused" returnsOwn
+       , testCase "a reference-capable foreign result is refused" (foreignCase (TBlock r) [] (Just "importSlots is an extern fn and gives a value that can hold a reference"))
+       , testCase "a reference-capable foreign permission argument is refused" (foreignCase TInt [(3, TBlock r)] (Just "importSlots is an extern fn and cannot accept a Block that may hold a reference"))
+       , testCase "reference-free foreign permission arguments still work" (foreignCase TInt [(3, TBlock TInt)] Nothing)
+       , testCase "a reference-capable extern is not an assignable value" (foreignValue False)
+       , testCase "the extern value guard also covers stores through a reference" (foreignValue True)
+       , testCase "unknown extern values fail closed" (requireError "importSlots is an extern fn that gives a value that can hold a reference" (check [] Map.empty [(4, TFn [] TInt)] (end [set 4 (M.Use (M.Const (M.CFn externName)))])))
+       , testCase "mutable raw slot views are deferred" (slotGuard (TMutRef TInt))
+       , testCase "the slot guard inspects nested update references" (slotGuard updateHolder)
+       , testCase "the slot guard follows the fields of a declared Box" (slotGuard (TBox TInt))
+       , testCase "the slot guard follows the fields of a declared List" (slotGuard (TList TBool))
+       , testCase "ordinary primitive scalar containers have no update slot" (testAssertEq (slotErrors (TList TInt) ++ slotErrors (TBox TBool)) [])
+       , testCase "foreign result checks inspect a declared Box" (foreignCase (TBlock (TBox TInt)) [] (Just "is an extern fn and gives a value that can hold a reference"))
+       , testCase "foreign input checks inspect a declared List" (foreignCase TInt [(3, TBlock (TList TBool))] (Just "is an extern fn and cannot accept a Block that may hold a reference"))
+       , testCase "a declared container is not exempt from default-deny" (refuse "the loans of result are not modelled" [(3, holder), (4, TBox TInt)] [mkHolder, M.Peek (l 4) (M.ReadField (cp 3) "LoanHolder" "ref")])
+       , testCase "the slot guard does not assume an opaque declaration is immutable" (slotGuard (TNamed "OpaqueSlot" []))
+       , testCase "a reference stored through an element borrow stays a loan of the list" (refuse "owner cannot be assigned while it is borrowed by result" elementStoreLocals (elementStore ++ [set 1 (M.Use (int 2))] ++ useList))
+       , testCase "a reference stored through an element borrow ends with the list's last use" (testAssertEq (check [] Map.empty ([(1, TInt), (2, r)] ++ elementStoreLocals) (end (borrow ++ elementStore ++ useList ++ [set 1 (M.Use (int 2))]))) [])
+       ] ++ [testCase ("declared from: " ++ label ++ " / " ++ input) (declaredResult ty aggregate expected)
+            | (label, ty, expected) <- [("nested reference-bearing Block", envelope r, True), ("nested scalar Block", envelope TInt, False), ("ordinary reference holder", holder, False)]
+            , (input, aggregate) <- [("lent input", False), ("by-value reference holder", True)]
+            ])
+  where
+    l = M.Local
+    cp = M.Copy . l
+    mv = M.Move . l
+    int = M.Const . M.CInt
+    set n = M.Assign (l n)
+    r = TRef TInt
+    block = TBlock r
+    addr = TAddr r
+    holder = TNamed "LoanHolder" []
+    updateHolder = TNamed "UpdateHolder" []
+    scalar = TNamed "Scalar" []
+    b0 = M.BlockId 0
+    b1 = M.BlockId 1
+    end ss = [(b0, M.BasicBlock ss M.Unreachable)]
+    locals = Map.fromList . map (\(n, ty) -> (l n, M.LocalDecl ty (Just (case n of 1 -> "owner"; 4 -> "result"; _ -> "v" ++ show n))))
+    fn name params ret ls bs = M.Function name (map l params) ret (locals ls) (Map.fromList bs) [] [] [] [] [] M.emptySpec
+    types = Map.fromList [("LoanHolder", M.StructDecl [("ref", r)]), ("UpdateHolder", M.StructDecl [("ref", TMutRef TInt)]), ("Scalar", M.StructDecl [("n", TInt)]), ("Option", M.EnumDecl [("Option::Some", [("ref", r)])])]
+    envelope t = TNamed "Envelope" [ArgType t]
+    generics = Map.fromList
+        [ ("Envelope", (["T"], [("ref", r), ("wrapped", TNamed "Slots" [ArgType (TParam "T")])]))
+        , ("Slots", (["T"], [("slot", TBlock (TParam "T"))]))
+        ]
+    check params fs ls bs = checkMoves Set.empty Set.empty Set.empty (M.Program declarations fs (fn "loans" params Nothing ls bs) generics Map.empty Map.empty Map.empty)
+    declarations = Map.union types (Map.fromList
+        [(instanceName base [ArgType ty], M.StructDecl [("update", TMutRef TInt)]) | (base, ty) <- [("Box", TInt), ("List", TBool)]])
+    declaredResult ty aggregate expectsLoan =
+        let pty = if aggregate then holder else r
+            param = if aggregate then 7 else 2
+            callee = (fn "wrap" [8, param] (Just ty) [(0, ty), (8, r), (param, pty)] [])
+                { M.fnBorrowed = [l 8] ++ [l param | not aggregate], M.fnSpec = M.emptySpec{M.specFrom = ["v8"]} }
+            callerLocals = [(1, TInt), (2, r), (3, holder), (4, ty), (5, ty), (7, holder), (8, r), (9, TInt)]
+            firstBlock = borrow ++ [set 9 (M.Use (int 5)), set 8 (M.Borrow (l 9) [] False)] ++
+                [set 7 (M.MakeData "LoanHolder" [("ref", cp 2)]) | aggregate]
+            call = M.Call (M.Const (M.CFn "wrap")) [cp 8, if aggregate then mv 7 else cp 2] (l 4) b1
+            blocks = [(b0, M.BasicBlock firstBlock call), (b1, M.BasicBlock [set 1 (M.Use (int 2)), set 5 (M.Use (mv 4))] M.Unreachable)]
+            es = check [] (Map.singleton "wrap" callee) callerLocals blocks
+         in if expectsLoan then requireError "owner cannot be assigned while it is borrowed by result" es else testAssertEq [] es
+    requireError msg es = if any (isInfixOf msg) es then Nothing else Just ("Expected " ++ show msg ++ "; got " ++ show es)
+    borrow = [set 1 (M.Use (int 1)), set 2 (M.Borrow (l 1) [] False)]
+    mkHolder = set 3 (M.MakeData "LoanHolder" [("ref", cp 2)])
+    mkList = set 3 (M.MakeList [cp 2, cp 2])
+    writeBlock = [set 3 (M.ListOp M.AddrWrite [int 0, int 0, cp 2, mv 3])]
+    list = TList r
+    uninit = TUninit r
+    op tag = M.ListOp tag
+    readRef = [set 6 (M.Deref (cp 4))]
+    useHolder = [set 5 (M.ReadField (cp 4) "LoanHolder" "ref"), set 6 (M.Deref (cp 5))]
+    useList = [set 5 (op M.First [cp 4]), set 6 (M.Deref (cp 5))]
+    useUninit = [set 5 (op M.UninitGet [cp 4]), set 6 (M.Deref (cp 5))]
+    useBlock = [set 5 (op M.AddrGet [int 0, int 0, cp 4]), set 6 (M.Deref (cp 5)), set 6 (op M.AddrFree [int 0, mv 4])]
+    elementStoreLocals = [(3, TMutRef r), (4, list), (5, r), (6, TInt), (7, r), (8, TInt)]
+    elementStore = [set 8 (M.Use (int 0)), set 7 (M.Borrow (l 8) [] False), set 4 (M.MakeList [mv 7]), set 3 (M.Borrow (l 4) [M.RefIndex (int 0)] True), M.AssignRef (l 3) [] (M.Use (cp 2))]
+    transferCases =
+        [ ("pop carries element loans", list, list, [mkList], op M.Pop [mv 3], useList)
+        , ("first carries the element loan", list, r, [mkList], op M.First [cp 3], readRef)
+        , ("last carries the element loan", list, r, [mkList], op M.Last [cp 3], readRef)
+        , ("Uninit creation carries the value's loan", TInt, uninit, [], op M.UninitNew [cp 2], useUninit)
+        , ("Uninit get carries the value's loan", uninit, r, [set 3 (op M.UninitNew [cp 2])], op M.UninitGet [cp 3], readRef)
+        , ("Uninit take carries the value's loan", uninit, r, [set 3 (op M.UninitNew [cp 2])], op M.UninitTake [mv 3], readRef)
+        , ("variant projection carries the payload loan", TNamed "Option" [], TVariant "Option::Some", [set 3 (M.MakeData "Option::Some" [("ref", cp 2)])], M.AsVariant (cp 3) "Option::Some", [set 5 (M.ReadField (cp 4) "Option::Some" "ref"), set 6 (M.Deref (cp 5))])
+        , ("unbox carries loans in a holder", TBox holder, holder, [set 7 (M.MakeData "LoanHolder" [("ref", cp 2)]), set 3 (M.MakeBox (mv 7))], M.Unbox (cp 3), useHolder)
+        , ("dereferencing a borrowed field carries the held loan", TRef r, r, [set 7 (M.MakeData "LoanHolder" [("ref", cp 2)]), set 3 (M.Borrow (l 7) [M.RefField "LoanHolder" "ref"] False)], M.Deref (cp 3), readRef)
+        , ("Addr write carries the written loan", block, block, [set 3 (op M.BlockNew [int 0, int 1])], op M.AddrWrite [int 0, int 0, cp 2, mv 3], useBlock)
+        , ("Addr get carries the slot loan", block, r, [set 3 (op M.BlockNew [int 0, int 1])] ++ writeBlock, op M.AddrGet [int 0, int 0, cp 3], readRef ++ [set 6 (op M.AddrFree [int 0, mv 3])])
+        , ("Addr take carries the slot loan even without a tuple", block, r, [set 3 (op M.BlockNew [int 0, int 1])] ++ writeBlock, op M.AddrTake [int 0, int 0, cp 3], [set 6 (op M.AddrFree [int 0, mv 3])] ++ readRef)
+        , ("Block split low carries the slot loans", block, block, [set 3 (op M.BlockNew [int 0, int 1])] ++ writeBlock, op M.BlockSplitLo [cp 3, int 1], useBlock ++ [set 6 (op M.AddrFree [int 0, mv 3])])
+        , ("Block split high carries the slot loans", block, block, [set 3 (op M.BlockNew [int 0, int 1])] ++ writeBlock, op M.BlockSplitHi [mv 3, int 1], useBlock)
+        , ("Block resize carries the slot loans", block, block, [set 3 (op M.BlockNew [int 0, int 1])] ++ writeBlock, op M.BlockResized [mv 3, int 2, int 4], useBlock)
+        ]
+    withLoan ls setup result use = requireError "owner cannot be assigned while it is borrowed by result" (check [] Map.empty (ls ++ [(5, r), (6, TInt), (7, holder)]) (end (borrow ++ setup ++ [result, set 1 (M.Use (int 2))] ++ use)))
+    refuse msg ls ss = requireError msg (check [] Map.empty ([(1, TInt), (2, r)] ++ ls) (end (borrow ++ ss)))
+    unsourced = requireError "the call gives a value that can hold a reference and is given nothing it could hold or borrow" $
+        check [] (Map.singleton "source" (fn "source" [] (Just r) [(0, r)] [])) [(4, r)]
+            [(b0, M.BasicBlock [] (M.Call (M.Const (M.CFn "source")) [] (l 4) b1)), (b1, M.BasicBlock [] M.Unreachable)]
+    returnsOwn = requireError "the value returned holds a reference to owner" $
+        check [] Map.empty [(0, block), (1, TInt), (2, r), (3, block)]
+            [(b0, M.BasicBlock (borrow ++ [set 3 (op M.BlockNew [int 0, int 1])] ++ writeBlock ++ [set 0 (M.Use (mv 3))]) M.Return)]
+    externName = "extern importSlots"
+    foreignCase ret args expected =
+        let foreignFn = fn externName (map fst args) (Just ret) ((0, ret) : args) []
+            es = check (map fst args) (Map.singleton externName foreignFn) ((4, ret) : args)
+                [(b0, M.BasicBlock [] (M.Call (M.Const (M.CFn externName)) (map (mv . fst) args) (l 4) b1)), (b1, M.BasicBlock (if ret == block then [set 4 (op M.AddrFree [int 0, mv 4])] else []) M.Unreachable)]
+         in maybe (testAssertEq es []) (`requireError` es) expected
+    foreignValue viaStore =
+        let sig = TFn [] block
+            value = M.Use (M.Const (M.CFn externName))
+            ls = [(3, TMutRef sig), (4, sig)]
+            action = if viaStore then M.AssignRef (l 3) [] value else set 4 value
+         in requireError "importSlots is an extern fn that gives a value that can hold a reference, so it cannot be used as a value" $
+            check [] (Map.singleton externName (fn externName [] (Just block) [(0, block)] [])) ls (end [action])
+    slotGuard ty = requireError "Addr::get cannot read a slot that may hold an update reference yet" (slotErrors ty)
+    slotErrors ty =
+        check [3] Map.empty [(3, TBlock ty), (4, ty), (6, TInt)] (end [set 4 (op M.AddrGet [int 0, int 0, cp 3]), set 6 (op M.AddrFree [int 0, mv 3])])
+
+permissionCases :: Test
+permissionCases = TestList "loans in permissions and at calls"
+    [ testCase "a copy of the shared slot reference outlives the permission" (pipelineRuns "x = 12; (p, b) = Addr::alloc(1); b = Addr::write(p, 0, &x, b); r = Addr::get(p, 0, b); b = Addr::dropValue(p, 0, b); d = Addr::free(p, b); return *r + d;" (VInt 12))
+    , testCase "take a mutable slot before updating it" (pipelineRuns "x = 3; (p, b) = Addr::alloc(1); b = Addr::write(p, 0, &mut x, b); (r, b) = Addr::take(p, 0, b); d = Addr::free(p, b); *r = 8; return x + d;" (VInt 8))
+    , testCase "the validator forgets an old pointee fact after a slot is taken and updated" (pipelineRejected "x = 3; (p, b) = Addr::alloc(1); b = Addr::write(p, 0, &mut x, b); (r, b) = Addr::take(p, 0, b); d = Addr::free(p, b); *r = 8; affirm x = 3; return x + d;" "Could not prove: x = 3")
+    , testCase "a write through another permission's taken reference validates and runs" (pipelineRuns "x = 4; y = 2; (p, b) = Addr::alloc(1); b = Addr::write(p, 0, &x, b); (q, c) = Addr::alloc(1); c = Addr::write(q, 0, &mut y, c); (u, c) = Addr::take(q, 0, c); k = Addr::free(q, c); *u = 3; affirm base(b) = p; (r, b) = Addr::take(p, 0, b); d = Addr::free(p, b); return *r + y + k + d;" (VInt 7))
+    , testCase "a bound call without from keeps the storage it lends" (pipelineRejected "fn g<S: Sequence<Int>>(s: S) -> Int [{ affirm size(s) > 0; }] [{ }] { r = s.getRef(0); t = s; return *r + size(t); }; l = push(push([], 4), 5); return g(l);" "s is borrowed by r, so it cannot be moved while that borrow is live")
+    , testCase "a bridge holder with no declaration is conservatively reference-bearing" undeclaredBridgeHolder
+    , testCase "a nongeneric user struct named Box stays distinct from builtin Box<T>" (parseEvalProgramHelper "struct Box { item: Int }; b = Box { item: 8 }; return b.item;" (Just (VInt 8)))
+    , testCase "primitive list and Box operations keep scalar behavior" (pipelineRuns "xs = push([], 4); b = Box::new(7); return first(xs) + Box::unbox(b);" (VInt 11))
+    , testCase "a no-argument function can return a function value" (pipelineRuns "fn dbl(n: Int) -> Int { return n * 2; }; fn pick() -> fn(Int) -> Int { return dbl; }; g = pick(); return g(4);" (VInt 8))
+    ]
+
+undeclaredBridgeHolder :: TestResult
+undeclaredBridgeHolder = case lowerSource True source of
+    Error e -> Just e
+    Ok program -> case validateCompiled program of
+        Error e -> Just ("Refused with the declaration: " ++ e)
+        Ok () -> case validateCompiled program{M.progTypes = Map.delete "S" (M.progTypes program)} of
+            Ok () -> Just "validated after removing the holder's declaration"
+            Error _ -> Nothing
+  where
+    source = "struct S { n: Int }; fn f(c: Int) -> Int { x = 1; s = S { n: 5 }; rs = push([], &mut x); p = get(rs, 0); *p = 2; affirm s.n = 5; return s.n + x; }; return f(1);"
