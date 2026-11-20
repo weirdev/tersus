@@ -498,7 +498,7 @@ fn namedWithArgs(m: &Maps, params: &HashSet<String>, name: &String) -> Txt ~ {
     depth = 0;
     start = 1;
     i = 1;
-    while i < n - 1 [{ affirm i >= 1; }] shrinks n - 1 - i {
+    while i < n - 1 [{ affirm i >= 1; affirm i <= n - 1; affirm start >= 1; affirm start <= i; }] shrinks n - 1 - i {
         b = get(rest.bytes, i);
         if b = toByte(60) { depth = depth + 1; };
         if b = toByte(62) { depth = depth - 1; };
