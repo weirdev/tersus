@@ -1,6 +1,6 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.34.2.
+-- This file has been generated from package.yaml by hpack version 0.39.6.
 --
 -- see: https://github.com/sol/hpack
 
@@ -15,12 +15,14 @@ copyright:      2024
 license:        BSD-3-Clause
 build-type:     Simple
 extra-source-files:
-    lib/types.tersus
-    lib/lists.tersus
-    lib/prelude.tersus
-    lib/eq.tersus
-    lib/clone.tersus
-    lib/string.tersus
+    lib/std/package.tersus
+    lib/std/core/ownership.tersus
+    lib/std/core/types.tersus
+    lib/std/lists/lists.tersus
+    lib/std/prelude/prelude.tersus
+    lib/std/eq/eq.tersus
+    lib/std/core/clone.tersus
+    lib/std/string/string.tersus
     lib/mir/package.tersus
     lib/mir/reader/reader.tersus
     lib/mir/support/support.tersus
@@ -117,10 +119,10 @@ extra-source-files:
     lib/validation/state.tersus
     lib/validation/validation.tersus
     lib/stdlib.tersus
-    lib/box.tersus
-    lib/map.tersus
-    lib/set.tersus
-    lib/thread.tersus
+    lib/std/box/box.tersus
+    lib/std/map/map.tersus
+    lib/std/set/set.tersus
+    lib/std/thread/thread.tersus
 
 source-repository head
   type: git
@@ -182,6 +184,8 @@ library
       Utils
       ValidatorNative
   other-modules:
+      Paths_tersus
+  autogen-modules:
       Paths_tersus
   hs-source-dirs:
       src
@@ -254,6 +258,8 @@ executable emitter-seed
   main-is: Main.hs
   other-modules:
       Paths_tersus
+  autogen-modules:
+      Paths_tersus
   hs-source-dirs:
       dev/emitter-seed
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
@@ -272,6 +278,8 @@ executable emitter-seed
 executable frontend-seed
   main-is: Main.hs
   other-modules:
+      Paths_tersus
+  autogen-modules:
       Paths_tersus
   hs-source-dirs:
       dev/frontend-seed
@@ -292,6 +300,8 @@ executable parser-seed
   main-is: Main.hs
   other-modules:
       Paths_tersus
+  autogen-modules:
+      Paths_tersus
   hs-source-dirs:
       dev/parser-seed
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
@@ -310,6 +320,8 @@ executable parser-seed
 executable tersus-exe
   main-is: Main.hs
   other-modules:
+      Paths_tersus
+  autogen-modules:
       Paths_tersus
   hs-source-dirs:
       app
@@ -359,7 +371,6 @@ test-suite tersus-test
       TestHashSet
       TestHeldReferences
       TestLibModules
-      TestLibraryShapes
       TestLink
       TestMirCopies
       TestMirData
@@ -390,12 +401,16 @@ test-suite tersus-test
       TestScheduling
       TestSequence
       TestSharedCache
+      TestStdGraph
+      TestStorage
       TestStorageOracle
       TestStrings
       TestThreads
       TestTraits
       TestValidation
       TestVariadic
+      Paths_tersus
+  autogen-modules:
       Paths_tersus
   hs-source-dirs:
       test
