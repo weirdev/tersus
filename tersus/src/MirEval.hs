@@ -135,6 +135,7 @@ data S = S
     , sOrder :: [(FilePath, FilePath)] -- the files written, by that path and the way the program first spelled it
     , sHeap :: Map Integer Allocation -- the memory that Addr::alloc gave, by the number of each allocation
     , sNextAllocation :: Integer
+    , sRefAllocations :: Set.Set Integer -- the allocations a slot of which may hold a reference: a call rebases them as it does its arguments
     , sReferences :: Bool -- whether the program can make a reference at all: when it cannot, a call passes and returns values as they are
     }
 
@@ -146,7 +147,7 @@ data S = S
 data Allocation = Allocation {allocSize :: Integer, allocSlots :: Map Integer MirValue}
 
 startState :: Program -> String -> S
-startState program input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFiles = Map.empty, sOrder = [], sHeap = Map.empty, sNextAllocation = 1, sReferences = makesReferences program}
+startState program input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFiles = Map.empty, sOrder = [], sHeap = Map.empty, sNextAllocation = 1, sRefAllocations = Set.empty, sReferences = makesReferences program}
 
 -- A reference value (MRef) comes only from a Borrow, and an update parameter is only given one, so a program with neither has no
 -- reference to resolve, rebase or write back at a call
@@ -190,7 +191,7 @@ writeSlot address v = heapE $ \s ->
     slotAt s address `bindResult` \(k, a, slot) ->
         if Map.member slot (allocSlots a)
             then Error "A value was written over a slot that holds one"
-            else Ok ((), s{sHeap = Map.insert k a{allocSlots = Map.insert slot v (allocSlots a)} (sHeap s)})
+            else Ok ((), s{sHeap = Map.insert k a{allocSlots = Map.insert slot v (allocSlots a)} (sHeap s), sRefAllocations = if null (refRoots v) then sRefAllocations s else Set.insert k (sRefAllocations s)})
 
 -- The allocation that starts at the address
 wholeAt :: S -> Integer -> Result (Integer, Allocation) String
@@ -205,7 +206,7 @@ release :: Integer -> E ()
 release address = heapE $ \s ->
     wholeAt s address `bindResult` \(k, a) ->
         if Map.null (allocSlots a)
-            then Ok ((), s{sHeap = Map.delete k (sHeap s)})
+            then Ok ((), s{sHeap = Map.delete k (sHeap s), sRefAllocations = Set.delete k (sRefAllocations s)})
             else Error "Memory that still holds a value was freed, which would lose it"
 
 -- The slots moved to a new allocation of n: those from n have to be empty
@@ -216,7 +217,23 @@ reallocate address n = do
             then Error "Memory was resized to fewer slots than hold values"
             else Ok (allocSlots a, s{sHeap = Map.delete k (sHeap s)}))
     q <- allocate n
-    heapE (\s -> let k = q `div` allocationSpan in Ok (q, s{sHeap = Map.adjust (\a -> a{allocSlots = moved}) k (sHeap s)}))
+    heapE (\s ->
+        let k = q `div` allocationSpan
+            old = address `div` allocationSpan
+            refs = if Set.member old (sRefAllocations s) then Set.insert k (Set.delete old (sRefAllocations s)) else sRefAllocations s
+         in Ok (q, s{sHeap = Map.adjust (\a -> a{allocSlots = moved}) k (sHeap s), sRefAllocations = refs}))
+
+-- The values of the slots of the allocations that may hold a reference
+heapReferences :: E [MirValue]
+heapReferences = E (\_ s -> Ok ([v | k <- Set.toList (sRefAllocations s), Just a <- [Map.lookup k (sHeap s)], v <- Map.elems (allocSlots a)], none, s))
+
+-- Each slot of those allocations given what f makes of its value
+rewriteHeapReferences :: (MirValue -> Result MirValue String) -> E ()
+rewriteHeapReferences f = heapE (\s -> mapResult (\heap -> ((), s{sHeap = heap})) (foldl step (Ok (sHeap s)) (Set.toList (sRefAllocations s))))
+  where
+    step acc k = acc `bindResult` \heap -> case Map.lookup k heap of
+        Nothing -> Ok heap
+        Just a -> mapResult (\slots -> Map.insert k a{allocSlots = Map.fromDistinctAscList slots} heap) (mapResults (\(i, v) -> mapResult ((,) i) (f v)) (Map.toAscList (allocSlots a)))
 
 -- The evaluator is a function of what the program is run in and of its state, and the failure of a result, with the bytes written so far
 newtype E a = E {runE :: RunEnv -> S -> Result (a, Written, S) String}
@@ -364,20 +381,28 @@ runBlock program fn block frame =
                             (result, _) <- callFunction program f argValues Map.empty
                             runBlock program fn next (Map.insert dest result frame')
                         else do
-                            resolved <- liftE (mapResults (resolveRef frame') argValues)
+                            -- (a lent parameter is a local of its referent's type, so it is given the value its argument
+                            -- is to; any other parameter, one of a type parameter given a reference included, is given
+                            -- the reference)
+                            let lent = case f of
+                                    MFn name | Just fn' <- Map.lookup name (progFunctions program) -> map (`elem` (fnBorrowed fn' ++ fnMutBorrowed fn')) (fnParams fn') ++ repeat True
+                                    _ -> repeat True
+                            resolved <- liftE (mapResults (\(isLent, v) -> if isLent then resolveRef frame' v else Ok v) (zip lent argValues))
+                            heapValues <- heapReferences
                             let normArgs = map (normaliseRefs frame') resolved
-                                synthRoots = refRootClosure frame' normArgs
+                                synthRoots = refRootClosure frame' (normArgs ++ map (normaliseRefs frame') heapValues)
                                 synthMap = Map.fromList (zip synthRoots [Local (1000000 + i) | i <- [0 ..]])
                                 calleeArgs = map (rewriteRefRoots synthMap) normArgs
                                 synthFrame = Map.fromList [(synth, rewriteRefRoots synthMap (normaliseRefs frame' v)) | (root, synth) <- Map.toList synthMap, Just v <- [Map.lookup root frame']]
+                            rewriteHeapReferences (Ok . rewriteRefRoots synthMap . normaliseRefs frame')
                             (result, calleeFrame) <- callFunction program f calleeArgs synthFrame
                             -- (a result that is a reference, or holds them in its fields, is to a place of an argument:
                             -- the same place in this frame. References to the callee's own places cannot be returned,
                             -- which the checker has already refused.)
-                            -- (every value that goes back to the caller, the result, an update parameter's final value
-                            -- and a given place's final value, can hold references the callee made to its own parameters
-                            -- or to the places it was given: each is rebased onto the caller's places, against the frame
-                            -- before the call, before anything is written)
+                            -- (every value that goes back to the caller, the result, an update parameter's final value,
+                            -- a given place's final value and a slot of memory, can hold references the callee made to its
+                            -- own parameters or to the places it was given: each is rebased onto the caller's places,
+                            -- against the frame before the call, before anything is written)
                             let invSynth = Map.fromList [(s, r) | (r, s) <- Map.toList synthMap]
                                 outgoing v = case f of
                                     MFn name | Just callee <- Map.lookup name (progFunctions program) -> mapResult (rewriteRefRoots invSynth) (rebaseRefs program callee calleeFrame args frame' v)
@@ -387,8 +412,12 @@ runBlock program fn block frame =
                                 MFn name | Just callee <- Map.lookup name (progFunctions program) -> mapResults (\p -> outgoing (Map.findWithDefault MEmpty p calleeFrame)) (fnParams callee)
                                 _ -> Ok []
                             synthValues <- liftE (mapResults (\(root, synth) -> mapResult (\v -> (root, v)) (traverseMaybe outgoing (Map.lookup synth calleeFrame))) (Map.toList synthMap))
-                            frame'' <- liftE (writeBack program frame' f args finalParams)
-                            frame3 <- liftE (foldl (\acc (root, mv) -> acc `bindResult` \fr -> case mv of Just v -> writePlace fr root [] v; Nothing -> Ok fr) (Ok frame'') synthValues)
+                            rewriteHeapReferences outgoing
+                            -- (a given place is written before the update parameters: an argument can hold a reference into
+                            -- the root of a place lent for updating, at a disjoint path, and the copy of that root the callee
+                            -- was given still has the part lent for updating as it was before the call)
+                            frame'' <- liftE (foldl (\acc (root, mv) -> acc `bindResult` \fr -> case mv of Just v -> writePlace fr root [] v; Nothing -> Ok fr) (Ok frame') synthValues)
+                            frame3 <- liftE (writeBack program frame'' f args finalParams)
                             runBlock program fn next (Map.insert dest result2 frame3)
                 Return -> return (Map.lookup (Local 0) frame', frame')
                 Unreachable -> failE "Function did not return a value"
