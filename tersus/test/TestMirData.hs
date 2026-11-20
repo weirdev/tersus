@@ -106,7 +106,7 @@ testMirData =
                     []
                     []
                     emptySpec
-            program = Program (Map.fromList [("Callback", StructDecl [("f", contractFnType)])]) Map.empty mainFn Map.empty Map.empty Map.empty Map.empty
+            program = Program (Map.fromList [("Callback", StructDecl [("f", contractFnType)])]) Map.empty mainFn Map.empty Map.empty Map.empty Map.empty Map.empty Nothing
             text = writeProgram program
             malformed = "tersus-mir 1\nstruct \"P\" 1 \"f\" fnc 1 int int 2 \"x\" \"y\" 0 0\nmain \"m\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0\nend\n"
          in case (readProgram text, readProgram malformed) of

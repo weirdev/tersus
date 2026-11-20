@@ -616,7 +616,7 @@ loanTableCases = TestList "MIR loan rules"
         , testCase "shared path: lent for updating through a function value" (expectShared True False True False (sharedPathProgram [3, 9, 23] [3] [] [] [set 5 (M.ReadField (cp 3) "UpdateHolder" "ref")] ([], Just (M.Call (cp 23) [cp 5] (l 7) b1))))
         , testCase "shared path: a loop's back edge that changes only the mark is seen on the next turn" (testAssertEq ["in loans: p may be reached through a shared reference or a parameter lent to be read (&T), so nothing can be changed through it: it cannot be given on"] (markOnlyLoop True))
         , testCase "shared path: the same loop over a parameter given by value stays writable" (testAssertEq [] (markOnlyLoop False))
-        , testCase "shared path: a drop writes through what it is given" (testAssertEq [] (checkMoves Set.empty Set.empty (Set.singleton "UpdateHolder") (M.Program declarations Map.empty dropFn generics Map.empty Map.empty Map.empty)))
+        , testCase "shared path: a drop writes through what it is given" (testAssertEq [] (checkMoves Set.empty Set.empty (Set.singleton "UpdateHolder") (M.Program declarations Map.empty dropFn generics Map.empty Map.empty Map.empty stdProtocols Nothing)))
         ]
     sharedNames = Map.fromList [(6, "$match"), (5, "p")]
     -- (the holder is a clone, on entry of a parameter given by value and on the back edge of one lent to be read: clones have
@@ -636,7 +636,7 @@ loanTableCases = TestList "MIR loan rules"
                 , (b1, M.BasicBlock [] M.Unreachable)
                 ]
             main = M.Function "loans" (map l [24, 25, 9]) Nothing decls (Map.fromList blocks) [] [] [l 24 | lentToRead] [] [] M.emptySpec
-         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations calleeFns main generics Map.empty Map.empty Map.empty)
+         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations calleeFns main generics Map.empty Map.empty Map.empty stdProtocols Nothing)
     sharedLocals = [(1, TInt), (3, updateHolder), (4, updateHolder), (5, TMutRef TInt), (6, updateHolder), (7, TInt), (8, TRef updateHolder), (9, TBool), (10, TMutRef TInt), (11, TInt), (12, TMutRef TInt), (13, TList updateHolder), (14, TBox updateHolder), (15, updateOption), (16, TVariant "UpdateOption::Some"), (17, TUninit updateHolder), (18, TRef TInt), (19, TMutRef updateHolder), (21, TList updateHolder), (22, updateHolder), (23, TFn [TMutRef TInt] TInt)]
     updateOption = TNamed "UpdateOption" []
     calleeFns = Map.fromList
@@ -657,7 +657,7 @@ loanTableCases = TestList "MIR loan rules"
                 | otherwise = [(b0, M.BasicBlock (setup ++ final) (maybe M.Unreachable id call))]
             ends = [(b1, M.BasicBlock [] M.Unreachable)]
             main = (M.Function "loans" (map l params) Nothing decls (Map.fromList (blocks ++ ends)) [] [] (map l borrowed) (map l mutBorrowed) [] M.emptySpec)
-         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations calleeFns main generics Map.empty Map.empty Map.empty)
+         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations calleeFns main generics Map.empty Map.empty Map.empty stdProtocols Nothing)
     b2 = M.BlockId 2
     b3 = M.BlockId 3
     b4 = M.BlockId 4
