@@ -196,6 +196,8 @@ fn prependGhosts(root: FullFunction, units: &List<LinkUnit>) -> FullFunction ~ {
 };
 fn linkPrograms(input: &List<LinkUnit>) -> Linked ~ {
     if size(input) = 0 { return failedLink("link error: no modules to link"); };
+    // (checked providers and facts are a build's, which merging units would have to agree on: not merged yet, so refused)
+    for unit in input { if unit.program.checked || size(unit.program.protocols) > 0 || size(unit.program.boundedFacts) > 0 { return failedLink("link error: checked protocol and ownership records are not merged yet"); }; };
     units = [];
     for unit in input {
         u = LinkUnit { pkg: clone(unit.pkg), modu: clone(unit.modu), hasModule: unit.hasModule, program: normalizeExterns(clone(unit.program)) }; found = false;
@@ -227,5 +229,5 @@ fn linkNormalized(units: &List<LinkUnit>, nodes: List<AstNode>, shared: List<Lis
     if size(units) = 0 { return failedLink("link error: no modules to link"); };
     root = &get(units, size(units) - 1).program;
     entry = completeFunction(prependGhosts(clone((*root).entry), units), &completion.mapping, completion.empty, true);
-    return Linked { ok: true, message: "", program: FullProgram { types: types.rows, functions: functions.functions, entry: entry, generics: generics.rows, invariants: invariants.rows, bounded: bounded.rows, instances: instances.rows, trailer: clone((*root).trailer), arena: nodes, shared: completion.tables } };
+    return Linked { ok: true, message: "", program: FullProgram { types: types.rows, functions: functions.functions, entry: entry, generics: generics.rows, invariants: invariants.rows, bounded: bounded.rows, boundedFacts: [], instances: instances.rows, protocols: [], ownership: [], checked: false, trailer: clone((*root).trailer), arena: nodes, shared: completion.tables } };
 };
