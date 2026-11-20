@@ -1,0 +1,17 @@
+// Threads: a sum split across four threads. Each part is a closure started with Thread::spawn, which shares nothing with
+// the program that starts it; a Thread is linear, so each one is joined.
+fn sumRange(lo: Int, hi: Int) -> Int [{ }] [{ }] {
+    s = 0;
+    i = lo;
+    while i < hi [{ affirm i >= lo; }] shrinks hi - i {
+        s = s + i;
+        i = i + 1;
+    };
+    return s;
+};
+
+a = Thread::spawn(fn() -> Int => sumRange(0, 250));
+b = Thread::spawn(fn() -> Int => sumRange(250, 500));
+c = Thread::spawn(fn() -> Int => sumRange(500, 750));
+d = sumRange(750, 1000);
+return a.join() + b.join() + c.join() + d;

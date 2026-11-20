@@ -1236,7 +1236,7 @@ It is a `while` loop and is validated as one: `lo` and `hi` are evaluated once, 
 
 ```tersus
 lo = 0; hi = size(a); i = lo;
-while i < hi [{ affirm i >= lo; affirm i <= hi; }] shrinks hi - i {
+while i < hi [{ affirm i >= lo; }] shrinks hi - i {
     s = s + get(a, i);
     i = i + 1;
 };
@@ -2041,6 +2041,27 @@ A `HashSet<K>` is a set of keys, in `lib/set.tersus`: a program that mentions `H
 
 - **Future work.** Two things are left for later, and neither changes what a program that runs does. Improved proof contracts: a ghost model of the entries (as a list has its `Block`) that the functions keep true, so that `insert` can promise the key is found with its value, `lookup` of a key that is there can be known to give it, and a caller can prove `fetch` after an insert instead of asking for the key as a precondition. A list of references: `lookupRef` and `entryRef`/`elementRef` already read by reference, but a `List<&Entry>` result cannot be written yet, since a reference built into a list with `push` is not tracked as being from the map (see REFERENCES.md), so going through the entries by reference is one `entryRef(n)` at a time.
 
+
+## Threads
+
+A `Thread<T>` runs a closure and gives its result when it is joined, in `lib/thread.tersus`: a program that mentions `Thread` has it imported for it, and a program that declares a `Thread` of its own does not get it.
+
+```tersus
+fn sumRange(lo: Int, hi: Int) -> Int [{ }] [{ }] {
+    s = 0; i = lo;
+    while i < hi [{ affirm i >= lo; }] shrinks hi - i { s = s + i; i = i + 1; };
+    return s;
+};
+a = Thread::spawn(fn() -> Int => sumRange(0, 500));
+b = sumRange(500, 1000);
+return a.join() + b;    // 499500
+```
+
+- **`Thread::spawn(f)`** takes the closure through an `FnOnce() -> T` bound and gives a `Thread<T>`; **`t.join()`** gives the closure's result. A named function with no parameters is given as one too (`Thread::spawn(work)`).
+- **A thread shares nothing with the program that starts it.** The closure and its result cannot hold a reference, so a closure that borrows a capture is refused (`Thread::spawn is given a closure that borrows xs: a thread cannot hold a reference (capture by value with move fn)`); write `move fn`, which moves what it captures into the closure. So running a closure on a thread gives the values that running it where it is started gives, which is how the validator and `tersus eval` read it: `eval` runs the closure at the spawn. A type argument cannot be linear or hold a permission, so neither can be given to a thread or come back from one yet.
+- **What a caller can prove** is what the bound says, which is nothing: `t = Thread::spawn(fn() -> Int => 42); r = t.join(); affirm r = 42;` is refused, as `map` promises only the size. A fact about the result comes through its type, a struct with an invariant. A fact the closure needs about what it captured is a clause of its input contract that names only captures, proved where the closure is made (`move fn() -> Int [{ affirm k >= 0; }] [{ }] => work(k)`, see Closures); its calls are checked as any body's are.
+- **A Thread is linear**: it is joined exactly once, by the program or by a function it is given to, so a program cannot end with a thread running. A `Thread` cannot be in a list (a linear value is in no list), and a closure has no termination clause, so a closure that calls the function that starts it is refused (`that fan ends: it may diverge, and $closure$...$body may not`): for now the threads a program starts are written out, as above.
+- **Native code runs the closures one after another for now**, where they are started, as `eval` does; running them at the same time is next. What a thread writes then comes in no fixed order with what the rest of the program writes.
 
 ## Bytes
 

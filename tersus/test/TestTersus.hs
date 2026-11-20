@@ -62,6 +62,7 @@ import TestEmitterProvenance
 import TestEq
 import TestHashMap
 import TestHashSet
+import TestThreads
 import TestBuiltinRegistry
 import TestSharedCache
 import TestScheduling
@@ -236,6 +237,7 @@ originalGroups =
     , testEq
     , testHashMap
     , testHashSet
+    , testThreads
     , testModules
     , testPhase1Packages
     , testPhase2Packages

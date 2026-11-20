@@ -36,7 +36,7 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   `src/PackageCompile.hs`), then lowers and links the modules with the
   libraries the elaborator selected.
 - `tersus/lib/` (Tersus sources the Haskell implementation depends on). The
-  first seven are the compiler libraries: each is compiled as one module of the
+  first eight are the compiler libraries: each is compiled as one module of the
   synthetic `tersuslib` package (`src/LibPackage.hs`) from its `PreludeSource`
   text, selected per module by the elaborator by the rule of
   `lib/elaborate/libraries.tersus` (which also picks the declarations a single file is
@@ -63,6 +63,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   - `set.tersus`: the struct `HashSet`, made of a map, imported for a program
     that mentions `HashSet`. It imports `map`, `prelude`, `eq` and `clone`.
     Embedded by `PreludeSource`.
+  - `thread.tersus`: the linear struct `Thread`, a closure started by
+    `Thread::spawn` and joined for its result, imported for a program that
+    mentions `Thread`. It imports nothing. Embedded by `PreludeSource`.
   - `lists.tersus` and `box.tersus`: native-only List/Box helper modules of
     the same synthetic `tersuslib` package. They import the types and traits
     they use; `types.tersus` alone owns the structs and layout invariants.

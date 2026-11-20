@@ -657,7 +657,7 @@ fn parseSource(snap: &Snap, libs: &LibParse, text: &String) -> SourceParse ~ {
         if equality { return sourceFailed(clone(libs.msg)); };
         return sourceFailed(catStrings("Parse error: ", libs.msg));
     };
-    probeNames = push(push(push(push([], "prelude"), "string"), "map"), "set");
+    probeNames = push(push(push(push(push([], "prelude"), "string"), "map"), "set"), "thread");
     probeDecls = libDecls(libs, &probeNames, libs.regular);
     if !equality { probeDecls = locating(probeDecls); };
     probe = probeParse(&probeDecls, text);
