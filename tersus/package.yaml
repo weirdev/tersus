@@ -112,6 +112,7 @@ extra-source-files:
 - lib/box.tersus
 - lib/map.tersus
 - lib/set.tersus
+- lib/thread.tersus
 
 # Metadata used when publishing your package
 # synopsis:            Short description of your package

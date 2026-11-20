@@ -120,6 +120,7 @@ extra-source-files:
     lib/box.tersus
     lib/map.tersus
     lib/set.tersus
+    lib/thread.tersus
 
 source-repository head
   type: git
@@ -391,6 +392,7 @@ test-suite tersus-test
       TestSharedCache
       TestStorageOracle
       TestStrings
+      TestThreads
       TestTraits
       TestValidation
       TestVariadic

@@ -317,6 +317,7 @@ measuredWeights =
     , ("testStrings", 66)
     , ("testStructs", 12)
     , ("testTermination", 14)
+    , ("testThreads", 20)
     , ("testTraits", 62)
     , ("testTypeCheck", 3)
     , ("testUserRewriteValidation", 2)
