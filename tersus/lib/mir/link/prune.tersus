@@ -164,14 +164,41 @@ fn baseName(n: &String) -> String ~ {
     return n.slice(0, i);
 };
 fn addNames(set: HashSet<String>, ns: &List<String>) -> HashSet<String> ~ { for n in ns { set = set.insert(clone(n)); }; return set; };
+// Whether the text has the pattern at or after a position
+fn textFrom(n: &String, pattern: &String, from: Int) -> Int ~ {
+    if from < 0 { return 0 - 1; };
+    i = from;
+    while i + size(pattern.bytes) <= size(n.bytes) [{ affirm i >= 0; }] shrinks size(n.bytes) - i {
+        if n.slice(i, i + size(pattern.bytes)) = *pattern { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+// A copy of a function with bounds (`f[T]`), not the check of an impl (`Trait for Type::f`)
+fn copyName(n: &String) -> Bool ~ {
+    forAt = textFrom(n, " for ", 0);
+    implCheck = forAt >= 0 && textFrom(n, "::", forAt + 5) >= 0;
+    return textFrom(n, "[", 0) >= 0 && !implCheck;
+};
+// A kept type keeps its impls and its base's impls that are not copies: a copy of a base's impl for another instance is
+// kept by what calls it, or by that instance's facts
 fn implRefs(p: &FullProgram, ty: &String) -> List<String> ~ {
     prefix = catStrings(catStrings("<", clone(ty)), " as "); base = catStrings(catStrings("<", baseName(ty)), " as "); out = [];
     for i in 0..size(p.functions) {
         f = &get(p.functions, i); header = &(*f).header;
         if size(header) > 1 {
             n = &get(header, 1).text;
-            if (*n).startsWith(&prefix) || (*n).startsWith(&base) { out = push(out, clone(*n)); };
+            if (*n).startsWith(&prefix) || ((*n).startsWith(&base) && !copyName(n)) { out = push(out, clone(*n)); };
         };
+    };
+    return out;
+};
+// The functions a kept type's checked facts name: its Drop, Clone and Deref
+fn factRefs(p: &FullProgram, ty: &String) -> List<String> ~ {
+    out = []; i = rowIndex(&p.ownership, ty);
+    if i >= 0 && i < size(p.ownership) {
+        row = clone(get(&p.ownership, i).tokens);
+        for k in 0..3 { f = textAt(&row, 4 + 2 * k); if size(f.bytes) > 0 && fnIndex(&p.functions, &f) >= 0 { out = push(out, f); }; };
     };
     return out;
 };
@@ -213,7 +240,7 @@ fn pruneProgram(p: FullProgram) -> FullProgram ~ {
         for n in types.elements() {
             if !HashSet::contains(&processedTypes, n) {
                 processedTypes = processedTypes.insert(clone(n));
-                fns = addNames(fns, implRefs(&p, n)); i = rowIndex(&p.invariants, n);
+                fns = addNames(fns, implRefs(&p, n)); fns = addNames(fns, factRefs(&p, n)); i = rowIndex(&p.invariants, n);
                 if i >= 0 && i < size(p.invariants) { refs = payloadRefs(&p.arena, integerAt(&get(p.invariants, i).tokens, 2).value, false); for f in &refs { if fnIndex(&p.functions, f) >= 0 { fns = fns.insert(clone(f)); }; }; };
                 i = rowIndex(&p.types, n); if i >= 0 && i < size(p.types) { types = addNames(types, declarationTypes(&get(p.types, i))); };
             };

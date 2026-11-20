@@ -39,8 +39,6 @@ fn runLink(lines: &List<List<Token>>) -> Bool ~ {
     if size(command) != 1 { return linkError("the linking request has no operation"); };
     p = fullAt(takeRows(lines, 2, size(lines))); if !p.ok { return linkError("the linking request contains unreadable MIR3"); };
     program = p.value;
-    // (a type's checked facts follow the types pruning keeps: not pruned yet, so refused)
-    if wordIs(&command, 0, "prune") && (program.checked || size(program.boundedFacts) > 0) { return linkError("link error: checked ownership records are not pruned yet"); };
     if wordIs(&command, 0, "prune") { program = pruneProgram(program); } else {
         if wordIs(&command, 0, "environments") { program = completeSpecEnvs(program); } else { return linkError("the linking request has no operation"); };
     };

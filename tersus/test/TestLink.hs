@@ -354,18 +354,57 @@ testLinkNative = TestList "testLinkNative"
                                     , withFacts ["boundedfacts \"f\" \"int\" \"\" \"\" \"\" \"\" \"\" \"\" \"\""]
                                     , withFacts ["boundedfacts \"f\" int \"\" \"\" \"\" \"\" \"\" \"\""]
                                     ]
-                                (_, factsPruneOut, factsPruneErrors) <- Native.runWithInputFull executable ("pass link\nprune\n" ++ twoTypes)
-                                pure (firstFailure (keptFacts : refusedFacts ++ [firstFailure [testAssertEq factsPruneOut "1\n", testAssertEq factsPruneErrors "link error: checked ownership records are not pruned yet\n"]]))
-                        -- (merging, pruning and specializing do not drop checked records: until they handle them, they refuse them)
+                                -- (two units that define one function with bounds have its facts alike)
+                                let units parts = "pass link\nmerge " ++ show (length parts) ++ "\n" ++ concat ["unit \"" ++ pkg ++ "\" none " ++ show (length (lines part)) ++ "\n" ++ part | (pkg, part) <- parts]
+                                (_, factsMerged, factsMergeErrors) <- Native.runWithInputFull executable (units [("a", twoTypes), ("b", twoTypes)])
+                                (_, factsClash, factsClashErrors) <- Native.runWithInputFull executable (units [("a", twoTypes), ("b", withFacts [copyFact])])
+                                pure (firstFailure (keptFacts : refusedFacts ++
+                                    [ firstFailure [testAssertEq factsMergeErrors "", testAssertEq factsMerged twoTypes]
+                                    , firstFailure [testAssertEq factsClash "1\n", testAssertEq factsClashErrors "link error: function with bounds f is defined by both module a and module b with different definitions\n"]
+                                    ]))
+                        -- (merging and pruning keep the checked records: units agree on each provider and each owner's facts,
+                        -- and are all checked or none; specializing does not handle them yet, so it refuses them)
+                        let units parts = "pass link\nmerge " ++ show (length parts) ++ "\n" ++ concat ["unit \"" ++ pkg ++ "\" none " ++ show (length (lines part)) ++ "\n" ++ part | (pkg, part) <- parts]
+                            otherProvider = withRecords ["protocol \"Box\" \"other$Box\"", last protocols, "ownership 2", negative, positive]
+                            otherFacts = withRecords (protocols ++ ["ownership 2", "owned \"A\" \"std$core$ownership$Copy\" \"\" \"\" \"\" \"\" \"\" \"\"", positive])
                         (_, pruneOut, pruneErrors) <- Native.runWithInputFull executable ("pass link\nprune\n" ++ checked)
-                        (_, mergeOut, mergeErrors) <- Native.runWithInputFull executable ("pass link\nmerge 1\nunit \"app\" none " ++ show (length (lines checked)) ++ "\n" ++ checked)
+                        (_, mergeOut, mergeErrors) <- Native.runWithInputFull executable (units [("app", checked)])
+                        (_, sameOut, sameErrors) <- Native.runWithInputFull executable (units [("a", checked), ("b", checked)])
+                        (_, providerOut, providerErrors) <- Native.runWithInputFull executable (units [("a", checked), ("b", otherProvider)])
+                        (_, factsOut, factsErrors) <- Native.runWithInputFull executable (units [("a", checked), ("b", otherFacts)])
+                        (_, mixedOut, mixedErrors) <- Native.runWithInputFull executable (units [("a", checked), ("b", text)])
                         (_, monoOut, monoErrors) <- Native.runWithInputFull executable ("pass mono\n" ++ checked)
                         pure $ firstFailure (positives ++ refusals ++ [bounded] ++
                             [ case reordered of (status, out, errors) -> firstFailure [testAssertEq status ExitSuccess, testAssertEq errors "", testAssertEq out checked]
-                            , firstFailure [testAssertEq pruneOut "1\n", testAssertEq pruneErrors "link error: checked ownership records are not pruned yet\n"]
-                            , firstFailure [testAssertEq mergeOut "1\n", testAssertEq mergeErrors "link error: checked protocol and ownership records are not merged yet\n"]
+                            , firstFailure [testAssertEq pruneErrors "", testAssertEq pruneOut checked]
+                            , firstFailure [testAssertEq mergeErrors "", testAssertEq mergeOut checked]
+                            , firstFailure [testAssertEq sameErrors "", testAssertEq sameOut checked]
+                            , firstFailure [testAssertEq providerOut "1\n", testAssertEq providerErrors "link error: provider Box is defined by both module a and module b with different definitions\n"]
+                            , firstFailure [testAssertEq factsOut "1\n", testAssertEq factsErrors "link error: ownership facts of a type A is defined by both module a and module b with different definitions\n"]
+                            , firstFailure [testAssertEq mixedOut "1\n", testAssertEq mixedErrors "link error: some modules have checked ownership facts and others do not\n"]
                             , firstFailure [testAssertEq monoOut "1\n", testAssertEq monoErrors "checked ownership records are not specialized yet\n"]
                             ])
+       , TestCase "actual emitter prune keeps the functions a kept type's checked facts name, and no others" $ do
+            let owner = M.StructDecl [("n", TInt)]
+                mainFn = (function "" 0){M.fnLocals = Map.fromList [(M.Local 0, M.LocalDecl TInt Nothing), (M.Local 1, M.LocalDecl (TNamed "T" []) Nothing)]}
+                program = empty{M.progTypes = Map.singleton "T" owner, M.progFunctions = Map.fromList [("dropT", function "dropT" 1), ("unused", function "unused" 2)], M.progMain = mainFn}
+            case programData program of
+                Error e -> pure (Just e)
+                Ok text -> do
+                    tool <- actualEmitterTool
+                    case tool of
+                        Error e -> pure (Just e)
+                        Ok executable -> do
+                            let isFunctionLine l = take 9 l == "function " || take 5 l == "main "
+                                facts = unlines (takeWhile (not . isFunctionLine) (lines text) ++ ["ownership 1", "owned \"T\" \"\" \"std$core$ownership$Drop\" \"dropT\" \"\" \"\" \"\" \"\""] ++ dropWhile (not . isFunctionLine) (lines text))
+                                functionsOf out = [takeWhile (/= ' ') (drop 9 l) | l <- lines out, take 9 l == "function "]
+                            (_, plain, plainErrors) <- Native.runWithInputFull executable ("pass link\nprune\n" ++ text)
+                            (_, checked, checkedErrors) <- Native.runWithInputFull executable ("pass link\nprune\n" ++ facts)
+                            pure $ firstFailure
+                                [ testAssertEq plainErrors "", testAssertEq (functionsOf plain) []
+                                , testAssertEq checkedErrors "", testAssertEq (functionsOf checked) ["\"dropT\""]
+                                , testAssertTrue ("owned \"T\"" `isInfixOf` checked)
+                                ]
        , TestCase "dependency main ghosts follow numeric block order despite wire permutation" $ do
             let dep = empty{M.progMain = (M.progMain empty){M.fnBlocks = Map.fromList
                     [(M.BlockId 2, M.BasicBlock [M.Ghost Map.empty (M.GhostPosition 2 1)] M.Return)
