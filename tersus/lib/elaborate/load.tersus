@@ -139,9 +139,7 @@ fn listDecls(names: &List<String>) -> String ~ {
 };
 
 fn feNames(entries: &List<FE>) -> List<String> ~ {
-    out = [];
-    for e in entries { out = push(out, clone(e.name)); };
-    return out;
+    return map(entries, fn(entry: FE) -> String { return entry.name.clone(); });
 };
 
 fn canonicalOf(id: &ModId, hasFile: Bool, file: &String, hasSymbol: Bool, symbol: &String) -> String ~ {
@@ -190,9 +188,7 @@ fn collapsedFile(layout: &Layout, has: Bool, name: &String) -> Collapsed ~ {
 };
 
 fn stemsNamed(entries: &List<FE>, name: &String) -> List<FE> ~ {
-    out = [];
-    for e in entries { if e.stem = clone(name) { out = push(out, clone(e)); }; };
-    return out;
+    return filter(entries, fn(entry: FE) => entry.stem = name.clone());
 };
 
 fn buildLayout(snap: &Snap, root: &String, noPrelude: Bool) -> LayoutR ~ {
@@ -634,9 +630,7 @@ fn checkDeclarationsOnly(id: &ModId, entry: &FE, isEntry: Bool, nodes: &List<Ast
 // ---- Modules.ensureLayout ----
 
 fn layoutNames(ls: &LS) -> List<String> ~ {
-    out = [];
-    for e in HashMap::entries(&ls.layouts) { out = push(out, clone(e.key)); };
-    return out;
+    return hashMapFold(&ls.layouts, [], fn(acc: List<String>, key: &String, ignored: &Layout) -> List<String> { return push(acc, (*key).clone()); });
 };
 
 fn requestedRoots(snap: &Snap, pkg: &String) -> List<String> ~ {

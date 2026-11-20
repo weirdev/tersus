@@ -22,15 +22,14 @@ fn typed(st: St, node: Int, t: Int, inner: &List<TE>) -> St ~ {
 };
 
 fn nodesOf(tes: &List<TE>) -> List<Int> ~ {
-    out = [];
-    for te in tes { out = push(out, te.node); };
-    return out;
+    return map(tes, fn(te: TE) => te.node);
 };
 
 fn typesHeads(tes: &List<TE>) -> List<Int> ~ {
-    out = [];
-    for te in tes { out = push(out, head(&te.types)); };
-    return out;
+    return map(tes, fn(te: TE) -> Int {
+        if size(te.types) = 0 { return 0 - 1; };
+        return get(te.types, 0);
+    });
 };
 
 fn inferAll(st: St, args: &List<Int>) -> St ~ {

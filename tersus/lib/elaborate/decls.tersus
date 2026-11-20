@@ -62,9 +62,7 @@ fn insertEnt(ents: List<Ent>, e: Ent) -> List<Ent> ~ {
 };
 
 fn deleteEnt(ents: List<Ent>, name: &String) -> List<Ent> ~ {
-    out = [];
-    for x in ents { if x.name != clone(name) { out = push(out, clone(x)); }; };
-    return out;
+    return filter(&ents, fn(entry: Ent) => entry.name != name.clone());
 };
 
 // Map.union: the first's entry wins a name
@@ -180,8 +178,7 @@ fn withoutImported(base: &Decls, imported: &Decls, parsed: Decls, own: &Decls) -
 // ---- ParsedFile.declsFromStatements ----
 
 fn hasByte(text: &String, c: Int) -> Bool ~ {
-    for b in &text.bytes { if toInt(b) = c { return true; }; };
-    return false;
+    return any(&text.bytes, fn(byte: Byte) => toInt(byte) = c);
 };
 
 fn fromColon(text: &String) -> String ~ {
@@ -209,9 +206,7 @@ fn catText(a: &String, b: &String) -> String ~ {
 };
 
 fn fieldNamesOf(fields: &List<ps::FieldInfo>) -> List<String> ~ {
-    out = [];
-    for f in fields { out = push(out, clone(f.name)); };
-    return out;
+    return map(fields, fn(field: ps::FieldInfo) -> String { return field.name.clone(); });
 };
 
 fn withGeneric(generics: List<Ent>, name: &String, params: List<String>) -> List<Ent> ~ {
@@ -356,7 +351,6 @@ fn fileDeclarations(nodes: &List<AstNode>, stmts: &List<Int>) -> List<FileDecl> 
 };
 
 fn declarationNames(nodes: &List<AstNode>, stmts: &List<Int>) -> List<String> ~ {
-    out = [];
-    for d in fileDeclarations(nodes, stmts) { out = push(out, clone(d.name)); };
-    return out;
+    decls = fileDeclarations(nodes, stmts);
+    return map(&decls, fn(entry: FileDecl) -> String { return entry.name.clone(); });
 };
