@@ -13,6 +13,7 @@ import MirData (forNative, readProgram, writeOwnedProgramWithGhosts, writeProgra
 import MirEval (MirValue (..), RunEnv (..), Outcome (..), runProgram, runProgramEnv)
 import TestOwnership (runOwned, usesArrays)
 import MirMono (monomorphizeForValidation)
+import System.IO.Unsafe (unsafePerformIO)
 import MirLists (lowerLists)
 import MirHousekeeping (Tool (..), eraseGhosts, expandRefWrites, insertOwnership, monomorphizeWith, nativeProgram, ownershipTool, toolProgram, emitterEntry, verifyProgram)
 import MirOwnershipData (ownershipInput, restoreOwnership)
@@ -178,8 +179,9 @@ testOwnershipInterpreted = TestList "testOwnershipInterpreted"
     -- (a list of these programs is std's List, with the checked facts a compiled program has for it)
     stored = checkedStorage
     -- (the interpreted emitter owns the program as the native tool does, and the owned program runs on the heap model to the executor's answer)
-    -- (on the copies monomorphisation makes, as insertOwnership gives the native tool the program)
-    sameAsNative program = case (interpretedOwnership (monomorphize program), insertOwnership program) of
+    -- (on the copies native monomorphisation makes, as insertOwnership gives the native tool the program)
+    monomorphized p = unsafePerformIO (monomorphizeWith ownershipTool p)
+    sameAsNative program = case (monomorphized program `bindResult` interpretedOwnership, insertOwnership program) of
         (Error e, _) -> Just e
         (_, Error e) -> Just ("native: " ++ e)
         (Ok owned, Ok native) -> firstFailure
