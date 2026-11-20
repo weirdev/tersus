@@ -114,7 +114,7 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     `MirMono.monomorphizeForValidation` retains contracts and ghosts in Haskell.
     `mir/link/` uses the same complete MIR3 codec for `pass link`; the Haskell
     `Link` wrapper uses the pinned emitter seed to avoid cycling through stage 1.
-    `TestLink` checks its canonical output against the frozen `LinkOracle`.
+    `TestLink` checks canonical MIR3 fingerprints and exact Link refusals.
     The emitter's declaration-only `types.tersus`,
     `values.tersus`, `operations.tersus`, `functions.tersus` and
     `helpers.tersus` files are siblings of `emit.tersus` in one `mir::emit`

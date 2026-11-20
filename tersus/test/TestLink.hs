@@ -33,7 +33,7 @@ import LibPackage (libPackage)
 import PackageCompile (CompiledModule (..), CompiledPackage (..), compileModulesUsing, lowerCompiledPackage)
 import PackageData (ModuleId (..), Snapshot (..), resolverFromFiles)
 import PreludeSource (toolPackageFiles)
-import qualified LinkOracle as Oracle
+import Hash (fingerprint)
 import TestMirData (everyRecord, malformedLowered)
 import qualified Syntax as S
 import Types (Type (..), Arg (..), Size (..), BuiltinFunct (..), pattern TList, pattern TBox)
@@ -77,7 +77,7 @@ nativeLinkTool = modifyMVar nativeToolBox $ \cached -> case cached of
                     Ok program -> do
                         let input = MirData.writeProgram program
                             key = Housekeeping.ownedContentKey seedHash input []
-                        Native.cachedProgram "link-test" key "the Link differential tool" $ \output -> do
+                        Native.cachedProgram "link-test" key "the Link test tool" $ \output -> do
                             ir <- Native.runWithInput emitter input
                             case ir of Error e -> pure (Error e); Ok llvm -> Native.buildExecutable output llvm
         pure (Just result, result)
@@ -143,8 +143,7 @@ nativeMergeBeforeCopies units = case mergeInput units of
 positiveMerge :: [(ModuleId, M.Program)] -> (M.Program -> TestResult) -> IO TestResult
 positiveMerge units check = do
     actual <- nativeMergeBeforeCopies units
-    let expected = Oracle.linkProgramsBeforeCopies units
-    pure (firstFailure [inspect expected check, inspect actual check, sameResult expected actual])
+    pure (inspect actual check)
 
 retainedGenericUnits :: Result [(ModuleId, M.Program)] String
 retainedGenericUnits = compileModulesUsing bootstrapLoader libPackage snapshot `bindResult` \compiled ->
@@ -172,15 +171,15 @@ retainedGenericMetadata p = firstFailure
   where
     calls = [name | block <- Map.elems (M.fnBlocks (M.progMain p)), M.Call (M.Const (M.CFn name)) _ _ _ <- [M.blockTerminator block]]
 
-realInputDifferentials :: IO TestResult
-realInputDifferentials = do
+realInputChecks :: IO TestResult
+realInputChecks = do
     helpers <- Housekeeping.listLibrary
     case (helpers, Housekeeping.toolProgram Housekeeping.mirVerifyEntry) of
         (Error e, _) -> pure (Just e)
         (_, Error e) -> pure (Just e)
         (Ok units, Ok prepared) -> do
             captured <- newIORef Nothing
-            let capture inputs = unsafePerformIO (writeIORef captured (Just inputs) >> pure (Oracle.linkPrograms inputs))
+            let capture inputs = unsafePerformIO (writeIORef captured (Just inputs) >> pure (ProductionLink.linkPrograms inputs))
                 aligned = Housekeeping.eraseGhosts prepared `bindResult` Housekeeping.expandRefWrites `bindResult` MirLists.lowerListsWith capture (Ok units)
             helperProgram <- evaluate aligned
             inputs <- readIORef captured
@@ -205,16 +204,33 @@ realInputDifferentials = do
             pure $ firstFailure
                 [ helperResult
                 , genericResult
-                , sameResult (Ok (Oracle.pruneProgram prepared)) (mapResult M.lowProgram pruneResult)
-                , sameResult (Ok (Oracle.completeSpecEnvs prepared)) (mapResult M.lowProgram envResult)
+                , inspect (mapResult M.lowProgram pruneResult) (pruneEffects prepared)
+                , inspect (mapResult M.lowProgram envResult) (completionEffects prepared)
                 ]
+
+pruneEffects :: M.Program -> M.Program -> TestResult
+pruneEffects before after = firstFailure
+    [ testAssertTrue (not (Map.null (M.progFunctions after)))
+    , testAssertTrue (Map.keysSet (M.progFunctions after) `Set.isSubsetOf` Map.keysSet (M.progFunctions before))
+    , testAssertTrue (Map.isSubmapOf (M.progTypes after) (M.progTypes before))
+    , testAssertEq (M.progGenerics after) (M.progGenerics before)
+    , testAssertEq (Map.map M.blockTerminator (M.fnBlocks (M.progMain after)))
+        (Map.map M.blockTerminator (M.fnBlocks (M.progMain before)))
+    ]
+
+completionEffects :: M.Program -> M.Program -> TestResult
+completionEffects before after = firstFailure
+    [ testAssertEq (Map.keys (M.progFunctions after)) (Map.keys (M.progFunctions before))
+    , testAssertEq (M.fnSpec (M.progMain after)) (M.fnSpec (M.progMain before))
+    , testAssertEq (after{M.progFunctions = M.progFunctions before, M.progMain = M.progMain before}) before
+    ]
 
 testLinkNative :: Test
 testLinkNative = TestList "testLinkNative"
-    ([TestCase label $ sameResult (Oracle.linkPrograms units) <$> nativeMerge units | (label, units) <- linkCases]
+    ([TestCase label $ checkLinked expected <$> nativeMerge units | (label, units, expected) <- linkCases]
     ++ [ TestCase "production Link validates only used compiler-library bounded templates" libraryBoundedRetention
-       , TestCase "actual prepared compiler/helper/generic inputs" realInputDifferentials
-       , TestCase "native pruning matches the oracle on actual owned MIR" $ do
+       , TestCase "actual prepared compiler/helper/generic inputs" realInputChecks
+       , TestCase "native pruning preserves the entry and reachable program structure on actual owned MIR" $ do
             seed <- cachedSeed
             case (seed, Housekeeping.toolProgram Housekeeping.mirVerifyEntry) of
                 (Error e, _) -> pure (Just e)
@@ -229,14 +245,14 @@ testLinkNative = TestList "testLinkNative"
                                 actual <- nativeFull ("pass link\nprune\n" ++ text)
                                 pure (firstFailure
                                     [ testAssertTrue (any (isPrefixOf "listNew") (Map.keys (M.progFunctions p)))
-                                    , sameResult (Ok (Oracle.pruneProgram p)) (mapResult M.lowProgram actual)
+                                    , inspect (mapResult M.lowProgram actual) (pruneEffects p)
                                     ])
        , TestCase "native prune keeps ghost expression control-flow references" $ do
             actual <- case programData expressionForms of
                 Error e -> pure (Error e)
                 Ok text -> nativeFull ("pass link\nprune\n" ++ text)
             pure (firstFailure
-                [ sameResult (Ok (Oracle.pruneProgram expressionForms)) (mapResult M.lowProgram actual)
+                [ checkLinked (Right "7f3e3b756a3fbc3c") (mapResult M.lowProgram actual)
                 , inspect (mapResult M.lowProgram actual) expressionFormEffects
                 ])
        , TestCase "native mixed assume and return payload round trip" $ case writeLowered mixedAssumes of
@@ -262,7 +278,7 @@ testLinkNative = TestList "testLinkNative"
        , TestCase "native reachability/environment parity" $ do
             a <- case programData reachable of Error e -> pure (Error e); Ok t -> nativeFull ("pass link\nprune\n" ++ t)
             b <- case programData environments of Error e -> pure (Error e); Ok t -> nativeFull ("pass link\nenvironments\n" ++ t)
-            pure $ firstFailure [sameResult (Ok (Oracle.pruneProgram reachable)) (mapResult M.lowProgram a), sameResult (Ok (Oracle.completeSpecEnvs environments)) (mapResult M.lowProgram b), inspect (mapResult M.lowProgram b) environmentEffects]
+            pure $ firstFailure [checkLinked (Right "8e24846684e27bb1") (mapResult M.lowProgram a), checkLinked (Right "95fee80f9e8b2927") (mapResult M.lowProgram b), inspect (mapResult M.lowProgram b) environmentEffects]
        , TestCase "native link keeps unused invalid functions until validation" $ case Compile.lowerSourceUsing bootstrapLoader False False "fn unused() -> Int [{ }] [{ affirm false; }] { return 0; }; return 0;" of
             Error e -> pure (Just e)
             Ok p -> do
@@ -291,8 +307,10 @@ testLinkNative = TestList "testLinkNative"
             let dep = empty{M.progMain = (M.progMain empty){M.fnBlocks = Map.fromList
                     [(M.BlockId 2, M.BasicBlock [M.Ghost Map.empty (M.GhostPosition 2 1)] M.Return)
                     ,(M.BlockId 10, M.BasicBlock [M.Ghost Map.empty (M.GhostValidation (S.ProofAssert (S.CTerm (S.VBool True))))] M.Return)]}}
-                units = [(unitA, dep), (unitB, empty)]
-            case (programData dep, programData empty, Oracle.linkProgramsBeforeCopies units `bindResult` programData) of
+                expectedGhosts = [ M.Ghost Map.empty (M.GhostPosition 2 1)
+                                 , M.Ghost Map.empty (M.GhostValidation (S.ProofAssert (S.CTerm (S.VBool True))))
+                                 ]
+            case (programData dep, programData empty, programData (withMain empty expectedGhosts M.Return)) of
                 (Ok input, Ok root, Ok expected) -> do
                     let altered = unlines (reverseFirstBlocks (lines input))
                         one (ModuleId pkg modu) text = "unit " ++ quote pkg ++ " " ++ maybe "none" (\n -> "some " ++ quote n) modu ++ " " ++ show (length (lines text)) ++ "\n" ++ text
@@ -320,7 +338,7 @@ testLinkNative = TestList "testLinkNative"
                     let altered = unlines (reverseFirstBlocks (lines input))
                         one t = "unit \"app\" some \"a\" " ++ show (length (lines t)) ++ "\n" ++ t
                     result <- nativeFull ("pass link\nmerge 2\n" ++ one input ++ one altered)
-                    pure (sameResult (Oracle.linkPrograms [(unitA,p),(unitA,p)]) (mapResult M.lowProgram result))
+                    pure (sameResult (linked [(unitA,p)]) (mapResult M.lowProgram result))
        ])
 
 runReference :: String -> Result Outcome String
@@ -362,8 +380,7 @@ libraryBoundedRetention = do
     actual <- evaluate (ProductionLink.linkPrograms units)
     reference <- evaluate (linked units)
     native <- nativeMerge units
-    let expected = Oracle.linkPrograms units
-        check p = firstFailure
+    let check p = firstFailure
             [ testAssertTrue (Map.member "libraryUsed" (M.progFunctions p))
             , testAssertTrue (Map.member genericKey (M.specEnv (M.fnSpec (M.progFunctions p Map.! "libraryUsed"))))
             , testAssertTrue (Map.member "libraryUsed[Int]" (M.progFunctions p))
@@ -371,8 +388,8 @@ libraryBoundedRetention = do
             , testAssertTrue (Map.notMember "libraryUnused" (M.progFunctions p))
             , testAssertTrue (Map.null (M.progBounded p))
             ]
-    pure (firstFailure ([inspect result check | result <- [expected, reference, native, actual]]
-        ++ [sameResult expected result | result <- [reference, native, actual]]))
+    pure (firstFailure ([inspect result check | result <- [reference, native, actual]]
+        ++ [sameResult actual result | result <- [reference, native]]))
   where
     templates = ["libraryUsed", "libraryUnused"]
     library = empty
@@ -390,6 +407,11 @@ libraryBoundedRetention = do
 
 singlePass :: String -> M.Program -> Result M.Program String
 singlePass pass program = programData program `bindResult` \text -> responseProgram ("pass link\n" ++ pass ++ "\n" ++ text)
+
+checkLinked :: Either String String -> Result M.Program String -> TestResult
+checkLinked expected result = case result of
+    Error e -> testAssertEq (Left e) expected
+    Ok p -> inspect (programData p) $ \text -> testAssertEq (Right (fingerprint [text])) expected
 
 sameResult :: Result M.Program String -> Result M.Program String -> TestResult
 sameResult (Error expected) (Error actual) = testAssertEq actual expected
@@ -428,33 +450,34 @@ unitA = ModuleId "app" (Just "a")
 unitB = ModuleId "app" (Just "b")
 privateId = ModuleId "tersuslib" (Just "lists")
 
-linkCases :: [(String, [(ModuleId, M.Program)])]
+-- Capture canonical MIR3 fingerprints and exact refusals from the retired Haskell linker.
+linkCases :: [(String, [(ModuleId, M.Program)], Either String String)]
 linkCases =
-    [ ("no units", [])
-    , ("one unit", [(unitA, program [("f", 1)])])
-    , ("identical unit identity", [(unitA, program [("f", 1)]), (unitA, program [("f", 1)])])
-    , ("unit identity mismatch", [(unitA, program [("f", 1)]), (unitA, program [("g", 1)])])
-    , ("identical definition from distinct units", [(unitA, program [("f", 1)]), (unitB, program [("f", 1)])])
-    , ("function collision", [(unitA, program [("f", 1)]), (unitB, program [("f", 2)])])
-    , ("private helper provenance", [(privateId, program [("listNew", 1)]), (unitB, program [("listNew", 1)])])
-    , ("extern namespace and signature dedup", [(unitA, program [("extern app$a$puts", 1)]), (unitB, program [("extern app$b$puts", 2)])])
-    , ("extern contract collision", [(unitA, externContract True), (unitB, externContract False)])
-    , ("extern intra-unit last definition wins", [(unitA, program [("extern a$puts", 1), ("extern z$puts", 2)]), (unitA, program [("extern puts", 2)])])
-    , ("extern normalization follows nested constants and environments", [(unitA, externReferences)])
-    , ("types collide before functions", [(unitA, withType TInt (program [("f", 1)])), (unitB, withType TBool (program [("f", 2)]))])
-    , ("identical generic declarations", [(unitA, withGeneric "n"), (unitB, withGeneric "n")])
-    , ("generic declaration collision", [(unitA, withGeneric "n"), (unitB, withGeneric "m")])
-    , ("invariant collision", [(unitA, withInvariant True), (unitB, withInvariant False)])
-    , ("bounded declaration collision", [(unitA, withBounded "n"), (unitB, withBounded "m")])
-    , ("instance collision", [(unitA, withInstance TInt), (unitB, withInstance TBool)])
-    , ("dependency ghosts precede root ghosts", [(unitA, ghostUnit 1), (unitB, ghostUnit 2)])
-    , ("identical ghost expression control flow from distinct units", [(unitA, ghostFunction blockExpression), (unitB, ghostFunction blockExpression)])
-    , ("conditional ghost expression branch collision", [(unitA, ghostFunction (S.IfExpr (S.Var "c") (S.Var "a") (S.Var "b"))), (unitB, ghostFunction (S.IfExpr (S.Var "c") (S.Var "a") (S.Var "other")))])
-    , ("block ghost expression statement collision", [(unitA, ghostFunction blockExpression), (unitB, ghostFunction (S.BlockExpr [] (S.Var "blockResultRef")))])
-    , ("ascription type child collision", [(unitA, ghostFunction (S.Ascribed (S.Var "x") TInt)), (unitB, ghostFunction (S.Ascribed (S.Var "x") TBool))])
-    , ("identical ascriptions of a recursive type", [(unitA, ghostFunction (S.Ascribed (S.Var "x") (TBox (TList TInt)))), (unitB, ghostFunction (S.Ascribed (S.Var "x") (TBox (TList TInt))))])
-    , ("root spec and loop environments remain untouched", [(unitA, program [("extra", 1)]), (unitB, environments)])
-    , ("the complete full metadata fixture", [(unitA, M.lowProgram everyRecord)])
+    [ ("no units", [], Left "link error: no modules to link")
+    , ("one unit", [(unitA, program [("f", 1)])], Right "5e42f1d6367192be")
+    , ("identical unit identity", [(unitA, program [("f", 1)]), (unitA, program [("f", 1)])], Right "5e42f1d6367192be")
+    , ("unit identity mismatch", [(unitA, program [("f", 1)]), (unitA, program [("g", 1)])], Left "link error: module app::a has inconsistent units")
+    , ("identical definition from distinct units", [(unitA, program [("f", 1)]), (unitB, program [("f", 1)])], Right "5e42f1d6367192be")
+    , ("function collision", [(unitA, program [("f", 1)]), (unitB, program [("f", 2)])], Left "link error: function f is defined by both module app::a and module app::b with different definitions")
+    , ("private helper provenance", [(privateId, program [("listNew", 1)]), (unitB, program [("listNew", 1)])], Left "link error: function listNew is defined by both module tersuslib::lists and module app::b with different definitions")
+    , ("extern namespace and signature dedup", [(unitA, program [("extern app$a$puts", 1)]), (unitB, program [("extern app$b$puts", 2)])], Right "2961379df8c693a8")
+    , ("extern contract collision", [(unitA, externContract True), (unitB, externContract False)], Left "link error: function extern fn puts is defined by both module app::a and module app::b with different definitions")
+    , ("extern intra-unit last definition wins", [(unitA, program [("extern a$puts", 1), ("extern z$puts", 2)]), (unitA, program [("extern puts", 2)])], Right "987f9739027eeee1")
+    , ("extern normalization follows nested constants and environments", [(unitA, externReferences)], Right "b598ef9dd40ac0a8")
+    , ("types collide before functions", [(unitA, withType TInt (program [("f", 1)])), (unitB, withType TBool (program [("f", 2)]))], Left "link error: type T is defined by both module app::a and module app::b with different definitions")
+    , ("identical generic declarations", [(unitA, withGeneric "n"), (unitB, withGeneric "n")], Right "76d20307c0c3a987")
+    , ("generic declaration collision", [(unitA, withGeneric "n"), (unitB, withGeneric "m")], Left "link error: generic struct T is defined by both module app::a and module app::b with different definitions")
+    , ("invariant collision", [(unitA, withInvariant True), (unitB, withInvariant False)], Left "link error: invariant T is defined by both module app::a and module app::b with different definitions")
+    , ("bounded declaration collision", [(unitA, withBounded "n"), (unitB, withBounded "m")], Left "link error: function with bounds f is defined by both module app::a and module app::b with different definitions")
+    , ("instance collision", [(unitA, withInstance TInt), (unitB, withInstance TBool)], Left "link error: copy copy is defined by both module app::a and module app::b with different definitions")
+    , ("dependency ghosts precede root ghosts", [(unitA, ghostUnit 1), (unitB, ghostUnit 2)], Right "54d549d3234d2758")
+    , ("identical ghost expression control flow from distinct units", [(unitA, ghostFunction blockExpression), (unitB, ghostFunction blockExpression)], Right "589a5b596d320815")
+    , ("conditional ghost expression branch collision", [(unitA, ghostFunction (S.IfExpr (S.Var "c") (S.Var "a") (S.Var "b"))), (unitB, ghostFunction (S.IfExpr (S.Var "c") (S.Var "a") (S.Var "other")))], Left "link error: function f is defined by both module app::a and module app::b with different definitions")
+    , ("block ghost expression statement collision", [(unitA, ghostFunction blockExpression), (unitB, ghostFunction (S.BlockExpr [] (S.Var "blockResultRef")))], Left "link error: function f is defined by both module app::a and module app::b with different definitions")
+    , ("ascription type child collision", [(unitA, ghostFunction (S.Ascribed (S.Var "x") TInt)), (unitB, ghostFunction (S.Ascribed (S.Var "x") TBool))], Left "link error: function f is defined by both module app::a and module app::b with different definitions")
+    , ("identical ascriptions of a recursive type", [(unitA, ghostFunction (S.Ascribed (S.Var "x") (TBox (TList TInt)))), (unitB, ghostFunction (S.Ascribed (S.Var "x") (TBox (TList TInt))))], Right "c257d40edabc1cbe")
+    , ("root spec and loop environments remain untouched", [(unitA, program [("extra", 1)]), (unitB, environments)], Right "659454d16d459ffb")
+    , ("the complete full metadata fixture", [(unitA, M.lowProgram everyRecord)], Right "85792b8f6a7902a6")
     ]
   where
     withType ty p = p{M.progTypes = Map.singleton "T" (M.StructDecl [("x", ty)])}
@@ -623,7 +646,8 @@ sharedAllocationControl = inspect (writeLowered (asUnit (largeMaps 0))) $ \input
     let changed = unlines (reverseShared (lines input))
      in inspect (readLowered changed) $ \raw -> firstFailure
         [ testAssertTrue (input /= changed)
-        , sameResult (Oracle.linkPrograms [(unitA, largeMaps 0), (unitA, M.lowProgram raw)]) (rawMerge input changed)
+        , sameResult (Ok (largeMaps 0)) (Ok (M.lowProgram raw))
+        , sameResult (linked [(unitA, largeMaps 0)]) (rawMerge input changed)
         , canonicalRaw changed
         ]
 
@@ -673,7 +697,8 @@ rawSemanticControl p change = inspect (programData p) $ \input ->
     let altered = unlines (change (lines input))
      in inspect (readLowered altered) $ \decoded -> firstFailure
         [ testAssertTrue (input /= altered)
-        , sameResult (Oracle.linkPrograms [(unitA, p), (unitA, M.lowProgram decoded)]) (rawMerge input altered)
+        , testAssertEq (M.lowProgram decoded) p
+        , sameResult (linked [(unitA, p)]) (rawMerge input altered)
         ]
 
 builtinMetadataControl :: TestResult
@@ -681,8 +706,8 @@ builtinMetadataControl = firstFailure
     [ testAssertTrue (left == right && show left /= show right)
     , roundTrip (asUnit (valueProgram left))
     , roundTrip (asUnit (valueProgram right))
-    , sameResult (Oracle.linkPrograms [(unitA, valueProgram left), (unitA, valueProgram right)]) (linked [(unitA, valueProgram left), (unitA, valueProgram right)])
-    , testAssertTrue (linked [(unitA, valueProgram left), (unitA, valueProgram changed)] /= linked [(unitA, valueProgram left), (unitA, valueProgram right)])
+    , sameResult (linked [(unitA, valueProgram left)]) (linked [(unitA, valueProgram left), (unitA, valueProgram right)])
+    , checkLinked (Left "link error: module app::a has inconsistent units") (linked [(unitA, valueProgram left), (unitA, valueProgram changed)])
     ]
   where
     left = S.VFunct ["a"] [S.ProofAssert (S.CTerm (S.VBool True))] [] (S.BuiltinFunct Plus) []
@@ -694,17 +719,16 @@ testLink = TestList "testLink"
     [ testCase "full MIR3/link source compiles" $ inspect linkProbeProgram (const Nothing)
     , testCase "empty full unit round trip" (roundTrip (asUnit empty))
     , testCase "every full record and builtin metadata round trip" (roundTrip everyRecord)
-    , TestList "exact Haskell link differential" [testCase label (sameResult (Oracle.linkPrograms units) (linked units)) | (label, units) <- linkCases]
-    , testCase "exact reachability including ghost/contract/invariant/impl references" (sameResult (Ok (Oracle.pruneProgram reachable)) (singlePass "prune" reachable))
+    , TestList "frozen link results" [testCase label (checkLinked expected (linked units)) | (label, units, expected) <- linkCases]
+    , testCase "exact reachability including ghost/contract/invariant/impl references" (checkLinked (Right "8e24846684e27bb1") (singlePass "prune" reachable))
     , testCase "ghost conditional, block and ascribed expressions keep their nested references" $ firstFailure
-        [ sameResult (Ok (Oracle.pruneProgram expressionForms)) (singlePass "prune" expressionForms)
+        [ checkLinked (Right "7f3e3b756a3fbc3c") (singlePass "prune" expressionForms)
         , inspect (singlePass "prune" expressionForms) expressionFormEffects
-        , expressionFormEffects (Oracle.pruneProgram expressionForms)
         ]
     , testCase "mixed assume and Block::assume return payloads round trip" (roundTrip mixedAssumes)
     , testCase "generic metadata survives pruning" (inspect (singlePass "prune" reachable) $ \p -> testAssertEq (M.progGenerics p) (M.progGenerics reachable))
     , testCase "environment completion is exact and idempotent" $ firstFailure
-        [ sameResult (Ok (Oracle.completeSpecEnvs environments)) (singlePass "environments" environments)
+        [ checkLinked (Right "95fee80f9e8b2927") (singlePass "environments" environments)
         , inspect (singlePass "environments" environments) environmentEffects
         , inspect (singlePass "environments" environments) $ \p -> sameResult (Ok p) (singlePass "environments" p)
         ]
@@ -713,7 +737,7 @@ testLink = TestList "testLink"
     , testCase "arbitrary positive and negative runtime/proof integers" $ firstFailure [roundTrip (bigUnit n) | n <- [2 ^ (80 :: Int), 0 - 2 ^ (80 :: Int), 9223372036854775808, 0 - 9223372036854775809]]
     , testCase "arbitrary runtime size constants" (roundTrip bigSizeUnit)
     , testCase "many distinct repeated shared maps stay exact" (roundTrip (asUnit (largeMaps 0)))
-    , testCase "cross-unit global completion of distinct shared maps" (sameResult (Oracle.linkPrograms [(unitA, largeMaps 0), (unitB, largeMaps 11)]) (linked [(unitA, largeMaps 0), (unitB, largeMaps 11)]))
+    , testCase "cross-unit global completion of distinct shared maps" (checkLinked (Right "7924ccdbef893207") (linked [(unitA, largeMaps 0), (unitB, largeMaps 11)]))
     , testCase "different shared ID allocations have the same meaning" sharedAllocationControl
     , testCase "shared nonfunction bindings become canonical own bindings" $ inspect (writeLowered everyRecord) $ \text -> canonicalRaw (unlines (replaceFirst (isPrefixOf "shared ") (const "shared 1 \"f\" copy 0") (lines text)))
     , testCase "termination invariant sentinel mutation refuses" (sentinelMutation True False)

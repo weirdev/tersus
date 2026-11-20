@@ -35,7 +35,8 @@ codec. The Haskell wrapper retains transport through the pinned emitter seed,
 the pure empty-unit refusal and the existing deferred copies stage. Complete
 specifications and proof metadata remain available for validation; native
 pruning processes each stable function/type edge source once. `TestLink`
-compares full metadata and canonical bytes with the test-only Haskell oracle.
+checks frozen canonical MIR3 fingerprints and exact refusals, and verifies
+metadata preservation on compiler inputs.
 
 - **LLVM emission:** `lib/mir/emit/` is the production emitter.
   `LlvmEmit.hs` is deleted. Bootstrap uses the release asset pinned by
