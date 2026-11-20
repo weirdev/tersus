@@ -1,4 +1,4 @@
-import data::codec::codec { Token, Parsed, parseInt, isWord, catStrings, quoteName, indexOf, wordAt };
+import data::codec::codec { Token, Parsed, parseInt, isWord, catStrings, quoteName, indexOf, wordAt, typeAt };
 import mir::reader::reader { binaryWords, listWords };
 import data::reader::reader { validDecimal };
 
@@ -30,20 +30,33 @@ fn decimalText(text: &String) -> String ~ {
     if at >= n { return "0"; };
     value = text.slice(at, n); if negative { return catStrings("-", value); }; return value;
 };
+fn contractTypeEnd(ts: &List<Token>, p: Int) -> Int ~ {
+    if p < 0 || p >= size(ts) { return 0 - 1; };
+    ty = typeAt(ts, p);
+    if !ty.ok { return 0 - 1; };
+    return ty.pos;
+};
 fn normalizeNumbers(ts: List<Token>) -> List<Token> ~ {
+    opaqueEnd = 0;
     for i in 0..size(ts) {
         t = get(&ts, i);
-        if !t.quoted && validDecimal(&t.text) {
-            value = decimalText(&t.text);
-            if value != t.text { ts = set(ts, i, Token { quoted: false, text: value }); };
+        if i >= opaqueEnd && !t.quoted {
+            if t.text = "fnc" { opaqueEnd = contractTypeEnd(&ts, i); }
+            else { if validDecimal(&t.text) {
+                value = decimalText(&t.text);
+                if value != t.text { ts = set(ts, i, Token { quoted: false, text: value }); };
+            }; };
         };
     };
     return ts;
 };
 fn normalizeTypes(ts: List<Token>) -> List<Token> ~ {
     out = [];
-    for t in &ts {
-        if !t.quoted && (t.text = "list" || t.text = "box") {
+    opaqueEnd = 0;
+    for i in 0..size(ts) {
+        t = get(&ts, i);
+        if i >= opaqueEnd && !t.quoted && t.text = "fnc" { opaqueEnd = contractTypeEnd(&ts, i); };
+        if i >= opaqueEnd && !t.quoted && (t.text = "list" || t.text = "box") {
             n = "List"; if t.text = "box" { n = "Box"; };
             out = push(push(push(push(out, word("named")), name(n)), intToken(1)), word("type"));
         } else { out = push(out, clone(t)); };
@@ -117,6 +130,7 @@ fn typeEnd(ts: &List<Token>, p: Int) -> Int ~ {
         at = namesEnd(ts, at);
         return typeEnd(ts, at);
     };
+    if w = "fnc" { return contractTypeEnd(ts, p); };
     if w = "fn" {
         n = numberAt(ts, p + 1);
         if n < 0 { return 0 - 1; };
