@@ -5,7 +5,7 @@ import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
 import Bootstrap (cachedSourceEmitter, cachedSeed, emitWith, seedSha256)
-import EmitterProvenance (ordinaryBuildProfile, emitterBuildDescription, workingSourcesMatch, checkEmitterOutputs)
+import EmitterProvenance (ordinaryBuildProfile, emitterBuildDescription, emitterSourcesMatch, checkEmitterOutputs)
 import Seed (emitterSeedFile)
 import PreludeSource (emitterSourceFiles)
 import MirData (writeProgram)
@@ -32,7 +32,7 @@ main = do
         ["emit", output] -> regenerate >>= written output
         ["certify", output, association] -> do
             before <- emitterConstruction
-            current <- workingSourcesMatch emitterSourceFiles
+            current <- emitterSourcesMatch
             construction <- case before of
                 Ok (Just identity) | current -> pure identity
                 _ -> fail "certification needs an ordinary configured build and unchanged source"
@@ -43,7 +43,7 @@ main = do
             ir <- case result of Error e -> fail e; Ok text -> pure text
             (status, digest, _) <- readProcessWithExitCode "sha256sum" [] ir
             after <- emitterConstruction
-            unchanged <- workingSourcesMatch emitterSourceFiles
+            unchanged <- emitterSourcesMatch
             if status /= ExitSuccess || takeWhile (/= ' ') digest /= seedSha256
                 then fail "source stage 1 did not reproduce the complete published emitter pin"
                 else if before /= after || not unchanged

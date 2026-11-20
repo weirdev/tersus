@@ -1,5 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
-module EmitterProvenance (ordinaryBuildProfile, emitterBuildDescription, emitterBuildInputs, constructionIdentity, constructionIdentityFor, matchesConstruction, workingSourcesMatch, checkEmitterOutputs) where
+module EmitterProvenance (ordinaryBuildProfile, emitterBuildDescription, emitterBuildInputs, constructionIdentity, constructionIdentityFor, matchesConstruction, workingSourcesMatch, emitterSourcesMatch, checkEmitterOutputs) where
 
 import BuildOptions (describeBuildOptions)
 import Control.Exception (IOException, evaluate, try)
@@ -17,6 +17,8 @@ import qualified Text.Parsec as Parsec
 import PreludeSource (emitterSourceFiles)
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.Info (arch, compilerName, compilerVersion, os)
+import System.IO (Newline (..), nativeNewline)
+import GHC.IO.Encoding (getLocaleEncoding, textEncodingName)
 import System.Exit (ExitCode (..))
 import Utils
 
@@ -82,7 +84,32 @@ matchesConstruction _ _ = False
 -- Installed binaries use their captured source. In a source checkout, the
 -- current files and module listings must still match that captured input.
 workingSourcesMatch :: [(FilePath, String)] -> IO Bool
-workingSourcesMatch captured = do
+workingSourcesMatch = sourcesMatch . capturedSources
+
+emitterSourcesMatch :: IO Bool
+emitterSourcesMatch = sourcesMatch emitterSources
+
+emitterSources :: CapturedSources
+emitterSources = capturedSources emitterSourceFiles
+
+data CapturedSources = CapturedSources [(FilePath, String, Maybe B.ByteString)] [(FilePath, [FilePath])]
+
+capturedSources :: [(FilePath, String)] -> CapturedSources
+capturedSources captured = CapturedSources [(path, text, encodedText text) | (path, text) <- files]
+    (Map.toAscList (Map.fromListWith (++) [(takeDirectory path, [takeFileName path]) | (path, _) <- files,
+        any (`isSuffixOf` path) [".hs", ".hsc", ".hs-boot", ".tersus"]]))
+  where
+    files = Map.toAscList (Map.fromList captured)
+
+-- A strict UTF-8 decoding reads a file as exactly this text only when the file
+-- holds these bytes; no file decodes to a surrogate.
+encodedText :: String -> Maybe B.ByteString
+encodedText text
+    | any (\c -> c >= '\xD800' && c <= '\xDFFF') text = Nothing
+    | otherwise = Just (B.pack (encodeUtf8 text))
+
+sourcesMatch :: CapturedSources -> IO Bool
+sourcesMatch (CapturedSources files listings) = do
     package <- sourceTreePresent "."
     repository <- sourceTreePresent "tersus"
     case (package, repository) of
@@ -97,16 +124,17 @@ workingSourcesMatch captured = do
             ["package.yaml", "tersus.cabal", "lib/mir/package.tersus", "lib/elaborate/package.tersus"]
         source <- Directory.doesDirectoryExist (root </> "src")
         pure (source || or anchors)
-    files = Map.toAscList (Map.fromList captured)
     compareSources root = do
-        same <- mapM (\(path, expected) -> do
-            actual <- readFile (root </> path)
-            _ <- evaluate (length actual)
-            pure (actual == expected)) files
-        listings <- mapM (sameListing root) (Map.toAscList (Map.fromListWith (++)
-            [(takeDirectory path, [takeFileName path]) | (path, _) <- files,
-                any (`isSuffixOf` path) [".hs", ".hsc", ".hs-boot", ".tersus"]]))
-        pure (and same && and listings)
+        encoding <- getLocaleEncoding
+        let utf8 = textEncodingName encoding == "UTF-8" && nativeNewline == LF
+        same <- mapM (\(path, expected, bytes) -> if utf8
+            then maybe (pure False) (\encoded -> (== encoded) <$> B.readFile (root </> path)) bytes
+            else do
+                actual <- readFile (root </> path)
+                _ <- evaluate (length actual)
+                pure (actual == expected)) files
+        listed <- mapM (sameListing root) listings
+        pure (and same && and listed)
     sameListing root (directory, expected) = do
         actual <- Directory.listDirectory (root </> directory)
         let hasHaskell = any (\name -> any (`isSuffixOf` name) [".hs", ".hsc", ".hs-boot"]) expected

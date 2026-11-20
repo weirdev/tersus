@@ -77,7 +77,7 @@ import MirOwnershipData (ownershipInput, restoreOwnership)
 import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresent, cachedProgramIfPresentWithArtifacts, parallelBuilds, runWithInput, runWithInputFull)
 import Seed (emitterSeedFile, seedSha256, frontendSeedSha256, parserSeedSha256,
     cachedFrontendSeed, cachedSeed, cachedParserSeed, seedHash)
-import EmitterProvenance (constructionIdentity, matchesConstruction, workingSourcesMatch)
+import EmitterProvenance (constructionIdentity, matchesConstruction, emitterSourcesMatch)
 import BuiltinTable (builtinTableText)
 import Compile (lowerSource)
 import Modules (ModuleId, Snapshot (..), resolverFromFiles)
@@ -689,7 +689,7 @@ emitterIdentityAgainst association = do
         Ok () -> do
             construction <- emitterConstruction
             sourceMatches <- if matchesConstruction construction association
-                then workingSourcesMatch emitterSourceFiles else pure False
+                then emitterSourcesMatch else pure False
             directory <- cacheDirectory
             case directory of
                 Error e -> pure (Error e)
