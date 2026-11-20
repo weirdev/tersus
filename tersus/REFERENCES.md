@@ -648,8 +648,14 @@ mid-implementation:
    reference-bearing permissions; an obligation for untracked provenance is
    deferred. Writable `Addr::get` views and their permission-child handling
    are deferred (reference-safety design D9/DB20); take the value with
-   `Addr::take` instead. The separate shared-path checks must precede
-   generic boundary enforcement.*
+   `Addr::take` instead.*
+   *Shared paths are read-only (rule 6): `MirMoves` keeps, for every local, whether
+   its value may hold an update reference or be storage reached through a
+   shared reference or a parameter lent to be read, through every part read
+   out, cast, match, value made of what it reads, join, loop and store through
+   a reference, and refuses writing through such a value, borrowing it or
+   lending it for updating, and moving it on (MIR.md, "Shared paths"). Generic
+   boundary enforcement is still to come.*
 6. **Concurrency and suspension.** Add transfer/share rules, synchronization
    contracts and frame/cancellation rules before enabling these uses.
 

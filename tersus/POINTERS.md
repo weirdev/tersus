@@ -114,7 +114,8 @@ split, join, resize and the operations that empty slots conservatively keep
 loans on the resulting permissions. Freeing the block ends its loans, not those
 of values already taken or copied out. A slot that may contain an update
 reference must be taken, not viewed with `get`. Writable views into permission
-slots are deferred until shared-path enforcement can justify them. This does
+slots remain deferred (an update reference read out of a permission reached
+through a shared path is read-only like any other). This does
 not prevent ordinary reads of reference-free slots. A result's `from` annotation
 names ordinary reference origins, not the contents of its permission slots;
 a returned permission can also carry loans from the call's other lending or
