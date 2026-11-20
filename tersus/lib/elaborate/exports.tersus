@@ -214,10 +214,7 @@ fn emitSortedNames(st: St, names: &List<String>) -> St ~ {
 };
 
 fn keyIn(entries: &List<Keyed>, a: &String, b: &String) -> Bool ~ {
-    for e in entries {
-        if e.a = clone(a) && e.b = clone(b) { return true; };
-    };
-    return false;
+    return any(entries, fn(entry: Keyed) => entry.a = a.clone() && entry.b = b.clone());
 };
 
 fn startsWith(text: &String, prefix: &String) -> Bool ~ {

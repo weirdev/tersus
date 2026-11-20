@@ -894,9 +894,7 @@ fn mergeByName(a: List<Int>, b: List<Int>, names: &List<String>) -> List<Int> ~ 
 };
 
 fn withoutName(xs: List<String>, x: &String) -> List<String> ~ {
-    out = [];
-    for y in &xs { if y != x { out = push(out, clone(y)); }; };
-    return out;
+    return filter(&xs, fn(item: String) => item != x.clone());
 };
 
 fn withName(xs: List<String>, x: &String) -> List<String> ~ {

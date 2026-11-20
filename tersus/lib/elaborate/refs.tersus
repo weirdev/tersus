@@ -409,10 +409,7 @@ fn writesTarget(place: &Place) -> String ~ {
 
 fn withinWrites(writes: &List<String>, place: &Place) -> Bool ~ {
     target = writesTarget(place);
-    for w in writes {
-        if w = place.root || w = target { return true; };
-    };
-    return false;
+    return any(writes, fn(item: String) => item = place.root.clone() || item = target.clone());
 };
 
 // The place an expression that is given for updating is of (updatePlaceOf)

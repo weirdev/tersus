@@ -232,13 +232,11 @@ fn lwTextAt(xs: &List<String>, i: Int) -> String ~ {
 };
 
 fn hasText(xs: &List<String>, x: &String) -> Bool ~ {
-    for y in xs { if y = x { return true; }; };
-    return false;
+    return any(xs, fn(item: String) => item = x.clone());
 };
 
 fn hasInt(xs: &List<Int>, x: Int) -> Bool ~ {
-    for y in xs { if y = x { return true; }; };
-    return false;
+    return any(xs, fn(item: Int) => item = x);
 };
 
 fn lwTextLess(a: &String, b: &String) -> Bool ~ {
@@ -560,8 +558,7 @@ fn lwBaseName(name: &String) -> String ~ {
 };
 
 fn lwHasByte(name: &String, b: Int) -> Bool ~ {
-    for c in &name.bytes { if toInt(c) = b { return true; }; };
-    return false;
+    return any(&name.bytes, fn(byte: Byte) => toInt(byte) = b);
 };
 
 // Types.tupleGeneric's test: Tuple and a number from 2 to 16 with no leading zero
