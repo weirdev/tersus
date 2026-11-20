@@ -5,6 +5,7 @@ module MirMoves
     ( checkMoves
     , checkMovesExcluding
     , finishLowered
+    , checkSpawns
     , isCopyType
     , stripPositions
     , Role (..)
@@ -25,7 +26,7 @@ import qualified Data.Set as Set
 
 import FieldPaths (fieldPaths)
 import Mir
-import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceFields, instanceName, tupleGeneric)
+import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceFields, instanceName, renderTypeForName, tupleGeneric)
 import Utils (Result (..))
 
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
@@ -1837,6 +1838,31 @@ finishLowered lowered =
         errors -> Error (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
   where
     completed = completeInstances (lowProgram lowered)
+
+-- A thread shares nothing with the program that starts it (lib/thread.tersus): each copy of the thread library's spawn
+-- is refused when the closure it is given, or the Thread it gives, can hold a reference
+checkSpawns :: Set Name -> Program -> Result Program String
+checkSpawns library program
+    | spawn `Set.notMember` library = Ok program
+    | otherwise = case concatMap refusals copies of
+        [] -> Ok program
+        errors -> Error (intercalate "\n" (map ("Move error: " ++) errors))
+  where
+    spawn = "<Thread>::spawn"
+    copies = [fn | fn <- Map.elems (progFunctions program), (spawn ++ "[") `isPrefixOf` fnName fn]
+    refusals fn =
+        [ "Thread::spawn is given " ++ describe ty ++ ": a thread cannot hold a reference (capture by value with move fn)"
+        | [p] <- [fnParams fn], Just d <- [Map.lookup p (fnLocals fn)], let ty = localType d, mayHoldReference program ty ]
+            ++ [ "Thread::spawn gives a " ++ renderTypeForName ty ++ ", which can hold a reference, and a thread's result cannot"
+               | Just ty <- [fnReturns fn], mayHoldReference program ty ]
+    describe ty = case ty of
+        TNamed base args
+            | "$closure$" `isPrefixOf` base
+            , Just (StructDecl fields) <- Map.lookup (instanceName base args) (progTypes program) ->
+                case [field | (field, t) <- fields, mayHoldReference program t] of
+                    [] -> "a closure that can hold a reference"
+                    borrowed -> "a closure that borrows " ++ intercalate ", " borrowed
+        _ -> "a " ++ renderTypeForName ty ++ ", which can hold a reference"
 
 -- The program without the places that lowering wrote into it
 stripPositions :: Program -> Program

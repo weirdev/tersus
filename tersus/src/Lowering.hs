@@ -9,7 +9,7 @@ import Mir (Lowered, Program)
 import MirCopies (makeCopies, makeCopiesWith)
 import Types (Name)
 import MirData (readLoweredBytes)
-import MirMoves (finishLowered)
+import MirMoves (checkSpawns, finishLowered)
 import Utils
 
 -- (the elaborator's refusal to lower is the lowering's error, in its words; a unit that does not read is the tool's
@@ -30,4 +30,4 @@ finishProgram lowered = finishLowered lowered `bindResult` makeCopies
 -- The same for a program given with the compiler's libraries among its statements: their functions with bounds are
 -- validated where the program uses them (MirCopies.makeCopiesWith)
 finishProgramWith :: Set.Set Name -> Lowered -> Result Program String
-finishProgramWith library lowered = finishLowered lowered `bindResult` makeCopiesWith library
+finishProgramWith library lowered = finishLowered lowered `bindResult` makeCopiesWith library `bindResult` checkSpawns library

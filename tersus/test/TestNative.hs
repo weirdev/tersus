@@ -132,7 +132,7 @@ nativeExamples =
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "args", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "bytes", "contracts", "early_return", "element_facts"
         , "enums", "language_ergonomics", "files", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "addresses", "drops", "strings", "text"
+        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "addresses", "drops", "strings", "text", "threads"
         ]
     ]
 -- (the compiler's own programs, the MIR reader and the emitter, are left out: validating them takes
