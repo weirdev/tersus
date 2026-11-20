@@ -3,6 +3,7 @@ module TestAstData (testAstData, testAstReader, withAstReader) where
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Monad (forM)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import System.Directory (listDirectory)
 import System.Environment (lookupEnv)
@@ -18,7 +19,8 @@ import ElaborateRequest (LibraryAnswer (..), LoadKind (..), LoadRequest (..), Lo
 import ElaboratorTool (bootstrapLoader)
 import qualified AstData as A
 import BuiltinTable (builtinTableText)
-import Interface (ModuleInterface)
+import Interface (ModuleInterface (..))
+import PackageData (ModuleId (..))
 import InterfaceData (readInterface, writeInterface)
 import LibPackage (LibPackage (..), libPackage)
 import BuiltinRegistry (builtinRegistry, entryInstances, builtinSymbol)
@@ -598,9 +600,78 @@ nativeMutation = withAstReader $ \exe -> do
     (code, out, err) <- runExecutableBytes exe ["mutate"] (dataParsed small)
     pure $ if code == ExitSuccess && null err && out /= dataParsed small then checkOutput small ["mutate"] out else Just ("mutation failed: " ++ show (code, take 200 err))
 
+contractFnType :: Type
+contractFnType =
+    TFnContract
+        [TInt, TBool]
+        TInt
+        ( FnContract
+            ["x", ""]
+            [FnClause [FnWord "affirm", FnName "x", FnWord "gt", FnWord "0"]]
+            [FnClause [FnWord "affirm", FnWord "return", FnWord "gt", FnWord "0"]]
+        )
+
+contractFnAst :: TestResult
+contractFnAst =
+    firstFailure
+        [ roundTrip [StructDef "Callback" [] [("f", contractFnType)] []]
+        , roundTrip [Assign "g" (Ascribed (Var "f") contractFnType)]
+        , case readInterface (interfaceText) of
+            Error e -> Just e
+            Ok back
+                | back /= interfaceValue -> Just "a contract function type changed through an interface"
+                | writeInterface back /= Ok interfaceText -> Just "an interface with a contract function type reserialized differently"
+                | otherwise -> Nothing
+        , refused (replaceOnce "fnc 2 int bool int 2" "fnc 2 int bool int 3" (dataParsed [StructDef "Callback" [] [("f", contractFnType)] []]))
+        , refused (replaceOnce "1 4 w affirm" "1 0" (dataParsed [StructDef "Callback" [] [("f", contractFnType)] []]))
+        ]
+  where
+    interfaceValue =
+        ModuleInterface
+            { ifModule = ModuleId "pkg" (Just "m")
+            , ifTypes = Map.empty
+            , ifCtors = Map.fromList [("Callback", ("Callback", [("f", contractFnType)]))]
+            , ifGenerics = Map.empty
+            , ifInvariants = Map.empty
+            , ifTraits = Map.empty
+            , ifTraitParams = Map.empty
+            , ifFunctions = Map.empty
+            , ifImpls = Set.empty
+            , ifAssoc = Map.empty
+            , ifImplArgs = Map.empty
+            , ifImplBounds = Map.empty
+            , ifCopies = Set.empty
+            , ifLinear = Set.empty
+            , ifDrops = Set.empty
+            , ifAxioms = []
+            , ifProofs = []
+            , ifExterns = Set.empty
+            , ifTemplates = Map.empty
+            , ifCompanions = Map.empty
+            , ifOwnershipTransport = Nothing
+            }
+    interfaceText = case writeInterface interfaceValue of
+        Ok text -> text
+        Error e -> error e
+    refused text = case text of
+        Nothing -> Just "the fixture did not contain the contract function type form to corrupt"
+        Just bad -> case A.readParsed bad of
+            Error _ -> Nothing
+            Ok _ -> Just "accepted a malformed contract function type"
+    replaceOnce needle replacement text = case breakOn needle text of
+        Just (before, after) -> Just (before ++ replacement ++ drop (length needle) after)
+        Nothing -> Nothing
+    breakOn needle = go ""
+      where
+        go _ [] = Nothing
+        go acc rest@(c : cs)
+            | needle `isPrefixOf` rest = Just (reverse acc, rest)
+            | otherwise = go (c : acc) cs
+
 testAstData :: Test
 testAstData = TestList "testAstData"
     [ testCase "checked writer refuses unsupported numeric and record sizes" writerLimits
+    , testCase "contract function types round trip through AST and interface data" contractFnAst
     , testCase "all syntax constructors and builtins" (roundTrip fixtures)
     , testCase "builtin Eq hides metadata but serialization preserves it" metadata
     , testCase "deep expression arena" (roundTrip deep)
@@ -617,6 +688,7 @@ testAstData = TestList "testAstData"
 testAstReader :: Test
 testAstReader = TestList "testAstReader"
     [ TestCase "interpreted round trip" (interpreted small [])
+    , TestCase "interpreted contract function type round trip" (interpreted [StructDef "Callback" [] [("f", contractFnType)] []] [])
     , TestCase "interpreted UTF-8 names" (interpreted [Assign "café" (Var "λ\NUL\n\\\"")] [])
     , TestCase "interpreted exact printed byte count" (interpreted small ["count"])
     , TestCase "interpreted semantic mutation" (interpreted small ["mutate"])

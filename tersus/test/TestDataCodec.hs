@@ -10,8 +10,10 @@ import MirData (writeProgram)
 import Seed (compilerSnapshotHash)
 import LlvmRuntime (runtimeSource)
 import Hash (fingerprint)
+import DataCodec (parseLine, tokenize, typeP, typeTokens)
 import MirEval (fromMirValue, runProgramEnv, RunEnv (..), Outcome (..))
 import Syntax (Value (..))
+import Types (FnClause (..), FnClauseToken (..), FnContract (..), Type (..))
 import TestHarness
 import Utils
 
@@ -71,6 +73,57 @@ writerMetadata = codecRun (unlines
         , testAssertEq (outStderr outcome) ""
         ])
 
+contractFnType :: Type
+contractFnType =
+    TFnContract
+        [TInt, TBool]
+        TInt
+        ( FnContract
+            ["x", ""]
+            [FnClause [FnWord "affirm", FnName "x", FnWord "gt", FnWord "0"]]
+            [FnClause [FnWord "affirm", FnWord "return", FnWord "gt", FnWord "0"]]
+        )
+
+parsedType :: String -> Result Type String
+parsedType text = tokenize text `bindResult` parseLine typeP
+
+haskellContractTypes :: TestResult
+haskellContractTypes =
+    firstFailure
+        [ testAssertEq (typeTokens (TFn [TInt, TBool] TInt)) ["fn", "2", "int", "bool", "int"]
+        , testAssertEq (parsedType "fn 2 int bool int") (Ok (TFn [TInt, TBool] TInt))
+        , testAssertEq (parsedType (unwords (typeTokens contractFnType))) (Ok contractFnType)
+        , testAssertEq (take 1 (typeTokens contractFnType)) ["fnc"]
+        , refused "fnc 1 int int 2 \"x\" \"y\" 0 0"
+        , refused "fnc 2 int int int 2 \"x\" \"x\" 0 0"
+        , refused "fnc 1 int int 1 \"x\" 1 0 0"
+        , refused "fnc 1 int int 1 \"x\" 1 1 z affirm 0"
+        , refused "fnc 1 int"
+        , refused "fnc 1 int int 1 \"x\" 0"
+        ]
+  where
+    refused text = case parsedType text of
+        Error _ -> Nothing
+        Ok ty -> Just ("accepted a malformed contract function type: " ++ show ty)
+
+tersusContractTypes :: IO TestResult
+tersusContractTypes = codecRun (unlines
+    [ "import data::codec::codec { tokenize, typeAt, printType };"
+    , "old = tokenize(\"fn 1 int int\"); ot = typeAt(old.value, 0); on = printType(ot.value);"
+    , "tokens = tokenize(\"fnc 1 int int 1 \\\"x\\\" 1 4 w affirm q \\\"x\\\" w gt w 0 1 4 w affirm w return w gt w 0\");"
+    , "if !tokens.ok || size(tokens.value) <= 0 { return false; }; ty = typeAt(tokens.value, 0); n = printType(ty.value);"
+    , "badNames = tokenize(\"fnc 1 int int 2 \\\"x\\\" \\\"y\\\" 0 0\"); b1 = typeAt(badNames.value, 0);"
+    , "dupNames = tokenize(\"fnc 2 int int int 2 \\\"x\\\" \\\"x\\\" 0 0\"); b2 = typeAt(dupNames.value, 0);"
+    , "emptyClause = tokenize(\"fnc 1 int int 1 \\\"x\\\" 1 0 0\"); b3 = typeAt(emptyClause.value, 0);"
+    , "badMarker = tokenize(\"fnc 1 int int 1 \\\"x\\\" 1 1 z affirm 0\"); b4 = typeAt(badMarker.value, 0);"
+    , "truncated = tokenize(\"fnc 1 int\"); b5 = typeAt(truncated.value, 0);"
+    , "return ot.ok && ty.ok && ty.pos = size(tokens.value) && !b1.ok && !b2.ok && !b3.ok && !b4.ok && !b5.ok;"
+    ]) (\outcome -> firstFailure
+        [ testAssertEq (fmap fromMirValue (outValue outcome)) (Just (VBool True))
+        , testAssertEq (outStdout outcome) " fn 1 int int fnc 1 int int 1 \"x\" 1 4 w affirm q \"x\" w gt w 0 1 4 w affirm w return w gt w 0"
+        , testAssertEq (outStderr outcome) ""
+        ])
+
 firstFailure :: [TestResult] -> TestResult
 firstFailure results = case [err | Just err <- results] of
     err : _ -> Just err
@@ -94,4 +147,6 @@ testDataCodec = TestList "testDataCodec"
             (_, _, Error e) -> Just e
     , TestCase "numeric, escaping and truncated-type refusals" readerBounds
     , TestCase "named type tokens and escaped bytes remain exact" writerMetadata
+    , testCase "contract function types round trip and malformed ones are refused (Haskell)" haskellContractTypes
+    , TestCase "contract function types round trip and malformed ones are refused (Tersus codec)" tersusContractTypes
     ]

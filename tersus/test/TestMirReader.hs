@@ -28,6 +28,8 @@ testMirReader =
             "interpreted"
             [ TestCase "the program of a loop" (readFile "examples/loops.tersus" >>= interpreted)
             , TestCase "names that are not ASCII" (interpreted "naïve = 3; café = naïve + 1; return café;")
+            , TestCase "a contract function type round trips" (interpretedText contractFnText)
+            , TestCase "a malformed contract function type is refused" (refusedText malformedContractFnText)
             ]
         , TestParallel
             "every example and program, natively"
@@ -62,6 +64,52 @@ interpreted source = do
                 | not (null errors) -> Just ("reported: " ++ errors)
                 | sameText output text -> Nothing
                 | otherwise -> Just ("wrote\n" ++ output ++ "\nfor\n" ++ text)
+
+contractFnText :: String
+contractFnText =
+    unlines
+        [ "tersus-mir 1"
+        , "struct \"Callback\" 1 \"f\" fnc 1 int int 1 \"x\" 1 4 w affirm q \"x\" w gt w 0 1 4 w affirm w return w gt w 0"
+        , "main \"m\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"
+        , "local 0 some \"g\" fnc 1 int int 1 \"x\" 1 4 w affirm q \"x\" w gt w 0 1 4 w affirm w return w gt w 0"
+        , "block 0"
+        , "return"
+        , "end"
+        ]
+
+malformedContractFnText :: String
+malformedContractFnText =
+    unlines
+        [ "tersus-mir 1"
+        , "struct \"Callback\" 1 \"f\" fnc 1 int int 2 \"x\" \"y\" 0 0"
+        , "main \"m\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"
+        , "block 0"
+        , "return"
+        , "end"
+        ]
+
+interpretedText :: String -> IO TestResult
+interpretedText text = do
+    reader <- bootstrapFromFile "lib/mir/mir_reader/mir_reader.tersus"
+    pure $ case reader of
+        Error e -> Just e
+        Ok prog -> case runProgramIn noWorld{worldInput = text} prog of
+            Error e -> Just e
+            Ok ((output, errors), _)
+                | not (null errors) -> Just ("reported: " ++ errors)
+                | sameText output text -> Nothing
+                | otherwise -> Just ("wrote\n" ++ output ++ "\nfor\n" ++ text)
+
+refusedText :: String -> IO TestResult
+refusedText text = do
+    reader <- bootstrapFromFile "lib/mir/mir_reader/mir_reader.tersus"
+    pure $ case reader of
+        Error e -> Just e
+        Ok prog -> case runProgramIn noWorld{worldInput = text} prog of
+            Error _ -> Nothing
+            Ok ((output, errors), _)
+                | not (null errors) && not (sameText output text) -> Nothing
+                | otherwise -> Just "a malformed contract function type was read as MIR data"
 
 -- One of the compiler's own programs (the reader, the emitter, the MIR checker and eraser) as an executable, built as the host builds
 -- them: lowered and owned without being validated (MirHousekeeping.ownedProgramOf), since whether each validates is testExamples' to

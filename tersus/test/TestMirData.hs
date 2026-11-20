@@ -24,7 +24,7 @@ import qualified PackageCompile as Package
 import PreludeSource (elaboratePackageFiles, libModules, toolPackageFiles, validationPackageFiles)
 import qualified Syntax as S
 import Pipeline (ownedSource, loadFromFilesystem)
-import Types (Arg (..), Size (..), Type (..), pattern TList, pattern TBox)
+import Types (Arg (..), FnClause (..), FnClauseToken (..), FnContract (..), Size (..), Type (..), pattern TList, pattern TBox)
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms)
 import TestVariadic (variadicPrograms)
@@ -68,6 +68,7 @@ testMirData =
             [ testCase "an instance introduced by another instance is declared" nestedInstanceIsDeclared
             , testCase "erasure scrubs existing declarations as well as new instances" existingPermissionsAreErased
             ]
+        , testCase "a contract function type round trips, and a malformed one is refused" contractFnMir
         , TestList
             "reading"
             [ testCase "a text that is not the MIR" (refused "return 1;" "tersus-mir 1")
@@ -80,6 +81,37 @@ testMirData =
         ]
   where
     refused text expected = testAssertErrorContains expected (readProgram text)
+    contractFnMir =
+        let contractFnType =
+                TFnContract
+                    [TInt, TBool]
+                    TInt
+                    ( FnContract
+                        ["x", ""]
+                        [FnClause [FnWord "affirm", FnName "x", FnWord "gt", FnWord "0"]]
+                        [FnClause [FnWord "affirm", FnWord "return", FnWord "gt", FnWord "0"]]
+                    )
+            mainFn =
+                Function
+                    "main"
+                    []
+                    Nothing
+                    (Map.fromList [(Local 0, LocalDecl contractFnType (Just "g"))])
+                    (Map.fromList [(BlockId 0, BasicBlock [] Return)])
+                    []
+                    []
+                    []
+                    []
+                    []
+                    emptySpec
+            program = Program (Map.fromList [("Callback", StructDecl [("f", contractFnType)])]) Map.empty mainFn Map.empty Map.empty Map.empty Map.empty
+            text = writeProgram program
+            malformed = "tersus-mir 1\nstruct \"P\" 1 \"f\" fnc 1 int int 2 \"x\" \"y\" 0 0\nmain \"m\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0\nend\n"
+         in case (readProgram text, readProgram malformed) of
+                (Ok back, Error _) | back == program && writeProgram back == text -> Nothing
+                (Ok back, Error _) -> Just ("a contract function type changed through MIR data: " ++ show back)
+                (Error e, _) -> Just e
+                (_, Ok _) -> Just "accepted a contract function type whose names do not match its parameters"
     statements program = concat [stmts | f <- progMain program : Map.elems (progFunctions program), BasicBlock stmts _ <- Map.elems (fnBlocks f)]
     isGhost s = case s of
         Ghost _ _ -> True
