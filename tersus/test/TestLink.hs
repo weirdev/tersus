@@ -410,6 +410,32 @@ testLinkNative = TestList "testLinkNative"
                                 , testAssertEq checkedErrors "", testAssertEq (functionsOf checked) ["\"dropT\""]
                                 , testAssertTrue ("owned \"T\"" `isInfixOf` checked)
                                 ]
+       , TestCase "actual emitter prune keeps the native List images of Boxes of arrays and the List instances of list constants" $ do
+            let decl = M.StructDecl [("n", TInt)]
+                -- (the storage List and Box are L and B, as the checked protocols name them)
+                withStorage text = unlines (takeWhile (not . recordsEnd) (lines text) ++ ["protocol \"Box\" \"B\"", "protocol \"List\" \"L\""] ++ dropWhile (not . recordsEnd) (lines text))
+                recordsEnd l = any (`isPrefixOf` l) ["shared ", "function ", "main "]
+                typesOf out = [takeWhile (/= '"') (drop 8 l) | l <- lines out, take 8 l == "struct \""]
+                withMain locals stmts = empty
+                    { M.progTypes = Map.fromList [("L<Int>", decl), ("L<Bool>", decl)]
+                    , M.progMain = (function "" 0){M.fnLocals = Map.fromList ((M.Local 0, M.LocalDecl TInt Nothing) : locals), M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock stmts M.Return)}
+                    }
+                -- (a Box of an array is natively a List of its elements: L<Int>, not L<Bool>)
+                boxed = withMain [(M.Local 1, M.LocalDecl (TNamed "B" [ArgType (TArrayOf TInt SizeAny)]) Nothing)] []
+                -- (a list constant is the List the place it is put in says: L<Int>, not L<Bool>)
+                constant = withMain [(M.Local 1, M.LocalDecl (TNamed "L" [ArgType TInt]) Nothing)] [M.Assign (M.Local 1) (M.Use (M.Const (M.CList [M.CInt 1])))]
+            tool <- actualEmitterTool
+            case (tool, programData boxed, programData constant) of
+                (Error e, _, _) -> pure (Just e)
+                (_, Error e, _) -> pure (Just e)
+                (_, _, Error e) -> pure (Just e)
+                (Ok executable, Ok boxedText, Ok constantText) -> do
+                    let prune text = do
+                            (_, out, errors) <- Native.runWithInputFull executable ("pass link\nprune\n" ++ text)
+                            pure (errors, typesOf out)
+                    results <- mapM prune [boxedText, withStorage boxedText, constantText, withStorage constantText]
+                    -- (without the checked protocols the program names no storage, and neither instance is kept)
+                    pure $ testAssertEq results [("", []), ("", ["L<Int>"]), ("", []), ("", ["L<Int>"])]
        , TestCase "dependency main ghosts follow numeric block order despite wire permutation" $ do
             let dep = empty{M.progMain = (M.progMain empty){M.fnBlocks = Map.fromList
                     [(M.BlockId 2, M.BasicBlock [M.Ghost Map.empty (M.GhostPosition 2 1)] M.Return)
