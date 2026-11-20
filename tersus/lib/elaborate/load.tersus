@@ -1130,8 +1130,8 @@ fn wordAtCursor(t: &Cursor) -> String ~ {
     if !((first >= 65 && first <= 90) || (first >= 97 && first <= 122) || first = 95) { return ""; };
     out = [];
     p = t.pos;
-    if p < 0 { return ""; };
-    while p >= 0 && p < size(t.text.bytes) && identByte(toInt(get(&t.text.bytes, p))) [{ affirm p >= 0; }] shrinks size(t.text.bytes) - p {
+    if p < 0 || p >= size(t.text.bytes) { return ""; };
+    while p >= 0 && p < size(t.text.bytes) && identByte(toInt(get(&t.text.bytes, p))) [{ affirm p >= 0; affirm p <= size(t.text.bytes); }] shrinks size(t.text.bytes) - p {
         out = push(out, get(&t.text.bytes, p));
         p = p + 1;
     };
