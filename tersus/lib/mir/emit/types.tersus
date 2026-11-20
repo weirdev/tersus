@@ -113,10 +113,7 @@ fn functionSymbol(name: &String) -> String [{ }] [{ }] {
 };
 
 fn containsName(names: &List<String>, n: &String) -> Bool [{ }] [{ }] {
-    for s in names {
-        if s = n { return true; };
-    };
-    return false;
+    return any(names, fn(item: String) => item = n.clone());
 };
 
 
@@ -309,10 +306,7 @@ fn localTypeOf(f: &Function, l: Int) -> LT [{ }] [{ }] {
 };
 
 fn hasInt(l: &List<Int>, x: Int) -> Bool [{ }] [{ }] {
-    for y in l {
-        if y = x { return true; };
-    };
-    return false;
+    return any(l, fn(item: Int) => item = x);
 };
 
 fn noBools() -> List<Bool> [{ }] [{ }] {
