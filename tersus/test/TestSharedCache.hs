@@ -37,7 +37,7 @@ import GHC.Clock (getMonotonicTime)
 import qualified PackageCompile
 import qualified MirHousekeeping
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getCurrentDirectory, getModificationTime, getPermissions, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setCurrentDirectory, setModificationTime, setPermissions, withCurrentDirectory)
+import System.Directory (createFileLink, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getCurrentDirectory, getModificationTime, getPermissions, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setCurrentDirectory, setModificationTime, setPermissions, withCurrentDirectory)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
@@ -2240,6 +2240,13 @@ missingHashTools :: IO TestResult
 missingHashTools = do
     home <- freshHome "tersus-shared-cache-no-hash"
     ( do
+        primeBootstrapTools home
+        mapM_ (\name -> do
+            executable <- findExecutable name
+            case executable of
+                Just path -> createFileLink path (home </> name)
+                Nothing -> fail ("native tool is required for the missing-hash fixture: " ++ name))
+            ["clang", "gcc", "ld", "sh"]
         file <- sharedProgramCacheFile "compile" invalidProbeSource
         rejected <- compileOnce invalidProbeSource
         other <- compileOnce richSource
