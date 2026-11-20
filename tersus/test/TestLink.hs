@@ -23,7 +23,7 @@ import MirCopies (makeCopies, makeCopiesWith, genericKey, coveredKey)
 import qualified Link as ProductionLink
 import qualified Compile
 import qualified MirLists
-import MirData (readLowered, writeLowered)
+import MirData (readCheckedLowered, readLowered, writeLowered)
 import qualified MirData
 import MirEval (RunEnv (..), Outcome (..), MirValue (..), runProgramEnv)
 import MirPass (programData)
@@ -146,7 +146,8 @@ nativeFull input = do
         Ok executable -> do
             (code, out, errors) <- Native.runWithInputFull executable input
             pure $ case code of
-                ExitSuccess | out /= "1\n" && null errors -> readLowered out
+                -- (a native pass writes its unit with the checked records it was given)
+                ExitSuccess | out /= "1\n" && null errors -> readCheckedLowered out
                 _ | not (null errors) -> Error (reverse (dropWhile (== '\n') (reverse (decodeUtf8 errors))))
                 _ -> Error ("native Link tool did not write a unit: " ++ take 80 out)
 
@@ -214,7 +215,7 @@ realInputChecks = do
                         , testAssertTrue (not (null [() | f <- M.progMain p : Map.elems (M.progFunctions p), b <- Map.elems (M.fnBlocks f), M.Call (M.Const (M.CFn name)) _ _ _ <- [M.blockTerminator b], name `elem` ["listNew", "listPush"]]))
                         ])
                     pure (firstFailure
-                        [ testAssertTrue (any (\(m, _) -> m == ModuleId "tersuslib" (Just "lists")) actualUnits)
+                        [ testAssertTrue (any (\(m, _) -> m == ModuleId "std" (Just "lists")) actualUnits)
                         , testAssertTrue (Map.member "listNew" (M.progFunctions native))
                         , compared
                         ])
@@ -621,7 +622,7 @@ responseProgram :: String -> Result M.Program String
 responseProgram input = runReference input `bindResult` \out ->
     if outValue out == Just (MInt 1)
         then Error (reverse (dropWhile (== '\n') (reverse (decodeUtf8 (outStderr out)))))
-        else mapResult M.lowProgram (readLowered (outStdout out))
+        else mapResult M.lowProgram (readCheckedLowered (outStdout out))
 
 roundTrip :: M.Lowered -> TestResult
 roundTrip raw = inspect (writeLowered raw) $ \input -> inspect (runReference input) $ \out ->
@@ -754,7 +755,8 @@ boxedMonoRefusal = do
 
 libraryBoundedRetention :: IO TestResult
 libraryBoundedRetention = do
-    actual <- evaluate (ProductionLink.linkPrograms units)
+    -- (the production linker is told which units are the compiler's libraries)
+    actual <- evaluate (ProductionLink.linkWithLibraries [u | u@(ModuleId "tersuslib" _, _) <- units] [u | u@(m, _) <- units, modulePackage m /= "tersuslib"])
     reference <- evaluate (linked units)
     native <- nativeMerge units
     let check p = firstFailure
@@ -1124,7 +1126,7 @@ testLink = TestList "testLink"
     , testCase "signed local overflow refuses without wrapping" (wireMutation everyRecord (replaceFirst (isPrefixOf "local 0 ") (const "local 9223372036854775808 none int")))
     , testCase "AST signed numbers do not widen" (wireMutation everyRecord (replaceFirst (== "VBool true") (const "Mark 9223372036854775808 0")))
     , testCase "integer payload spelling has semantic equality" (rawSemanticControl (valueProgram (S.VInt 1)) (replaceFirst (isPrefixOf "NamePart \"1\" ") (replaceText "\"1\"" "\"01\"")))
-    , testCase "recursive List/Box aliases have semantic equality" (rawSemanticControl (valueProgram (S.VFunct [] [] [] (S.BuiltinFunct (Ctor "Holder" [ArgType (TBox (TList (TList TInt)))] ["value"])) [])) (map (\line -> if "Type " `isPrefixOf` line then replaceText "named \"List\" 1 type " "list " (replaceText "named \"Box\" 1 type " "box " line) else line)))
+    , testCase "recursive List/Box aliases have semantic equality" (rawSemanticControl (valueProgram (S.VFunct [] [] [] (S.BuiltinFunct (Ctor "Holder" [ArgType (TNamed "Box" [ArgType (TNamed "List" [ArgType (TNamed "List" [ArgType TInt])])])] ["value"])) [])) (map (\line -> if "Type " `isPrefixOf` line then replaceText "named \"List\" 1 type " "list " (replaceText "named \"Box\" 1 type " "box " line) else line)))
     , testCase "builtin metadata is retained while builtin equality ignores it" builtinMetadataControl
     , testCase "unknown binary operation refuses" (wireMutation (asUnit (program [("f", 1)])) (replaceFirst (isPrefixOf "assign 0 ") (const "assign 0 binary bogus const int 1 const int 2")))
     , testCase "truncated conditional expression payload refuses" (wireMutation (asUnit (ghostFunction (S.IfExpr (S.Var "f") (S.Var "f") (S.Var "f")))) (replaceFirst (isPrefixOf "IfExpr ") (const "IfExpr 0 1")))
