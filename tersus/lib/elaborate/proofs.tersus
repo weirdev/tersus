@@ -545,9 +545,7 @@ fn zeroArguments(st: St, argTys: &List<Int>) -> St ~ {
     st = emitIntValue(st, 0);
     st = emitVal(st, st.nid);
     zero = st.nid;
-    out = [];
-    for t in argTys { out = push(out, TE { node: zero, types: push([], t) }); };
-    return St { tes: out, ..st };
+    return St { tes: map(argTys, fn(tyId: Int) => TE { node: zero, types: push([], tyId) }), ..st };
 };
 
 // The size arguments a call was given after its first n arguments, as proofs (exprToProof); st.outs
