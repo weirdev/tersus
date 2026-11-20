@@ -35,7 +35,7 @@ import PreludeSource (toolPackageFiles)
 import Hash (fingerprint)
 import TestMirData (everyRecord, malformedLowered)
 import qualified Syntax as S
-import Types (Type (..), Arg (..), Size (..), BuiltinFunct (..), pattern TList, pattern TBox)
+import Types (Type (..), Arg (..), Size (..), BuiltinFunct (..), FnContract (..), FnClause (..), FnClauseToken (..), pattern TList, pattern TBox)
 import TestHarness
 import Utils
 
@@ -226,6 +226,7 @@ testLinkNative :: Test
 testLinkNative = TestList "testLinkNative"
     ([TestCase label $ checkLinked expected <$> nativeMerge units | (label, units, expected) <- linkCases]
     ++ [ TestCase "production Link validates only used compiler-library bounded templates" libraryBoundedRetention
+       , testCase "pinned Link preserves nested contract types and their exact clause tokens" contractTypesThroughLink
        , TestCase "actual prepared compiler/helper/generic inputs" realInputChecks
        , TestCase "native pruning preserves the entry and reachable program structure on actual owned MIR" $ do
             seed <- cachedSeed
@@ -371,6 +372,24 @@ copiesForUnits units program =
         ok -> ok
   where
     library = Set.fromList [name | (ModuleId "tersuslib" _, unit) <- units, name <- Map.keys (M.progBounded unit)]
+
+contractTypesThroughLink :: TestResult
+contractTypesThroughLink = inspect (ProductionLink.linkPrograms [(unitA, library), (unitB, root)]) $ \linkedProgram ->
+    firstFailure
+        [ testAssertEq (Map.lookup "Callback" (M.progTypes linkedProgram)) (Just declaration)
+        , testAssertEq (M.fnReturns =<< Map.lookup "callback" (M.progFunctions linkedProgram)) (Just callbackType)
+        , testAssertEq (M.localType <$> Map.lookup (M.Local 1) (M.fnLocals (M.progMain linkedProgram))) (Just callbackType)
+        ]
+  where
+    contract = FnContract ["x"] [FnClause [FnWord "list", FnWord "0007", FnName "x"]] [FnClause [FnWord "box"]]
+    callbackType = TFnContract [TInt] (TFnContract [TInt] TInt contract) contract
+    declaration = M.StructDecl [("callback", callbackType)]
+    f = (function "callback" 0)
+        { M.fnReturns = Just callbackType
+        , M.fnLocals = Map.singleton (M.Local 0) (M.LocalDecl callbackType Nothing)
+        }
+    library = empty{M.progFunctions = Map.singleton "callback" f, M.progTypes = Map.singleton "Callback" declaration}
+    root = empty{M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl callbackType Nothing)}}
 
 libraryBoundedRetention :: IO TestResult
 libraryBoundedRetention = do
