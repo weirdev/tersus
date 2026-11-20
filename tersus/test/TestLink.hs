@@ -85,6 +85,30 @@ nativeLinkTool = modifyMVar nativeToolBox $ \cached -> case cached of
 actualEmitterBox :: MVar (Maybe (Result FilePath String))
 actualEmitterBox = unsafePerformIO (newMVar Nothing)
 
+{-# NOINLINE actualEraserBox #-}
+actualEraserBox :: MVar (Maybe (Result FilePath String))
+actualEraserBox = unsafePerformIO (newMVar Nothing)
+
+-- The ghost eraser built from these sources, as the actual Full pass entry is
+actualEraserTool :: IO (Result FilePath String)
+actualEraserTool = modifyMVar actualEraserBox $ \cached -> case cached of
+    Just tool -> pure (cached, tool)
+    Nothing -> do
+        seed <- cachedSeed
+        result <- case seed of
+            Error e -> pure (Error e)
+            Ok emitter -> do
+                owned <- Housekeeping.ownedToolWith emitter Housekeeping.mirEraseEntry
+                case owned of
+                    Error e -> pure (Error e)
+                    Ok program -> do
+                        let input = MirData.writeProgram program
+                            key = Housekeeping.ownedContentKey seedHash input []
+                        Native.cachedProgram "mir-erase-test" key "the actual ghost eraser" $ \output -> do
+                            ir <- Native.runWithInput emitter input
+                            case ir of Error e -> pure (Error e); Ok text -> Native.buildExecutable output text
+        pure (Just result, result)
+
 actualEmitterTool :: IO (Result FilePath String)
 actualEmitterTool = modifyMVar actualEmitterBox $ \cached -> case cached of
     Just tool -> pure (cached, tool)
@@ -387,7 +411,8 @@ testLinkNative = TestList "testLinkNative"
                             , firstFailure [testAssertEq providerOut "1\n", testAssertEq providerErrors "link error: provider Box is defined by both module a and module b with different definitions\n"]
                             , firstFailure [testAssertEq factsOut "1\n", testAssertEq factsErrors "link error: ownership facts of a type A is defined by both module a and module b with different definitions\n"]
                             , firstFailure [testAssertEq mixedOut "1\n", testAssertEq mixedErrors "link error: some modules have checked ownership facts and others do not\n"]
-                            , firstFailure [testAssertEq monoOut "1\n", testAssertEq monoErrors "checked ownership records are not specialized yet\n"]
+                            -- (a program with nothing to specialize is given back as it is, its checked records with it)
+                            , firstFailure [testAssertEq monoErrors "", testAssertEq monoOut checked]
                             ])
        , TestCase "actual emitter prune keeps the functions a kept type's checked facts name, and no others" $ do
             let owner = M.StructDecl [("n", TInt)]
@@ -436,6 +461,78 @@ testLinkNative = TestList "testLinkNative"
                     results <- mapM prune [boxedText, withStorage boxedText, constantText, withStorage constantText]
                     -- (without the checked protocols the program names no storage, and neither instance is kept)
                     pure $ testAssertEq results [("", []), ("", ["L<Int>"]), ("", []), ("", ["L<Int>"])]
+       , TestCase "actual emitter Mono and fused ownership make and free the copies a held instance's checked facts select" $ do
+            let w t = TNamed "W" [ArgType t]
+                v t = TNamed "V" [ArgType t]
+                local n t = (M.Local n, M.LocalDecl t Nothing)
+                -- (dropW and cloneW are no type's by their names: only the facts select them)
+                template n self = (function n 0){M.fnParams = [M.Local 1], M.fnTypeParams = ["T"], M.fnLocals = Map.fromList [local 0 TInt, local 1 self], M.fnBorrowed = [M.Local 1 | n == "cloneW"]}
+                mainFn = (function "" 0){M.fnLocals = Map.fromList [local 0 TInt, local 1 (w TInt)], M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [M.Assign (M.Local 1) (M.MakeData "W<Int>" [("x", M.Const (M.CInt 1))]), M.Assign (M.Local 0) (M.Use (M.Const (M.CInt 0)))] M.Return)}
+                program = empty
+                    { M.progGenerics = Map.fromList [("W", (["T"], [("x", TParam "T")])), ("V", (["T"], [("x", TParam "T")]))]
+                    , M.progFunctions = Map.fromList [("dropW", template "dropW" (w (TParam "T"))), ("cloneW", template "cloneW" (TRef (w (TParam "T")))), ("dropV", template "dropV" (v (TParam "T")))]
+                    , M.progMain = mainFn
+                    }
+                isFunctionLine l = take 9 l == "function " || take 5 l == "main "
+                recordsEnd l = isFunctionLine l || take 7 l == "shared "
+                withRows rows text = unlines (takeWhile (not . recordsEnd) (lines text) ++ rows ++ dropWhile (not . recordsEnd) (lines text))
+                wRow = "owned \"W<Int>\" \"\" \"D\" \"dropW\" \"C\" \"cloneW\" \"\" \"\""
+                vRow = "owned \"V<Bool>\" \"\" \"D\" \"dropV\" \"\" \"\" \"\" \"\""
+                functionsOf out = [takeWhile (/= ' ') (drop 9 l) | l <- lines out, take 9 l == "function "]
+                -- (the owned MIR version 2 the fused tool writes after its MIR version 3 receipt)
+                ownedPart out = dropWhile (/= "tersus-mir 2") (lines out)
+                -- (a tuple's declared struct has no facts of its own; a near miss of its name is an ordinary struct, which has to)
+                withTuple n = program{M.progTypes = Map.singleton n (M.StructDecl [("0", TInt), ("1", TInt)])}
+            case (programData program, programData (withTuple "Tuple2"), programData (withTuple "Tuple02")) of
+                (Error e, _, _) -> pure (Just e)
+                (_, Error e, _) -> pure (Just e)
+                (_, _, Error e) -> pure (Just e)
+                (Ok text, Ok tupleText, Ok nearTupleText) -> do
+                    tool <- actualEmitterTool
+                    case tool of
+                        Error e -> pure (Just e)
+                        Ok executable -> do
+                            let checked = withRows ["ownership 2", vRow, wRow] text
+                            (tupleStatus, _, tupleErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 2", vRow, wRow] tupleText)
+                            (_, nearTuple, nearTupleErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 2", vRow, wRow] nearTupleText)
+                            (_, mono, monoErrors) <- Native.runWithInputFull executable ("pass mono\n" ++ checked)
+                            (fusedStatus, fused, fusedErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ checked)
+                            (_, missing, missingErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 1", vRow] text)
+                            let owned = ownedPart fused
+                                ownedMain = dropWhile (\l -> take 5 l /= "main ") owned
+                            -- (the owned program, its ghosts erased by the eraser, is what the emitter makes native code of: the
+                            -- drop it frees the held value with is the copy the facts name)
+                            eraser <- actualEraserTool
+                            (erasedStatus, erased, eraserErrors) <- case eraser of
+                                Error e -> pure (ExitFailure 1, "", e)
+                                Ok eraserExe -> Native.runWithInputFull eraserExe (unlines owned)
+                            (_, llvm, llvmErrors) <- Native.runWithInputFull executable erased
+                            (_, nearMiss, nearMissErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 2", "owned \"W<Bool>\" \"\" \"D\" \"dropW\" \"\" \"\" \"\" \"\"", vRow] text)
+                            pure $ firstFailure
+                                [ testAssertEq monoErrors ""
+                                -- (the held instance's facts make its copies and name them; V<Bool> is held by nothing, and makes none)
+                                , testAssertEq (functionsOf mono) ["\"cloneW<Int>\"", "\"dropW<Int>\""]
+                                , testAssertTrue ("owned \"W<Int>\" \"\" \"D\" \"dropW<Int>\" \"C\" \"cloneW<Int>\" \"\" \"\"" `elem` lines mono)
+                                , testAssertTrue (vRow `elem` lines mono)
+                                , testAssertTrue ("ownership 2" `elem` lines mono)
+                                , testAssertEq fusedErrors "", testAssertEq fusedStatus ExitSuccess
+                                -- (the receipt is the Mono output, and the owned program has the declared instance's facts)
+                                , testAssertEq (unlines (takeWhile (/= "tersus-mir 2") (lines fused))) mono
+                                , testAssertTrue ("ownership 1" `elem` owned)
+                                , testAssertTrue ("owned \"W<Int>\" \"\" \"D\" \"dropW<Int>\" \"C\" \"cloneW<Int>\" \"\" \"\"" `elem` owned)
+                                -- (and frees the held value with the copy the facts name)
+                                , testAssertTrue ("drop 1" `elem` ownedMain)
+                                , testAssertEq eraserErrors "", testAssertEq erasedStatus ExitSuccess
+                                , testAssertEq (take 1 (lines erased)) ["tersus-mir 1"]
+                                , testAssertTrue ("owned \"W<Int>\" \"\" \"D\" \"dropW<Int>\" \"C\" \"cloneW<Int>\" \"\" \"\"" `elem` lines erased)
+                                , testAssertEq llvmErrors ""
+                                , testAssertTrue (any ("call i64 @\"fn.dropW<Int>\"" `isInfixOf`) (lines llvm))
+                                , firstFailure [testAssertEq missing "1\n", testAssertEq missingErrors "Type error: W<Int> has no checked ownership facts\n"]
+                                , firstFailure [testAssertEq tupleErrors "", testAssertEq tupleStatus ExitSuccess]
+                                , firstFailure [testAssertEq nearTuple "1\n", testAssertEq nearTupleErrors "Type error: Tuple02 has no checked ownership facts\n"]
+                                -- (facts of another instance of the same struct are not the held instance's)
+                                , firstFailure [testAssertEq nearMiss "1\n", testAssertEq nearMissErrors "Type error: W<Int> has no checked ownership facts\n"]
+                                ]
        , TestCase "dependency main ghosts follow numeric block order despite wire permutation" $ do
             let dep = empty{M.progMain = (M.progMain empty){M.fnBlocks = Map.fromList
                     [(M.BlockId 2, M.BasicBlock [M.Ghost Map.empty (M.GhostPosition 2 1)] M.Return)
