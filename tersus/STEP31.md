@@ -111,8 +111,12 @@ compiler's target, and the source and pins the seed was made from. When the
 digest is the association the pin carries and the working source is still the
 one the running host captured, the host uses the published seed and prepares
 no emitter of its own; with no association, a different one, changed source or
-no profile, it builds the emitter from source instead. `cachedSourceEmitter`,
-which regeneration uses, always builds from source whatever the pin says.
+no profile, it builds the emitter from source instead. Every selection
+compares the working files with the captured ones (byte for byte under a UTF-8
+locale) and checks the seed file against its pin; bytes that already matched
+the pin in this process are compared rather than hashed again.
+`cachedSourceEmitter`, which regeneration uses, always builds from source
+whatever the pin says.
 
 `stack run emitter-seed -- certify <output.ll> <candidate.pin>` writes that
 record: it regenerates the seed, requires the result to be the pinned digest,

@@ -9,6 +9,7 @@ module Native
     , spawnShared
     , withSpawnedProcess
     , readProcessOutput
+    , readProcessOutputBytes
     , withPipeReader
     , ReaderFailure (..)
     , runProcessWithInputFull
@@ -46,6 +47,7 @@ import GHC.IO.Handle.Lock (LockMode (..), hLock)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os)
 
+import qualified Data.ByteString as B
 import qualified Data.Map.Strict as Map
 import System.Process (CmdSpec (..), CreateProcess (..), ProcessHandle, StdStream (..), cleanupProcess, createProcess, getPid, proc, waitForProcess)
 
@@ -205,7 +207,13 @@ withSpawnedProcess :: CreateProcess -> ((Maybe Handle, Maybe Handle, Maybe Handl
 withSpawnedProcess command = bracket (spawnShared command) cleanupProcess
 
 readProcessOutput :: CreateProcess -> String -> IO (ExitCode, String, String)
-readProcessOutput command input =
+readProcessOutput command input = readProcessOutputWith command (`hPutStr` input)
+
+readProcessOutputBytes :: CreateProcess -> B.ByteString -> IO (ExitCode, String, String)
+readProcessOutputBytes command input = readProcessOutputWith command (`B.hPut` input)
+
+readProcessOutputWith :: CreateProcess -> (Handle -> IO ()) -> IO (ExitCode, String, String)
+readProcessOutputWith command write =
     withSpawnedProcess command{std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe} $ \spawned ->
         case spawned of
             (Just toChild, Just fromChild, Just errors, process) -> do
@@ -213,7 +221,7 @@ readProcessOutput command input =
                 err <- hGetContents errors
                 withPipeReader ("reading the standard output of " ++ program) fromChild (() <$ evaluate (length out)) $ \waitOut ->
                     withPipeReader ("reading the standard error of " ++ program) errors (() <$ evaluate (length err)) $ \waitErr -> do
-                        wrote <- try (hPutStr toChild input `finally` hClose toChild) :: IO (Either IOException ())
+                        wrote <- try (write toChild `finally` hClose toChild) :: IO (Either IOException ())
                         case wrote of
                             Left e | not (isResourceVanishedError e) -> throwIO e
                             _ -> pure ()
