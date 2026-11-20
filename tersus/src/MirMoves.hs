@@ -1530,6 +1530,7 @@ referenceReach query program = go query Set.empty
             Nothing -> True
         TParam _ -> False
         TFn _ _ -> False
+        TFnContract _ _ _ -> False
         TForall _ _ _ -> False
         TAddr _ -> False
         TInt -> False
