@@ -17,21 +17,25 @@ module Seed
     , frontendSeedFile
     ) where
 
+import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
 import Control.Exception (Exception, IOException, SomeException, evaluate, throwIO, try)
+import qualified Data.ByteString as B
 import Data.Char (isHexDigit)
+import qualified Data.Map.Strict as Map
 import GHC.IO.Encoding (char8)
 import System.Directory (doesFileExist, removeFile, renameFile)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (IOMode (..), hClose, hGetContents, hSetEncoding, openFile)
-import System.Process (proc)
+import System.IO.Unsafe (unsafePerformIO)
+import System.Process (CreateProcess, proc)
 
 import CacheLock (openTempFileCloexec)
 import Hash (fingerprint)
 import EmitterProvenance (emitterBuildInputs)
 import LlvmRuntime (runtimeSource)
-import Native (buildExecutable, cachedProgram, cachedProgramIfPresent, cacheDirectory, parallelBuilds, readProcessOutput)
+import Native (buildExecutable, cachedProgram, cachedProgramIfPresent, cacheDirectory, parallelBuilds, readProcessOutput, readProcessOutputBytes)
 import PreludeSource (compilerSourceHash, frontendSeedSha256, libPackageFiles, mirPackageFiles, seedSha256, parserSeedSha256, stdlibSource)
 import Utils
 
@@ -91,7 +95,7 @@ seedFile name digest hash variable = do
                 Just path -> verified path
                 Nothing -> cachedFile
   where
-    verified path = mapResult (const path) <$> verifyFile name digest path
+    verified path = mapResult (const path) <$> verifySeedFile name digest path
     firstExisting [] = pure Nothing
     firstExisting (path : rest) = do
         present <- doesFileExist path
@@ -142,20 +146,49 @@ readSeedText name path = do
         pure contents
 
 verifyFile :: String -> String -> FilePath -> IO (Result () String)
-verifyFile name digest path = do
-    outcome <- try (readProcessOutput (proc "sha256sum" [path]) "") :: IO (Either IOException (ExitCode, String, String))
-    bySum <- case outcome of
+verifyFile name digest path = digestVerdict name digest path <$> sha256Of (`readProcessOutput` "") [path]
+
+-- Bytes identical to ones that already hashed to this pin need no second hash.
+{-# NOINLINE verifiedSeeds #-}
+verifiedSeeds :: MVar (Map.Map (String, FilePath) B.ByteString)
+verifiedSeeds = unsafePerformIO (newMVar Map.empty)
+
+verifySeedFile :: String -> String -> FilePath -> IO (Result () String)
+verifySeedFile name digest path = do
+    read' <- try (B.readFile path) :: IO (Either IOException B.ByteString)
+    case read' of
+        Left _ -> verifyFile name digest path
+        Right bytes -> do
+            known <- Map.lookup (digest, path) <$> readMVar verifiedSeeds
+            -- (a hit still refuses, as a hash would, when no hasher can run)
+            if known == Just bytes
+                then digestVerdict name digest path . fmap (const digest) <$> hash B.empty
+                else do
+                    checked <- digestVerdict name digest path <$> hash bytes
+                    case checked of
+                        Ok () -> modifyMVar_ verifiedSeeds (pure . Map.insert (digest, path) bytes)
+                        Error _ -> pure ()
+                    pure checked
+  where
+    hash bytes = sha256Of (`readProcessOutputBytes` bytes) []
+
+sha256Of :: (CreateProcess -> IO (ExitCode, String, String)) -> [String] -> IO (Maybe String)
+sha256Of run arguments = do
+    outcome <- try (run (proc "sha256sum" arguments)) :: IO (Either IOException (ExitCode, String, String))
+    case outcome of
         Right (ExitSuccess, out, _) -> pure (Just out)
         _ -> do
-            fallback <- try (readProcessOutput (proc "shasum" ["-a", "256", path]) "") :: IO (Either IOException (ExitCode, String, String))
+            fallback <- try (run (proc "shasum" (["-a", "256"] ++ arguments))) :: IO (Either IOException (ExitCode, String, String))
             pure $ case fallback of
                 Right (ExitSuccess, out, _) -> Just out
                 _ -> Nothing
-    pure $ case bySum of
-        Nothing -> Error ("Could not run sha256sum or shasum to verify the " ++ name ++ " bootstrap seed " ++ path ++ ".")
-        Just out
-            | takeWhile (/= ' ') out == digest && length digest == 64 && all isHexDigit digest -> Ok ()
-            | otherwise -> Error ("The " ++ name ++ " bootstrap seed " ++ path ++ " does not match bootstrap/" ++ name ++ ".sha256 (" ++ digest ++ "): got " ++ takeWhile (/= ' ') out ++ ". Refusing to build it.")
+
+digestVerdict :: String -> String -> FilePath -> Maybe String -> Result () String
+digestVerdict name digest path bySum = case bySum of
+    Nothing -> Error ("Could not run sha256sum or shasum to verify the " ++ name ++ " bootstrap seed " ++ path ++ ".")
+    Just out
+        | takeWhile (/= ' ') out == digest && length digest == 64 && all isHexDigit digest -> Ok ()
+        | otherwise -> Error ("The " ++ name ++ " bootstrap seed " ++ path ++ " does not match bootstrap/" ++ name ++ ".sha256 (" ++ digest ++ "): got " ++ takeWhile (/= ' ') out ++ ". Refusing to build it.")
 
 removeQuietly :: FilePath -> IO ()
 removeQuietly path = do

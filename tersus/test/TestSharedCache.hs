@@ -1466,6 +1466,36 @@ validatorOperation = withToolsCacheHome $ \home -> do
                 ]
         other -> pure (Just ("could not select the current validator operation: " ++ show other))
 
+seedBytesReverified :: IO TestResult
+seedBytesReverified = do
+    selected <- Seed.emitterSeedFile
+    case selected of
+        Error e -> pure (Just ("the selected emitter seed did not verify: " ++ e))
+        Ok source -> withNativeHome $ \home -> do
+            let copy = home </> "seed.ll"
+            bytes <- BC.readFile source
+            BC.writeFile copy bytes
+            withCacheVariable "TERSUS_SEED_FILE" copy $ do
+                first <- Seed.emitterSeedFile
+                again <- Seed.emitterSeedFile
+                createDirectoryIfMissing True (home </> "no-tools")
+                unhashed <- withCacheVariable "PATH" (home </> "no-tools") Seed.emitterSeedFile
+                BC.writeFile copy (BC.snoc (BC.init bytes) (if BC.last bytes == 'x' then 'y' else 'x'))
+                changed <- Seed.emitterSeedFile
+                BC.writeFile copy (BC.init bytes)
+                shortened <- Seed.emitterSeedFile
+                BC.writeFile copy bytes
+                restored <- Seed.emitterSeedFile
+                let refused answer = case answer of
+                        Error e -> "does not match bootstrap/emitter.sha256" `isInfixOf` e
+                        Ok _ -> False
+                pure (firstFailure
+                    [ testAssertEq (first, again, restored) (Ok copy, Ok copy, Ok copy)
+                    , testAssertTrue (refused changed && refused shortened)
+                    , testAssertTrue (case unhashed of
+                        Error e -> "Could not run sha256sum or shasum" `isInfixOf` e
+                        Ok _ -> False) ])
+
 validatorFlagNamespace :: IO TestResult
 validatorFlagNamespace = withCacheHome $ \home -> do
     let hashes = [ValidatorNative.certificateKey (MirHousekeeping.ownedContentKey "emitter-producer" "owned-input" flags) ["library-check"] ["source-check"]
@@ -1902,6 +1932,7 @@ testVerdictLocks = TestList "testVerdictLocks"
     , TestCase "processes wait for the same verdict lock" verdictProcesses
     , TestCase "a killed process releases the verdict lock" verdictKilledProcess
     , TestCase "one validation operation lazily shares only its certified executable" validatorOperation
+    , TestCase "a seed that matched its pin is checked again by its bytes" seedBytesReverified
     , TestCase "validator build flags isolate the verdict namespace" validatorFlagNamespace
     , TestCase "parallel checks force their texts before the workers start" parallelChecksForceTextsFirst
     , TestCase "work is admitted a bounded batch at a time, in order" boundedBatches
