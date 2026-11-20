@@ -16,7 +16,7 @@ impl Clone for Linked { };
 fn failedLink(message: String) -> Linked ~ { return Linked { ok: false, message: message, program: noFull() }; };
 fn unitName(unit: &LinkUnit) -> String ~ { if unit.hasModule { return catStrings(catStrings(clone(unit.pkg), "::"), clone(unit.modu)); }; return clone(unit.pkg); };
 fn sameId(a: &LinkUnit, b: &LinkUnit) -> Bool ~ { return a.pkg = b.pkg && a.hasModule = b.hasModule && (!a.hasModule || a.modu = b.modu); };
-fn privateUnit(u: &LinkUnit) -> Bool ~ { return u.pkg = "tersuslib" && u.hasModule && (u.modu = "lists" || u.modu = "box"); };
+fn privateUnit(u: &LinkUnit) -> Bool ~ { return (u.pkg = "tersuslib" || u.pkg = "std") && u.hasModule && (u.modu = "lists" || u.modu = "box"); };
 fn rowIndex(rows: &List<FullRecord>, n: &String) -> Int ~ { i = 0; for r in rows { if r.name = n { return i; }; i = i + 1; }; return 0 - 1; };
 fn fnIndex(fns: &List<FullFunction>, n: &String) -> Int ~ { i = 0; for f in fns { if textAt(&f.header, 1) = n { return i; }; i = i + 1; }; return 0 - 1; };
 fn sameRow(a: &List<Token>, an: &List<AstNode>, b: &List<Token>, bn: &List<AstNode>) -> Bool ~ {
@@ -49,7 +49,23 @@ fn sameFunction(a: &FullFunction, an: &List<AstNode>, b: &FullFunction, bn: &Lis
     };
     return true;
 };
+// The boundedfacts rows of a function with bounds, as tokens: a row is a function and a type, each once
+fn factRowsOf(rows: &List<FullRecord>, f: &String) -> List<List<Token>> ~ {
+    out = []; for r in rows { if r.name = f { out = push(out, clone(r.tokens)); }; }; return out;
+};
+fn sameRowSet(a: &List<List<Token>>, b: &List<List<Token>>) -> Bool ~ {
+    if size(a) != size(b) { return false; };
+    for x in a { found = false; for y in b { if x = y { found = true; }; }; if !found { return false; }; };
+    return true;
+};
+fn sameChecked(a: &FullProgram, b: &FullProgram) -> Bool ~ {
+    if a.checked != b.checked || !sameRecords(&a.protocols, &a.arena, &b.protocols, &b.arena) || !sameRecords(&a.ownership, &a.arena, &b.ownership, &b.arena) { return false; };
+    if size(a.boundedFacts) != size(b.boundedFacts) { return false; };
+    for r in &a.bounded { left = factRowsOf(&a.boundedFacts, &r.name); right = factRowsOf(&b.boundedFacts, &r.name); if !sameRowSet(&left, &right) { return false; }; };
+    return true;
+};
 fn sameProgram(a: &FullProgram, b: &FullProgram) -> Bool ~ {
+    if !sameChecked(a, b) { return false; };
     if !sameRecords(&a.types, &a.arena, &b.types, &b.arena) || !sameRecords(&a.generics, &a.arena, &b.generics, &b.arena) || !sameRecords(&a.invariants, &a.arena, &b.invariants, &b.arena) || !sameRecords(&a.bounded, &a.arena, &b.bounded, &b.arena) || !sameRecords(&a.instances, &a.arena, &b.instances, &b.arena) || size(a.functions) != size(b.functions) { return false; };
     common = a.shared = b.shared;
     for f in &a.functions { i = fnIndex(&b.functions, textAt(&f.header, 1)); if i < 0 || i >= size(b.functions) || !sameFunction(f, &a.arena, &get(b.functions, i), &b.arena, &a.shared, &b.shared, common) { return false; }; };
@@ -140,7 +156,8 @@ fn mergeRows(what: &String, units: &List<LinkUnit>, arena: &List<AstNode>, kind:
     return out;
 };
 fn rowsOf(p: &FullProgram, kind: Int) -> List<FullRecord> ~ {
-    if kind = 0 { return clone(p.types); }; if kind = 1 { return clone(p.generics); }; if kind = 2 { return clone(p.invariants); }; if kind = 3 { return clone(p.bounded); }; return clone(p.instances);
+    if kind = 0 { return clone(p.types); }; if kind = 1 { return clone(p.generics); }; if kind = 2 { return clone(p.invariants); }; if kind = 3 { return clone(p.bounded); };
+    if kind = 5 { return clone(p.protocols); }; if kind = 6 { return clone(p.ownership); }; return clone(p.instances);
 };
 fn collision(what: &String, n: &String, a: &String, b: &String) -> String ~ {
     out = catStrings(catStrings(catStrings("link error: ", clone(what)), " "), clone(n));
@@ -168,6 +185,25 @@ fn externSpec(fun: &FullFunction) -> List<Token> ~ {
     return appendTokens(out, sliceTokens(&fun.spec, at, size(fun.spec)));
 };
 fn sameExtern(a: &FullFunction, b: &FullFunction, nodes: &List<AstNode>) -> Bool ~ { return paramTypes(a) = paramTypes(b) && signatureHeader(a) = signatureHeader(b) && sameRow(externSpec(a), nodes, externSpec(b), nodes); };
+// The facts under its bounds of each function with bounds, from the unit that defines it first: another unit that
+// defines it has the same rows, as it has the same bounded record (mergeRows)
+fn mergeBoundedFacts(units: &List<LinkUnit>) -> MergeRows ~ {
+    out = MergeRows { ok: true, message: "", rows: [], origins: [] }; seen = []; origins = [];
+    for unit in units {
+        for b in &unit.program.bounded {
+            rows = factRowsOf(&unit.program.boundedFacts, &b.name); i = 0; found = 0 - 1;
+            for s in &seen { if s = b.name { found = i; }; i = i + 1; };
+            if found >= 0 && found < size(origins) {
+                kept = factRowsOf(&out.rows, &b.name);
+                if !sameRowSet(&kept, &rows) { return MergeRows { ok: false, message: collision("function with bounds", &b.name, &get(origins, found), unitName(unit)), ..out }; };
+            } else {
+                seen = push(seen, clone(b.name)); origins = push(origins, unitName(unit));
+                for r in &unit.program.boundedFacts { if r.name = b.name { out = MergeRows { rows: push(out.rows, clone(r)), ..out }; }; };
+            };
+        };
+    };
+    return out;
+};
 struct MergeFns { ok: Bool, message: String, functions: List<FullFunction> };
 impl Clone for MergeFns { };
 fn mergeFunctions(units: &List<LinkUnit>, mapping: &List<Int>, default: Int, arena: &List<AstNode>, shared: &List<List<Token>>) -> MergeFns ~ {
@@ -196,8 +232,10 @@ fn prependGhosts(root: FullFunction, units: &List<LinkUnit>) -> FullFunction ~ {
 };
 fn linkPrograms(input: &List<LinkUnit>) -> Linked ~ {
     if size(input) = 0 { return failedLink("link error: no modules to link"); };
-    // (checked providers and facts are a build's, which merging units would have to agree on: not merged yet, so refused)
-    for unit in input { if unit.program.checked || size(unit.program.protocols) > 0 || size(unit.program.boundedFacts) > 0 { return failedLink("link error: checked protocol and ownership records are not merged yet"); }; };
+    // (the build's checked facts are every unit's or none: a unit written without them makes the others' unusable)
+    anyChecked = false; anyUnchecked = false;
+    for unit in input { if unit.program.checked { anyChecked = true; } else { anyUnchecked = true; }; };
+    if anyChecked && anyUnchecked { return failedLink("link error: some modules have checked ownership facts and others do not"); };
     units = [];
     for unit in input {
         u = LinkUnit { pkg: clone(unit.pkg), modu: clone(unit.modu), hasModule: unit.hasModule, program: normalizeExterns(clone(unit.program)) }; found = false;
@@ -226,8 +264,11 @@ fn linkNormalized(units: &List<LinkUnit>, nodes: List<AstNode>, shared: List<Lis
     invariants = mergeRows("invariant", units, &nodes, 2); if !invariants.ok { return failedLink(invariants.message); };
     bounded = mergeRows("function with bounds", units, &nodes, 3); if !bounded.ok { return failedLink(bounded.message); };
     instances = mergeRows("copy", units, &nodes, 4); if !instances.ok { return failedLink(instances.message); };
+    protocols = mergeRows("provider", units, &nodes, 5); if !protocols.ok { return failedLink(protocols.message); };
+    ownership = mergeRows("ownership facts of a type", units, &nodes, 6); if !ownership.ok { return failedLink(ownership.message); };
+    boundedFacts = mergeBoundedFacts(&units); if !boundedFacts.ok { return failedLink(boundedFacts.message); };
     if size(units) = 0 { return failedLink("link error: no modules to link"); };
     root = &get(units, size(units) - 1).program;
     entry = completeFunction(prependGhosts(clone((*root).entry), units), &completion.mapping, completion.empty, true);
-    return Linked { ok: true, message: "", program: FullProgram { types: types.rows, functions: functions.functions, entry: entry, generics: generics.rows, invariants: invariants.rows, bounded: bounded.rows, boundedFacts: [], instances: instances.rows, protocols: [], ownership: [], checked: false, trailer: clone((*root).trailer), arena: nodes, shared: completion.tables } };
+    return Linked { ok: true, message: "", program: FullProgram { types: types.rows, functions: functions.functions, entry: entry, generics: generics.rows, invariants: invariants.rows, bounded: bounded.rows, boundedFacts: boundedFacts.rows, instances: instances.rows, protocols: protocols.rows, ownership: ownership.rows, checked: (*root).checked, trailer: clone((*root).trailer), arena: nodes, shared: completion.tables } };
 };

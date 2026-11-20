@@ -1,8 +1,8 @@
-import data::codec::codec { Token, Parsed, catStrings };
+import data::codec::codec { Token, Parsed };
 import data::reader::reader { parseAstLines };
 import data::ast::ast { AstNode, AstStatement, AstValidations };
 import mir::full::full { FullRecord, FullBlock, FullFunction, FullProgram };
-import mir::full::tokens { argsEnd, integerAt, intsEnd, namesEnd, numberAt, operandsEnd, operandEnd, quotedAt, rvalueEnd, stepsEnd, textAt, tokenLine, typeEnd, word, wordIs, normalizeNumbers, normalizeTypes };
+import mir::full::tokens { argsEnd, integerAt, intsEnd, namesEnd, numberAt, operandsEnd, operandEnd, quotedAt, rvalueEnd, stepsEnd, textAt, tokenLine, typeEnd, word, wordIs, normalizeNumbers, normalizeTypes, sliceTokens };
 import mir::full::records { EnvEntry, envEnd, envEntries, expandEnv, listItems, mapPayloadLine, payloadMatches, payloadSlots, uniqueEntries, orderEntries, envTokens, keyOrder };
 import mir::full::write { mapProgramPayloads };
 
@@ -29,13 +29,8 @@ fn boundedFactsOk(ts: &List<Token>) -> Bool ~ {
     if !wordIs(ts, 0, "boundedfacts") || !quotedAt(ts, 1) { return false; };
     return factNamesOk(ts, typeEnd(ts, 2));
 };
-// The function and the type of a boundedfacts row, which name it once
-fn boundedFactsKey(ts: &List<Token>) -> String ~ {
-    key = textAt(ts, 1);
-    at = typeEnd(ts, 2);
-    for i in 2..at { key = catStrings(catStrings(key, " "), textAt(ts, i)); };
-    return key;
-};
+// The function and the type of a boundedfacts row, as tokens, which name it once
+fn boundedFactsKey(ts: &List<Token>) -> List<Token> ~ { return sliceTokens(ts, 1, typeEnd(ts, 2)); };
 // An owner's checked facts: the owner and the seven names
 fn ownedOk(ts: &List<Token>) -> Bool ~ {
     return wordIs(ts, 0, "owned") && quotedAt(ts, 1) && size(textAt(ts, 1).bytes) > 0 && factNamesOk(ts, 2);
@@ -346,11 +341,12 @@ fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
     if program.checked && size(program.ownership) != owners { return bad; };
     // (each boundedfacts row is of a function with bounds the data has, once for each type it names)
     boundedNames = HashSet::new(); for r in &program.bounded { boundedNames = boundedNames.insert(clone(r.name)); };
-    factKeys = HashSet::new();
+    factKeys = [];
     for r in &program.boundedFacts {
         key = boundedFactsKey(&r.tokens);
-        if !HashSet::contains(&boundedNames, &r.name) || HashSet::contains(&factKeys, &key) { return bad; };
-        factKeys = factKeys.insert(key);
+        if !HashSet::contains(&boundedNames, &r.name) { return bad; };
+        for k in &factKeys { if k = key { return bad; }; };
+        factKeys = push(factKeys, key);
     };
     if !wordIs(recordAt(lines, at), 0, "main") { return bad; };
     fun = functionAt(lines, at, &shared); if !fun.ok { return bad; };
