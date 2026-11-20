@@ -517,7 +517,7 @@ fn namedWithArgs(m: &Maps, params: &HashSet<String>, name: &String) -> Txt ~ {
     changed = t.name != base;
     for part in &parts {
         from = 0;
-        while from < size(part.bytes) && get(part.bytes, from) = toByte(32) [{ affirm from >= 0; }] shrinks size(part.bytes) - from { from = from + 1; };
+        while from < size(part.bytes) && get(part.bytes, from) = toByte(32) [{ affirm from >= 0; affirm from <= size(part.bytes); }] shrinks size(part.bytes) - from { from = from + 1; };
         word = part.slice(from, size(part.bytes));
         a = namedWithArgs(m, params, &word);
         if !a.ok { return a; };

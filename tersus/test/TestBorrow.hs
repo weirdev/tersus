@@ -12,7 +12,8 @@ import MirMoves (checkMoves, finishLowered)
 import Syntax
 import TestHarness
 import TestParserFragments (parseStatementBlock)
-import Types (Arg (..), Type (..), instanceName, pattern TBox, pattern TList)
+import Types (Arg (..), Storage (..), Type (..), instanceName)
+import TestStorage (pattern TBox, pattern TList, stdProtocols, stdStorage)
 import Utils (Result (..))
 import ValidatorNative (validateCompiled)
 
@@ -544,9 +545,9 @@ loanTableCases = TestList "MIR loan rules"
         [ ("Envelope", (["T"], [("ref", r), ("wrapped", TNamed "Slots" [ArgType (TParam "T")])]))
         , ("Slots", (["T"], [("slot", TBlock (TParam "T"))]))
         ]
-    check params fs ls bs = checkMoves Set.empty Set.empty Set.empty (M.Program declarations fs (fn "loans" params Nothing ls bs) generics Map.empty Map.empty Map.empty)
+    check params fs ls bs = checkMoves Set.empty Set.empty Set.empty (M.Program declarations fs (fn "loans" params Nothing ls bs) generics Map.empty Map.empty Map.empty stdProtocols Nothing)
     declarations = Map.union types (Map.fromList
-        [(instanceName base [ArgType ty], M.StructDecl [("update", TMutRef TInt)]) | (base, ty) <- [("Box", TInt), ("List", TBool)]])
+        [(instanceName base [ArgType ty], M.StructDecl [("update", TMutRef TInt)]) | (base, ty) <- [(storageBox stdStorage, TInt), (storageList stdStorage, TBool)]])
     declaredResult ty aggregate expectsLoan =
         let pty = if aggregate then holder else r
             param = if aggregate then 7 else 2
