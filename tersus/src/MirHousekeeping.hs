@@ -84,7 +84,7 @@ import Modules (ModuleId, Snapshot (..), resolverFromFiles)
 import PackageCompile (compileModulesUsing, lowerCompiledPackage)
 import PreludeSource (emitterSourceFiles, emitterSeedConstruction, frontendSeedSources,
     boxSource, listsSource, toolPackageFiles, validationPackageFiles)
-import Types (Type (..))
+import Types (Arg (..), Type (..), instanceName)
 import Utils
 
 -- MIR checking and ghost erasure use the programs written in Tersus. Native
@@ -105,7 +105,47 @@ import Utils
 -- block that is there, that a name of a specification stands for a declared local) is not in the data, and
 -- is the validator's (the validator written in Tersus), which runs after this in the pipeline.
 verifyProgram :: Program -> Result () String
-verifyProgram program = unsafePerformIO (verifyIO program)
+verifyProgram program = abiView program `bindResult` (unsafePerformIO . verifyIO)
+
+-- The checker and runtime passes use thin signatures; the validator consumes the original MIR.
+abiView :: Program -> Result Program String
+abiView program = either Error Ok $ do
+    mapM_ checkInstance (Map.elems (progInstances program))
+    types <- traverse declaration (progTypes program)
+    generics <- traverse (\(params, fs) -> (,) params <$> fields fs) (progGenerics program)
+    functions <- traverse function (progFunctions program)
+    main <- function (progMain program)
+    pure program{progTypes = types, progGenerics = generics, progFunctions = functions, progMain = main}
+  where
+    fields = traverse (\(name, ty) -> (,) name <$> abiType ty)
+    declaration (StructDecl fs) = StructDecl <$> fields fs
+    declaration (EnumDecl variants) = EnumDecl <$> traverse (\(name, fs) -> (,) name <$> fields fs) variants
+    function fn = do
+        returns <- traverse abiType (fnReturns fn)
+        locals <- traverse (\decl -> (\ty -> decl{localType = ty}) <$> abiType (localType decl)) (fnLocals fn)
+        pure fn{fnReturns = returns, fnLocals = locals}
+    abiType ty = case ty of
+        TFn args ret -> signature args ret
+        TFnContract args ret _ -> signature args ret
+        TArrayOf inner size -> (`TArrayOf` size) <$> abiType inner
+        TForall sizes types inner -> TForall sizes types <$> abiType inner
+        TAddr inner -> TAddr <$> abiType inner
+        TBlock inner -> TBlock <$> abiType inner
+        TUninit inner -> TUninit <$> abiType inner
+        TRef inner -> TRef <$> abiType inner
+        TMutRef inner -> TMutRef <$> abiType inner
+        TNamed base args -> do
+            erased <- traverse abiArg args
+            if erased == args then pure ty
+                else Left ("contract function types are not supported in type arguments of " ++ instanceName base args)
+        _ -> pure ty
+    abiArg (ArgType ty) = ArgType <$> abiType ty
+    abiArg arg = pure arg
+    checkInstance (name, args) = do
+        erased <- traverse abiArg args
+        if erased == args then pure ()
+            else Left ("contract function types are not supported in specialization arguments of " ++ name)
+    signature args ret = TFn <$> traverse abiType args <*> abiType ret
 
 -- The program with its permissions taken out (POINTERS.md): what lib/mir/mir_erase/mir_erase.tersus writes for the
 -- program as data before the erasure (MirData.writeProgramWithGhosts), read back, with the parts the data
@@ -113,7 +153,7 @@ verifyProgram program = unsafePerformIO (verifyIO program)
 -- is refused, with the eraser's reason.
 eraseGhosts :: Program -> Result Program String
 -- (a generic body and a stub are only for the validator, which has run)
-eraseGhosts program = unsafePerformIO (eraseIO (withoutGeneric program))
+eraseGhosts program = abiView (withoutGeneric program) `bindResult` (unsafePerformIO . eraseIO)
 
 -- The ownership passes (OWNERSHIP in MIR.md) are run by the emitter's executable (lib/mir/emit/emit.tersus):
 -- stage 0 owns what the host builds for itself, stage 1 owns everything else; they never run in the executor.

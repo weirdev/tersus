@@ -186,7 +186,42 @@ Every value has a type, and programs are type checked before they are validated:
 - `Byte`, a whole number from 0 to 255 that is a type of its own (see Bytes), and
 - `fn(Int, Int) -> Int` for a function value.
 
-A function writes the type of each parameter and of its return value. A local variable takes the type of its first assignment, and assigning a different type to it later is an error. Types exist only for checking: validation and evaluation never look at them. Every `return` of the program itself (outside any function) must have the type of the first, as `if c { return 1; } else { return false; };` has none.
+A function writes the type of each parameter and of its return value. A local variable takes the type of its first assignment, and assigning a different type to it later is an error. Every `return` of the program itself (outside any function) must have the type of the first, as `if c { return 1; } else { return false; };` has none.
+
+### Function values
+
+A `fn` value is a thin code pointer. A call through it checks the input
+contract and assumes the output contract of its **type**, not the contracts of
+whichever functions the pointer could hold. A plain `fn(Int) -> Int` asks
+nothing of its argument and promises only the type of its result.
+
+```tersus
+fn step(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n + 1; }] {
+    return n + 1;
+};
+let next: fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] = step;
+r = next(41);
+affirm r > 41;
+```
+
+The conversion is checked independently of the context where it appears. The
+type's input contract must imply the function's input contract. Under those
+inputs, the function's output contract must imply the type's output contract.
+Parameter names on the two sides bind by position, and `return` names the
+result only in the output contract. Inference of a plain `fn` does not hide a
+needed input contract: `let next = step;` above is refused, even when `next`
+is not called. A function type can be stored in a concrete field or returned;
+parenthesize a contracted return type to distinguish its clauses from the
+outer function's contract.
+
+Function type clauses currently support relational `affirm`s over `Int`
+arithmetic (`+`, `-`, `*`), `Bool` equality, and `size` of sequences. They may
+name only the formal arguments and, in the output, `return`. Indirect calls
+with update parameters, reference-bearing inputs other than a shared loan of
+reference-free data, reference results, or permissions are not supported.
+Diverging functions cannot be converted to pointers; potential cycles through
+indirect calls are refused. Contracted function types cannot be used as
+nominal generic type arguments.
 
 ```tersus
 fn scale(values: List<Int>, factor: Int) -> List<Int> {
@@ -704,7 +739,7 @@ a = Adder { n: 10 };
 return apply(&a, 5);    // 15
 ```
 
-The impl is written for the shape, with `call` taking the receiver the kind says (`&Self`, `&mut Self` or `Self`) followed by the shape's parameters, and it is checked against the shape's contracts as any impl is checked against its trait. A named function given where a function shape is wanted is wrapped in a struct with no fields that implements the shape, its `call` calling the function itself, so it meets the bound as a function object does and is checked against the shape's contracts by its own. A plain function value (`fn(Int) -> Int`) does not meet a function-shape bound yet.
+The impl is written for the shape, with `call` taking the receiver the kind says (`&Self`, `&mut Self` or `Self`) followed by the shape's parameters, and it is checked against the shape's contracts as any impl is checked against its trait. A named function can meet a function-shape bound: its wrapper's `call` calls the function directly. A thin `fn` value can also meet a bound: its wrapper holds the pointer and `call` uses only the pointer type's contract. In both cases the ordinary trait check proves the wrapper meets the bound's contract.
 
 ### Closures
 
@@ -1454,7 +1489,7 @@ return *r;   // 10; ys cannot be assigned or moved while r is live
 
 - **`from` names the parameters the result may be from** (`from xs`, or `from (a, b)` when the body chooses between them). With exactly one reference parameter it may be left out; with several it is required. Every place the function returns has to be of one of them: returning a reference to a local is refused. With several candidates, all of them are frozen while the result is live, since which one it is is the callee's choice.
 - **In a contract, `return` is what the reference is to** (`*return` is the same thing written as a place), so a promise about the result is a promise about the caller's place.
-- A reference result is a local like any other reference: it can be read through, given on to a lent parameter, and returned by another function whose `from` it satisfies. An update reference (`&mut T`) can be returned too (`-> &mut T from xs`), and the caller may then assign through it. The origin of a result may come through a trait method (`Trait::getr(...)` uses the trait's own `from`) and through a function value that is a named function held by a local (`g = headOf; r = g(ys);`); through any other function value it cannot be told and is refused. It cannot be returned by the program. Native code returns a reference as the address of the place, since a borrowed parameter is passed by address. `&b` for a Box borrows its owning handle; `&*b` borrows its payload. Sized non-array payload borrows work in native code, including a Box field or list element reached without an intermediate Box traversal. Native storage does not yet provide a borrowed whole-array view through a Box; cloning its unboxed sized array retains the owning whole-array materialization. A reference to an unsized value (`&Array<T>`, made by borrowing through a `Box`, as in `&*b` for `b: Box<Array<Int>>`) works in the interpreter — its size is the size of what it is to — but native code does not carry the size with the address yet and refuses it.
+- A reference result is a local like any other reference: it can be read through, given on to a lent parameter, and returned by another function whose `from` it satisfies. An update reference (`&mut T`) can be returned too (`-> &mut T from xs`), and the caller may then assign through it. The origin of a result may come through a trait method (`Trait::getr(...)` uses the trait's own `from`). Indirect calls with reference results are not validated because `fn` types do not carry `from`. It cannot be returned by the program. Native code returns a reference as the address of the place, since a borrowed parameter is passed by address. `&b` for a Box borrows its owning handle; `&*b` borrows its payload. Sized non-array payload borrows work in native code, including a Box field or list element reached without an intermediate Box traversal. Native storage does not yet provide a borrowed whole-array view through a Box; cloning its unboxed sized array retains the owning whole-array materialization. A reference to an unsized value (`&Array<T>`, made by borrowing through a `Box`, as in `&*b` for `b: Box<Array<Int>>`) works in the interpreter — its size is the size of what it is to — but native code does not carry the size with the address yet and refuses it.
 
 #### Holding references in a struct
 
@@ -2364,7 +2399,7 @@ return a;                             // [[1], [2, 3], [1]]
 - The body of a named function is evaluated with its argument bindings, the standard library, and the top-level functions defined before them. It does not capture other variables (a closure expression does: see Closures), a function can call itself and the other functions defined at the top of the program, and a function name can be defined only once.
 - Traits are checked and called, not used as types: a function over "any type that implements `Measure`" is a function with a bound (see Bounded types), made for each type it is called with, so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums, and for a list, a Box, an array, `Int`, `Byte` and `Bool`, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
 - The CLI has no REPL. A standalone file, or `-` on standard input, can import configured external roots; without root inputs it remains one source-only program. A file inside a package (see Modules) is compiled with the modules it imports and linked into one program, and every command (`check`, `eval`, `mir`, `owned`, `llvm`, `build`, `run`, `assumptions`) works on that linked program.
-- The validator does not follow a call of a function that is a value: a function that takes `g: fn(Int) -> Int` and calls `g(n)` is refused (`Function object not validated`), though it type checks and runs. A function can still be passed around, stored in a list or a struct, and returned.
+- A plain `fn` call cannot use an input or output contract from a named target. Use an explicitly contracted function type when the caller needs those facts (see [Function values](#function-values)).
 - Source files are read as UTF-8 whatever the locale is (and `tersus` prints in UTF-8), so a program with a letter that is not ASCII in a name loads under any locale.
 - A program has no input or output: it computes and returns one value, which `run` and an executable print.
 - A copy is made only where the program writes `clone`, with these exceptions that are costs and not meanings: native code copies a part that is only read when what it was read from changes first, and a `for` loop over a variable that is used again after it. Recursion that is very deep, or a recursive value that is very long to free or copy, can overflow the stack of the process (see the roadmap in `README.md`).

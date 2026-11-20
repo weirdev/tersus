@@ -2,7 +2,7 @@ import data::ast::ast { AstNode };
 import data::codec::codec { Size, Token, Type, sizeAt, typeAt, wordAt };
 import elaborate::out { quotedName };
 import parser::syntax::syntax as ps;
-import elaborate::state { intText };
+import elaborate::state { fnContractSuffix, fnNameWithContract, intText };
 
 // The lowering's own types, interned by their data text (MIR.md), so that two equal types are one number. kind: 0 Int,
 // 1 Byte, 2 Bool, 3 a word (flag signed, n bits), 4 a named type (name, args), 5 a variant (name), 6 an array (args:
@@ -420,19 +420,22 @@ fn varType(ls: LowSt, n: Int) -> LowSt ~ {
 };
 
 fn fnType(ls: LowSt, params: List<Int>, ret: Int) -> LowSt ~ {
-    text = lwCat("fn ", intText(size(params)));
-    forName = "fn(";
-    i = 0;
+    return fnTypeWithContract(ls, params, ret, "");
+};
+
+fn fnTypeWithContract(ls: LowSt, params: List<Int>, ret: Int, suffix: String) -> LowSt ~ {
+    tag = "fn ";
+    if size(suffix.bytes) > 0 { tag = "fnc "; };
+    text = lwCat(tag, intText(size(params)));
+    names = [];
     for p in &params {
         text = lwSp(text, tyText(&ls, p));
-        if i > 0 { forName = lwCat(forName, ", "); };
-        forName = lwCat(forName, forNameOf(&ls, p));
-        i = i + 1;
+        names = push(names, forNameOf(&ls, p));
     };
-    text = lwSp(text, tyText(&ls, ret));
-    forName = lwCat(lwCat(forName, ") -> "), forNameOf(&ls, ret));
+    text = lwCat(lwSp(text, tyText(&ls, ret)), &suffix);
+    forName = fnNameWithContract(names, forNameOf(&ls, ret), &suffix);
     t = lwBlank(14, text, forName);
-    return intern(ls, LTy { args: push(params, ret), ..t });
+    return intern(ls, LTy { name: suffix, args: push(params, ret), ..t });
 };
 
 fn forallType(ls: LowSt, sizes: List<String>, types: List<String>, body: Int) -> LowSt ~ {
@@ -463,8 +466,11 @@ fn fromCodecTy(ls: LowSt, t: &Type) -> LowSt ~ {
         Type::TList { elem: e } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); name = clone(ls.listName); return namedType(ls, name, push([], ls.ty)); },
         Type::TBox { inner: e } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); name = clone(ls.boxName); return namedType(ls, name, push([], ls.ty)); },
         Type::TArray { elem: e, size: s } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); return arrayType(ls, ls.ty, clone(s)); },
-        Type::TFn { args: args, ret: r } => { return fromCodecFn(ls, args, r); },
-        Type::TFnContract { args: args, ret: r, contract: contract } => { return fromCodecFn(ls, args, r); },
+        Type::TFn { args: args, ret: r } => { return fromCodecFn(ls, args, r, ""); },
+        Type::TFnContract { args: args, ret: r, contract: contract } => {
+            c = Box::unbox(clone(contract));
+            return fromCodecFn(ls, args, r, fnContractSuffix(&c));
+        },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => { return fromCodecNamed(ls, base, argTokens); },
         Type::TVariant { name: name } => { return variantType(ls, clone(name)); },
         Type::TVar { n: n } => { return varType(ls, n); },
@@ -485,12 +491,12 @@ fn fromCodecWrap(ls: LowSt, kind: Int, e: &Box<Type>) -> LowSt ~ {
     return wrapType(ls, kind, ls.ty);
 };
 
-fn fromCodecFn(ls: LowSt, args: &List<Type>, r: &Box<Type>) -> LowSt ~ {
+fn fromCodecFn(ls: LowSt, args: &List<Type>, r: &Box<Type>, suffix: String) -> LowSt ~ {
     params = [];
     for a in args { ls = fromCodecTy(ls, a); params = push(params, ls.ty); };
     inner = Box::unbox(clone(r));
     ls = fromCodecTy(ls, &inner);
-    return fnType(ls, params, ls.ty);
+    return fnTypeWithContract(ls, params, ls.ty, suffix);
 };
 
 fn fromCodecNamed(ls: LowSt, base: &String, argTokens: &List<Token>) -> LowSt ~ {
@@ -634,15 +640,14 @@ fn renderForall(ls: &LowSt, x: &LTy) -> String ~ {
 };
 
 fn renderFn(ls: &LowSt, x: &LTy) -> String ~ {
-    out = "fn(";
+    parts = [];
     n = size(x.args) - 1;
     i = 0;
     while i < n [{ affirm i >= 0; }] shrinks n - i {
-        if i > 0 { out = lwCat(out, ", "); };
-        out = lwCat(out, renderTy(ls, intAt(&x.args, i)));
+        parts = push(parts, renderTy(ls, intAt(&x.args, i)));
         i = i + 1;
     };
-    return lwCat(lwCat(out, ") -> "), renderTy(ls, intAt(&x.args, n)));
+    return fnNameWithContract(parts, renderTy(ls, intAt(&x.args, n)), &x.name);
 };
 
 // An unknown is an Int (not inside a function with parameters or a &mut)
@@ -680,7 +685,7 @@ fn defaultTyOnce(ls: LowSt, t: Int) -> LowSt ~ {
             params = push(params, get(args, i));
             i = i + 1;
         };
-        return fnType(ls, params, ret);
+        return fnTypeWithContract(ls, params, ret, clone(x.name));
     };
     return LowSt { ty: t, ..ls };
 };

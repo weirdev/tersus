@@ -103,6 +103,7 @@ isCopyType copies program = go (0 :: Int)
             TWord _ _ -> True
             TBool -> True
             TFn{} -> True
+            TFnContract{} -> True
             TAddr _ -> True
             TUninit t -> not (ownsHeap program t) && go (depth + 1) t
             TArrayOf t _ -> go (depth + 1) t
@@ -1324,6 +1325,7 @@ pointeeTypes cx = fmap nub . go Set.empty
         TBool -> Just []
         TWord _ _ -> Just []
         TFn _ _ -> Just []
+        TFnContract _ _ _ -> Just []
         TNamed base args ->
             let name = instanceName base args
              in if name `Set.member` seen then Just [] else case Map.lookup name types of
@@ -1558,15 +1560,21 @@ loanDeclaration program base args =
         (params, fields) <- Map.lookup base (progGenerics program) <|> tupleGeneric base
         StructDecl <$> instanceFields params args fields
 
+indirectParameterTypes :: Cx -> Operand -> Maybe [Type]
+indirectParameterTypes cx callee = do
+    local <- operandLocal callee
+    case typeOf cx local of
+        TFn args _ -> Just args
+        TFnContract args _ _ -> Just args
+        _ -> Nothing
+
 -- Which of the arguments of a call are lent: the parameters that the function declares as such, or the ones that the type of a function value marks
 lentArguments :: Cx -> Operand -> Int -> [Bool]
 lentArguments cx callee count = case callee of
     Const (CFn name) | Just f <- Map.lookup name (progFunctions (cxProgram cx)) -> [p `elem` fnBorrowed f | p <- fnParams f]
-    Copy l | Just (TFn args _) <- Map.lookup l types -> map isRef args
-    Move l | Just (TFn args _) <- Map.lookup l types -> map isRef args
+    _ | Just args <- indirectParameterTypes cx callee -> map isRef args
     _ -> replicate count False
   where
-    types = Map.map localType (fnLocals (cxFn cx))
     isRef (TRef _) = True
     isRef (TMutRef _) = True
     isRef _ = False
@@ -1651,11 +1659,9 @@ heldMutationPlaces cx st callee args =
     parameters fn = [localType decl | param <- fnParams fn, Just decl <- [Map.lookup param (fnLocals fn)]]
     parameterTypes = case callee of
         Const (CFn name) -> maybe [] parameters (Map.lookup name (progFunctions program))
-        _ -> case operandLocal callee of
-            Just local -> case Map.lookup local (stFnAlias st) >>= (`Map.lookup` progFunctions program) of
-                Just fn -> parameters fn
-                Nothing -> case typeOf cx local of TFn tys _ -> tys; _ -> []
-            Nothing -> []
+        _ -> case operandLocal callee >>= (`Map.lookup` stFnAlias st) >>= (`Map.lookup` progFunctions program) of
+            Just fn -> parameters fn
+            Nothing -> fromMaybe [] (indirectParameterTypes cx callee)
     unref (TRef inner) = inner
     unref (TMutRef inner) = inner
     unref other = other
@@ -1674,11 +1680,9 @@ heldMutationPlaces cx st callee args =
 mutArguments :: Cx -> Operand -> Int -> [Bool]
 mutArguments cx callee count = case callee of
     Const (CFn name) | Just f <- Map.lookup name (progFunctions (cxProgram cx)) -> [case Map.lookup p (fnLocals f) of Just d -> maybe False (`elem` specMutParams (fnSpec f)) (localName d); Nothing -> False | p <- fnParams f]
-    Copy l | Just (TFn args _) <- Map.lookup l types -> map isMutRef args
-    Move l | Just (TFn args _) <- Map.lookup l types -> map isMutRef args
+    _ | Just args <- indirectParameterTypes cx callee -> map isMutRef args
     _ -> replicate count False
   where
-    types = Map.map localType (fnLocals (cxFn cx))
     isMutRef (TMutRef _) = True
     isMutRef _ = False
 

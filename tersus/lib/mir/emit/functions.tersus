@@ -128,7 +128,16 @@ fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -
         if ty is Type::TFn {
             g1 = operandValue(g, cx, f, ty, callee);
             address = clone(g1.last);
-            return call(g1, cx, entry, f, address, (ty as Type::TFn).args, noBools(), Box::unbox((ty as Type::TFn).ret), args, dest, next);
+            shape = ty as Type::TFn;
+            params = noTypes();
+            ptrs = noBools();
+            for a in &shape.args {
+                lent = a is Type::TRef || a is Type::TMutRef;
+                ptrs = push(ptrs, lent);
+                if lent { params = push(params, refTargetOf(a)); }
+                else { params = push(params, clone(a)); };
+            };
+            return call(g1, cx, entry, f, address, params, ptrs, Box::unbox(shape.ret), args, dest, next);
         };
         return failG(g, "Call of something that is not a function");
     };

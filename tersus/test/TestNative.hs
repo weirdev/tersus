@@ -73,7 +73,8 @@ testNative =
         , TestParallel "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
         , TestParallel "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
         , TestParallel "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
-        , TestParallel "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms ++ ergonomicsFunctionPrograms]
+        , TestParallel "function values" [TestCase name (sameAsMir name source) | (name, source) <- functionPrograms]
+        , TestParallel "function values (reference effects)" [TestCase name (sameAsUnvalidated name source) | (name, source) <- ergonomicsFunctionPrograms]
         , TestParallel "references given two places" [TestCase name (sameValueUnvalidated name source value) | (name, source, value) <- twoPlacePrograms]
         , TestParallel "ergonomics" [TestCase name (sameAsMir name source) | (name, source) <- ergonomicsPrograms]
         , TestParallel "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
@@ -409,8 +410,7 @@ partialTakePrograms =
     [ ("a struct updated with a field replaced", "struct S { n: Int, xs: List<Int>, ys: List<Int> }; s = S { n: 0, xs: [1], ys: [2] }; i = 0; while i < 3 [{ affirm i >= 0; }] shrinks 3 - i { s = S { xs: push(s.xs, i), ..s }; i = i + 1; }; return size(s.xs) * 10 + size(s.ys);")
     ]
 
--- Function values. The validator cannot yet follow a call of a function that is a value, so these are lowered without
--- validation (as the MIR tests are) and compared with the executor of the MIR.
+-- Function values go through the same validation, interpreter and native paths as direct calls.
 functionPrograms :: [(String, String)]
 functionPrograms =
     [ ("a function that lends is a value", "fn total(a: &List<Int>) -> Int { return size(a); }; f = total; l = push([], 1); return f(l) + f(l) + size(l);")
@@ -418,16 +418,17 @@ functionPrograms =
     , ("a function as a result", "fn inc(n: Int) -> Int { return n + 1; }; return inc;")
     , ("call of a local", "fn inc(n: Int) -> Int { return n + 1; }; f = inc; return f(5);")
     , ("a parameter", "fn inc(n: Int) -> Int { return n + 1; }; fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; return apply(inc, 1);")
-    , ("a function that takes two", "fn add(a: Int, b: Int) -> Int { return a + b; }; fn fold(g: fn(Int, Int) -> Int) -> Int { return g(g(1, 2), 3); }; return fold(add);")
+    , ("a function that takes two", "fn add(a: Int, b: Int) -> Int { return a + b; }; fn applyTwo(g: fn(Int, Int) -> Int) -> Int { return g(g(1, 2), 3); }; return applyTwo(add);")
     , ("a boolean result", "fn big(n: Int) -> Bool { return n > 10; }; f = big; return f(11);")
     , ("a function that takes a list", "fn total(l: List<Int>) -> Int { return size(l); }; f = total; return f([1, 2, 3]);")
     , ("in a list", "fn inc(n: Int) -> Int { return n + 1; }; fs = push([], inc); fs = push(fs, inc); f = get(fs, 1); return f(2);")
     , ("a list of functions printed", "fn inc(n: Int) -> Int { return n + 1; }; return push([], inc);")
     , ("in a struct", "struct B { f: fn(Int) -> Int }; fn inc(n: Int) -> Int { return n + 1; }; b = B { f: inc }; g = b.f; return g(41);")
     , ("a builtin", "f = size; return f([1, 2, 3]);")
-    , ("a builtin on lists", "f = first; return f([7, 2, 3]);")
+    , ("a builtin on lists", "let f: fn(xs: &List<Int>) -> Int [{ affirm size(xs) > 0; }] = first; return f([7, 2, 3]);")
+    , ("a thin function lends a scalar through its type", "fn readScalar(n: &Int) -> Int { return n + 2; }; let f: fn(n: &Int) -> Int [{ }] [{ }] = readScalar; x = 40; return f(x);")
     , ("chosen by a branch", "fn inc(n: Int) -> Int { return n + 1; }; fn dec(n: Int) -> Int { return n - 1; }; f = inc; if 2 > 1 { f = dec; }; return f(10);")
-    , ("a recursive function through a value", "fn count(n: Int) -> Int shrinks n { if n <= 0 { return 0; }; return 1 + count(n - 1); }; f = count; return f(5);")
+    , ("a recursive function through a value", "fn count(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { if n <= 0 { return 0; }; return 1 + count(n - 1); }; let f: fn(x: Int) -> Int [{ affirm x >= 0; }] = count; return f(5);")
     ]
 
 -- Strings are the library struct String over a list of bytes (lib/string.tersus), so native code has nothing of its own for them

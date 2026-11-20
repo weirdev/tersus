@@ -1,5 +1,5 @@
-import data::codec::codec { Token, Parsed, Size, Type, hexValue, quoted, catStrings, renderTypeForName, printInt, printName, printNames, newLine, printType };
-import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram, printBool, printAst };
+import data::codec::codec { Token, Parsed, Size, Type, FnContract, typeAt, wordOf, hexValue, quoted, catStrings, renderFnClauses, renderTypeForName, printInt, printName, printNames, newLine, printType };
+import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram, printBool, printAst, relationWords };
 import data::arena::arena { reorderArena, nodeChildren };
 import data::unicode::unicode { parserUnicodeAlphaNum, parserUnicodeLetter, parserUnicodeLower, parserUnicodeUpper };
 
@@ -983,9 +983,14 @@ fn typeTokensOf(t: Type) -> List<Token> ~ {
             for x in typeTokensOf(Box::unbox(r)) { out = push(out, clone(x)); };
         },
         Type::TFnContract { args: args, ret: r, contract: contract } => {
-            out = push(push([], wordTok("fn")), wordTok(String::fromInt(size(args))));
+            out = push(push([], wordTok("fnc")), wordTok(String::fromInt(size(args))));
             for a in args { for x in typeTokensOf(clone(a)) { out = push(out, clone(x)); }; };
             for x in typeTokensOf(Box::unbox(r)) { out = push(out, clone(x)); };
+            c = Box::unbox(contract);
+            out = push(out, wordTok(String::fromInt(size(c.names))));
+            for name in c.names { out = push(out, nameTok(name)); };
+            out = fnClauseWireTokens(out, &c.requires);
+            out = fnClauseWireTokens(out, &c.ensures);
         },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
             out = push(push(push([], wordTok("named")), nameTok(base)), wordTok(String::fromInt(argc)));
@@ -1003,6 +1008,18 @@ fn typeTokensOf(t: Type) -> List<Token> ~ {
         },
     };
     return out;
+};
+
+fn fnClauseWireTokens(out: List<Token>, clauses: &List<List<Token>>) -> List<Token> ~ {
+    tokens = push(out, wordTok(String::fromInt(size(clauses))));
+    for clause in &clauses {
+        tokens = push(tokens, wordTok(String::fromInt(size(clause))));
+        for tok in &clause {
+            if tok.quoted { tokens = push(tokens, wordTok("q")); } else { tokens = push(tokens, wordTok("w")); };
+            tokens = push(tokens, clone(tok));
+        };
+    };
+    return tokens;
 };
 
 fn renderSizeName(s: Size) -> String ~ {
@@ -1036,10 +1053,20 @@ fn renderTypeName(t: Type) -> String ~ {
             r = cat3(catStrings(parts, ") -> "), renderTypeName(Box::unbox(ret)), "");
         },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
+            c = Box::unbox(contract);
             parts = "fn(";
             i = 0;
-            for a in args { if i > 0 { parts = catStrings(parts, ", "); }; parts = catStrings(parts, renderTypeName(clone(a))); i = i + 1; };
-            r = cat3(catStrings(parts, ") -> "), renderTypeName(Box::unbox(ret)), "");
+            for a in args {
+                if i > 0 { parts = catStrings(parts, ", "); };
+                if i < size(c.names) {
+                    name = get(c.names, i);
+                    if name != "" { parts = cat3(parts, name, ": "); };
+                };
+                parts = catStrings(parts, renderTypeName(clone(a)));
+                i = i + 1;
+            };
+            r = cat3(parts, ") -> ", renderTypeName(Box::unbox(ret)));
+            r = cat3(r, renderFnClauses(&c.requires, 0), renderFnClauses(&c.ensures, 0));
         },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => { r = clone(name); },
         Type::TVariant { name: name } => { r = clone(name); },
@@ -1618,13 +1645,21 @@ fn isWordTypeName(name: &String) -> Bool ~ {
 };
 
 fn typeAnnotation(sourceText: &Input, st: St) -> Res<Type> ~ {
+    return typeWithSuffix(sourceText, st, true);
+};
+
+fn typeBeforeContract(sourceText: &Input, st: St) -> Res<Type> ~ {
+    return typeWithSuffix(sourceText, st, false);
+};
+
+fn typeWithSuffix(sourceText: &Input, st: St, allowContract: Bool) -> Res<Type> ~ {
     s = skipWs(sourceText, st);
-    r = typeInner(sourceText, s); Res { st: resultPartsrState, v: resultPartsrValue, ok: resultPartsrOk } = r;
+    r = typeInner(sourceText, s, allowContract); Res { st: resultPartsrState, v: resultPartsrValue, ok: resultPartsrOk } = r;
     if !resultPartsrOk { return Res<Type> { st: resultPartsrState, v: resultPartsrValue, ok: resultPartsrOk }; };
     return ok( skipWs(sourceText, resultPartsrState), resultPartsrValue);
 };
 
-fn typeInner(sourceText: &Input, st: St) -> Res<Type> ~ {
+fn typeInner(sourceText: &Input, st: St, allowContract: Bool) -> Res<Type> ~ {
     s = st;
     if peekIs(sourceText, s, "..") {
         pv = parseVariable(sourceText, St { pos: s.pos + 2, ..s }); Res { st: resultPartspvState, v: resultPartspvValue, ok: resultPartspvOk } = pv;
@@ -1637,7 +1672,7 @@ fn typeInner(sourceText: &Input, st: St) -> Res<Type> ~ {
         s2 = s;
         s2 = St { pos: after, ..s2 };
         s2 = skipWs(sourceText, s2);
-        inner = namedOrFunctionType(sourceText, s2); Res { st: resultPartsinnerState, v: resultPartsinnerValue, ok: resultPartsinnerOk } = inner;
+        inner = namedOrFunctionType(sourceText, s2, allowContract); Res { st: resultPartsinnerState, v: resultPartsinnerValue, ok: resultPartsinnerOk } = inner;
         if resultPartsinnerOk { return ok( resultPartsinnerState, Type::TMutRef { inner: Box::new(resultPartsinnerValue) }); };
         return Res<Type> { st: resultPartsinnerState, v: Type::TInt, ok: false };
     };
@@ -1645,15 +1680,12 @@ fn typeInner(sourceText: &Input, st: St) -> Res<Type> ~ {
         s2 = s;
         s2 = St { pos: s2.pos + 1, ..s2 };
         s2 = skipWs(sourceText, s2);
-        inner = namedOrFunctionType(sourceText, s2); Res { st: resultPartsinnerState, v: resultPartsinnerValue, ok: resultPartsinnerOk } = inner;
+        inner = namedOrFunctionType(sourceText, s2, allowContract); Res { st: resultPartsinnerState, v: resultPartsinnerValue, ok: resultPartsinnerOk } = inner;
         if resultPartsinnerOk { return ok( resultPartsinnerState, Type::TRef { inner: Box::new(resultPartsinnerValue) }); };
         return Res<Type> { st: resultPartsinnerState, v: Type::TInt, ok: false };
     };
-    f = tryFunctionType(sourceText, s); Res { st: resultPartsfState, v: resultPartsfValue, ok: resultPartsfOk } = f;
-    if resultPartsfOk { return Res<Type> { st: resultPartsfState, v: resultPartsfValue, ok: resultPartsfOk }; };
-    s = resultPartsfState;
     if byteAt(sourceText, s, s.pos) = 40 {
-        // tuple type
+        // A parenthesized contract type can take a suffix that belongs to the enclosing header otherwise.
         s2 = s;
         s2 = St { pos: s2.pos + 1, ..s2 };
         s2 = skipWs(sourceText, s2);
@@ -1669,12 +1701,16 @@ fn typeInner(sourceText: &Input, st: St) -> Res<Type> ~ {
         };
         if byteAt(sourceText, s2, s2.pos) != 41 { return fail( s2, Type::TInt, "expected )"); };
         s2 = St { pos: s2.pos + 1, ..s2 };
+        if size(parts) = 1 {
+            part = typeAtOr(&parts, 0);
+            if part is Type::TFnContract { return ok(s2, part); };
+        };
         if size(parts) < 2 { return fail( s2, Type::TInt, "a tuple type has two parts or more"); };
         args = [];
         for p in parts { args = push(args, ArgV { isSize: false, size: Size::SAny, ty: clone(p) }); };
         return ok( s2, namedTypeOf(catStrings("Tuple", String::fromInt(size(parts))), args));
     };
-    return namedType(sourceText, s);
+    return namedOrFunctionType(sourceText, s, allowContract);
 };
 
 fn tuplePartType(sourceText: &Input, st: St) -> Res<Type> ~ {
@@ -1714,32 +1750,40 @@ fn ghostTypeOf(t: Type) -> Bool ~ {
     return okGhost;
 };
 
-fn tryFunctionType(sourceText: &Input, st: St) -> Res<Type> ~ {
-    saved = checkpoint(st);
-    parsed = functionType(sourceText, st);
-    Res { st: parsedState, v: parsedValue, ok: parsedOk } = parsed;
-    if !parsedOk { return Res<Type> { st: restore(parsedState, saved), v: Type::TInt, ok: false }; };
-    return ok(parsedState, parsedValue);
+fn functionTypeParameter(sourceText: &Input, st: St) -> Res<OneParam> ~ {
+    s = st;
+    name = "";
+    if isLetterCp(get(decodeAt(sourceText, s, s.pos), 0)) {
+        start = s.pos;
+        Res { st: nameState, v: candidate, ok: found } = parseVariable(sourceText, s);
+        s = skipWs(sourceText, nameState);
+        if found && byteAt(sourceText, s, s.pos) = 58 && !peekIs(sourceText, s, "::") {
+            name = candidate;
+            s = St { pos: s.pos + 1, ..s };
+        } else { s = St { pos: start, ..s }; };
+    };
+    Res { st: typeState, v: ty, ok: parsed } = typeAnnotation(sourceText, s);
+    return Res<OneParam> { st: typeState, v: OneParam { name: name, ty: ty }, ok: parsed };
 };
 
-fn functionType(sourceText: &Input, st: St) -> Res<Type> ~ {
-    s = st;
-    k = eatKeyword(sourceText, s, "fn"); Res { st: resultPartskState, v: resultPartskValue, ok: resultPartskOk } = k;
-    if !resultPartskValue { return Res<Type> { st: resultPartskState, v: Type::TInt, ok: false }; };
-    kSt = resultPartskState;
-    s = skipWs(sourceText, kSt);
-    if byteAt(sourceText, s, s.pos) != 40 { return Res<Type> { st: s, v: Type::TInt, ok: false }; };
-    s = St { pos: s.pos + 1, ..s };
-    s = skipWs(sourceText, s);
+fn functionType(sourceText: &Input, st: St, allowContract: Bool) -> Res<Type> ~ {
+    s = skipWs(sourceText, st);
     args = [];
+    names = [];
+    hasNames = false;
     if byteAt(sourceText, s, s.pos) != 41 {
         loop = true;
         while loop ~ {
-            t = typeAnnotation(sourceText, s); Res { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk } = t;
-            if !resultPartstOk { return Res<Type> { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk }; };
-            s = resultPartstState;
-            args = push(args, resultPartstValue);
-            s = skipWs(sourceText, s);
+            Res { st: paramState, v: param, ok: parsed } = functionTypeParameter(sourceText, s);
+            if !parsed { return Res<Type> { st: paramState, v: Type::TInt, ok: false }; };
+            s = paramState;
+            OneParam { name: name, ty: ty } = param;
+            if name != "" {
+                if containsName(&names, &name) { return fail(s, Type::TInt, catStrings("duplicate function type parameter ", name)); };
+                hasNames = true;
+            };
+            names = push(names, name);
+            args = push(args, ty);
             if byteAt(sourceText, s, s.pos) = 44 { s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); } else { loop = false; };
         };
     };
@@ -1748,16 +1792,29 @@ fn functionType(sourceText: &Input, st: St) -> Res<Type> ~ {
     s = skipWs(sourceText, s);
     if !peekIs(sourceText, s, "->") { return fail( s, Type::TInt, "expected ->"); };
     s = St { pos: s.pos + 2, ..s };
-    s = skipWs(sourceText, s);
-    r = typeAnnotation(sourceText, s); Res { st: resultPartsrState, v: resultPartsrValue, ok: resultPartsrOk } = r;
-    if !resultPartsrOk { return Res<Type> { st: resultPartsrState, v: resultPartsrValue, ok: resultPartsrOk }; };
-    return ok( resultPartsrState, Type::TFn { args: args, ret: Box::new(resultPartsrValue) });
+    Res { st: retState, v: ret, ok: parsed } = typeBeforeContract(sourceText, s);
+    if !parsed { return Res<Type> { st: retState, v: ret, ok: false }; };
+    if allowContract && byteAt(sourceText, retState, retState.pos) = 91 {
+        return functionTypeContract(sourceText, retState, names, args, ret);
+    };
+    if hasNames {
+        if !allowContract { return fail(retState, Type::TInt, "parenthesize a contracted function return type"); };
+        return fail(retState, Type::TInt, "a function type with parameter names needs a contract");
+    };
+    return ok(retState, Type::TFn { args: args, ret: Box::new(ret) });
 };
 
-fn namedOrFunctionType(sourceText: &Input, st: St) -> Res<Type> ~ {
-    f = tryFunctionType(sourceText, st); Res { st: resultPartsfState, v: resultPartsfValue, ok: resultPartsfOk } = f;
-    if resultPartsfOk { return Res<Type> { st: resultPartsfState, v: resultPartsfValue, ok: resultPartsfOk }; };
-    return namedType(sourceText, resultPartsfState);
+fn namedOrFunctionType(sourceText: &Input, st: St, allowContract: Bool) -> Res<Type> ~ {
+    s = st;
+    if keywordAt(sourceText, s, "fn") {
+        start = s.pos;
+        s = skipWs(sourceText, St { pos: start + 2, ..s });
+        if byteAt(sourceText, s, s.pos) = 40 {
+            return functionType(sourceText, St { pos: s.pos + 1, ..s }, allowContract);
+        };
+        s = St { pos: start, ..s };
+    };
+    return namedType(sourceText, s);
 };
 
 fn namedType(sourceText: &Input, st: St) -> Res<Type> ~ {
@@ -4322,6 +4379,104 @@ fn optContract(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     return ok( s, []);
 };
 
+fn functionTypeContract(sourceText: &Input, st: St, names: List<String>, args: List<Type>, ret: Type) -> Res<Type> ~ {
+    Res { st: afterRequires, v: requires, ok: parsedRequires } = functionTypeClauses(sourceText, st);
+    if !parsedRequires { return Res<Type> { st: afterRequires, v: Type::TInt, ok: false }; };
+    Res { st: afterEnsures, v: ensures, ok: parsedEnsures } = functionTypeClauses(sourceText, afterRequires);
+    if !parsedEnsures { return Res<Type> { st: afterEnsures, v: Type::TInt, ok: false }; };
+    contract = FnContract { names: names, requires: requires, ensures: ensures };
+    return ok(afterEnsures, Type::TFnContract { args: args, ret: Box::new(ret), contract: Box::new(contract) });
+};
+
+fn emptyFunctionTypeClauses() -> List<List<Token>> ~ { return []; };
+
+fn functionTypeClauses(sourceText: &Input, st: St) -> Res<List<List<Token>>> ~ {
+    if byteAt(sourceText, st, st.pos) != 91 { return Res<List<List<Token>>> { st: st, v: [], ok: true }; };
+    saved = checkpoint(st);
+    Res { st: s, v: validations, ok: parsed } = validationBlock(sourceText, st);
+    if !parsed { return Res<List<List<Token>>> { st: s, v: [], ok: false }; };
+    clauses = [];
+    for id in validations {
+        node = nodeAt(s, id);
+        if !(node is AstNode::Validation) { return fail(s, emptyFunctionTypeClauses(), "expected a contract validation"); };
+        validation = (node as AstNode::Validation).value;
+        if !(validation is AstValidation::ProofAssert) { return fail(s, emptyFunctionTypeClauses(), "a function type contract only supports affirm"); };
+        tokens = functionTypeProofTokens(&s, (validation as AstValidation::ProofAssert).p, []);
+        if size(tokens) = 0 { return fail(s, emptyFunctionTypeClauses(), "unsupported proof in a function type contract"); };
+        clauses = push(clauses, tokens);
+    };
+    end = s.pos;
+    restored = restore(s, saved);
+    return ok(St { pos: end, ..restored }, clauses);
+};
+
+fn functionTypeProofTokens(st: &St, id: Int, out: List<Token>) -> List<Token> ~ {
+    node = nodeAt(st, id);
+    if !(node is AstNode::Proof) { return []; };
+    match (node as AstNode::Proof).value {
+        AstProof::ATerm { n: n } => { return push(push(out, wordTok("name")), nameTok(nameText(st, n))); },
+        AstProof::CTerm { v: v } => {
+            value = nodeAt(st, v);
+            if !(value is AstNode::Value) { return []; };
+            match (value as AstNode::Value).value {
+                AstValue::VInt { n: n } => { return push(push(out, wordTok("int")), wordTok(nameText(st, n))); },
+                AstValue::VBool { b: b } => { if b { return push(push(out, wordTok("bool")), wordTok("true")); }; return push(push(out, wordTok("bool")), wordTok("false")); },
+                AstValue::VList { xs: xs } => { return []; },
+                AstValue::VData { n: n, xs: xs } => { return []; },
+                AstValue::VFnRef { n: n } => { return []; },
+                AstValue::VFunct { ps: ps, ins: ins, outs: outs, body: body, exports: exports } => { return []; },
+            };
+        },
+        AstProof::FApp { f: f, xs: xs } => {
+            name = functionTypeBuiltin(st, f);
+            args = proofListIds(st, xs);
+            arity = size(args);
+            if !functionTypeBuiltinArity(&name, arity) { return []; };
+            tokens = push(push(push(out, wordTok("app")), wordTok(&name)), wordTok(String::fromInt(arity)));
+            for arg in args {
+                tokens = functionTypeProofTokens(st, arg, tokens);
+                if size(tokens) = 0 { return []; };
+            };
+            return tokens;
+        },
+        AstProof::Forall { n: n, gs: gs, b: b } => { return []; },
+        AstProof::BVar { n: n } => { return []; },
+    };
+};
+
+fn functionTypeBuiltinArity(name: &String, arity: Int) -> Bool ~ {
+    if name = "Size" { return arity = 1; };
+    return arity = 2 && (name = "Eq" || name = "NotEq" || name = "Lt" || name = "Gt" || name = "LtEq" || name = "GtEq"
+        || name = "Plus" || name = "Minus" || name = "Times");
+};
+
+fn functionTypeBuiltin(st: &St, id: Int) -> String ~ {
+    node = nodeAt(st, id);
+    if !(node is AstNode::Proof) { return ""; };
+    term = (node as AstNode::Proof).value;
+    if !(term is AstProof::CTerm) { return ""; };
+    node = nodeAt(st, (term as AstProof::CTerm).v);
+    if !(node is AstNode::Value) { return ""; };
+    value = (node as AstNode::Value).value;
+    if !(value is AstValue::VFunct) { return ""; };
+    node = nodeAt(st, (value as AstValue::VFunct).body);
+    if !(node is AstNode::Body) { return ""; };
+    body = (node as AstNode::Body).value;
+    if !(body is AstBody::BuiltinFunct) { return ""; };
+    node = nodeAt(st, (body as AstBody::BuiltinFunct).b);
+    if !(node is AstNode::Builtin) { return ""; };
+    match (node as AstNode::Builtin).value {
+        AstBuiltin::Primitive { name: name } => { return name; },
+        AstBuiltin::Rel { r: r } => { return wordOf(relationWords(), r); },
+        AstBuiltin::Ctor { n: n, args: args, fs: fs } => { return ""; },
+        AstBuiltin::FieldBuiltin { owner: owner, n: n } => { return ""; },
+        AstBuiltin::Is { n: n } => { return ""; },
+        AstBuiltin::Project { n: n, f: f } => { return ""; },
+        AstBuiltin::Cast { n: n } => { return ""; },
+        AstBuiltin::ToWord { signed: signed, bits: bits } => { return ""; },
+    };
+};
+
 // ---- function headers ----
 
 fn oneParameter(sourceText: &Input, st: St) -> Res<OneParam> ~ {
@@ -4385,7 +4540,7 @@ fn functHeader(sourceText: &Input, st: St) -> Res<HeaderOut> ~ {
     if !peekIs(sourceText, s, "->") { return fail( s, empty, "expected ->"); };
     s = St { pos: s.pos + 2, ..s };
     s = skipWs(sourceText, s);
-    rt = typeAnnotation(sourceText, s); Res { st: resultPartsrtState, v: resultPartsrtValue, ok: resultPartsrtOk } = rt;
+    rt = typeBeforeContract(sourceText, s); Res { st: resultPartsrtState, v: resultPartsrtValue, ok: resultPartsrtOk } = rt;
     if !resultPartsrtOk { return Res<HeaderOut> { st: resultPartsrtState, v: empty, ok: false }; };
     s = skipWs(sourceText, resultPartsrtState);
     writes = [];
@@ -6581,7 +6736,7 @@ fn fnShape(sourceText: &Input, st: St, kind: String) -> Res<FnShape> ~ {
     if !peekIs(sourceText, s, "->") { return fail( s, emptyFnShape(), cat3(kind, " shape writes its result after ->, as in ", "Fn(x: Int) -> Int")); };
     s = St { pos: s.pos + 2, ..s };
     s = skipWs(sourceText, s);
-    rt = typeAnnotation(sourceText, s); Res { st: resultPartsrtState, v: resultPartsrtValue, ok: resultPartsrtOk } = rt;
+    rt = typeBeforeContract(sourceText, s); Res { st: resultPartsrtState, v: resultPartsrtValue, ok: resultPartsrtOk } = rt;
     if !resultPartsrtOk { return Res<FnShape> { st: resultPartsrtState, v: emptyFnShape(), ok: false }; };
     s = skipWs(sourceText, resultPartsrtState);
     contractStart = 0 - 1;
@@ -6976,7 +7131,7 @@ fn closureExpr(sourceText: &Input, st: St, isMove: Bool) -> Res<Int> ~ {
     if peekIs(sourceText, s, "->") {
         s = St { pos: s.pos + 2, ..s };
         s = skipWs(sourceText, s);
-        rt = typeAnnotation(sourceText, s); Res { st: resultPartsrtState, v: resultPartsrtValue, ok: resultPartsrtOk } = rt;
+        rt = typeBeforeContract(sourceText, s); Res { st: resultPartsrtState, v: resultPartsrtValue, ok: resultPartsrtOk } = rt;
         if !resultPartsrtOk { return Res<Int> { st: resultPartsrtState, v: 0, ok: false }; };
         s = resultPartsrtState;
         ret = resultPartsrtValue;
@@ -7962,12 +8117,7 @@ fn fileRenderTypeForName(t: &Type, fuel: Int) -> String [{ affirm fuel >= 0; }] 
             r = fileCatStrings(fileCatStrings(parts, ") -> "), fileRenderTypeForName(Box::unbox(ret), fuel - 1));
         },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
-            parts = "fn(";
-            for i in 0..size(args) {
-                if i > 0 { parts = fileCatStrings(parts, ", "); };
-                parts = fileCatStrings(parts, fileRenderTypeForName(get(args, i), fuel - 1));
-            };
-            r = fileCatStrings(fileCatStrings(parts, ") -> "), fileRenderTypeForName(Box::unbox(ret), fuel - 1));
+            r = renderTypeForName(Type::TFnContract { args: clone(args), ret: clone(ret), contract: clone(contract) }, fuel);
         },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
             if isBareLower(name) { r = fileCatStrings("`", clone(name)); } else { r = clone(name); };
@@ -8080,6 +8230,7 @@ fn fileTypeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; af
         if !n.ok || n.value < 0 { return bad; };
         return fileDone(Type::TVar { n: n.value }, n.pos);
     };
+    if kw = "fnc" { return typeAt(ts, pos); };
     if kw = "fn" {
         c = fileCountAt(ts, next);
         if !c.ok { return bad; };

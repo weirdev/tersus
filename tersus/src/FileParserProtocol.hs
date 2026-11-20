@@ -183,6 +183,15 @@ safeTypeP = word >>= \tag -> case tag of
     "uninit" -> TUninit <$> safeTypeP
     "block" -> TBlock <$> safeTypeP
     "fn" -> TFn <$> listP safeTypeP <*> safeTypeP
+    "fnc" -> do
+        args <- listP safeTypeP
+        ret <- safeTypeP
+        names <- namesP
+        unless (length names == length args) (failP "a contract function type's names do not match its parameters")
+        checkParamNames names
+        requires <- clausesP
+        ensures <- clausesP
+        pure (TFnContract args ret (FnContract names requires ensures))
     "named" -> TNamed <$> name <*> listP safeArgP
     "variant" -> TVariant <$> name
     "var" -> TVar <$> nonnegativeP

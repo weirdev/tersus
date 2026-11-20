@@ -1,12 +1,12 @@
 import data::ast::ast { AstNode };
-import data::codec::codec { catStrings };
+import data::codec::codec { FnContract, Token, catStrings, countAt, fnClausesAt, namesAt, quoteName, renderFnClauses, tokenize };
 import elaborate::calls { teHead };
 
 // A type. kind: 0 Int, 1 Byte, 2 Bool, 3 a word (flag signed, n bits), 4 a named type (name, args: its arguments,
 // a size kind among them an ArgSize), 5 a variant (name), 6 an array (args: element, size), 7 Addr, 8 Block,
 // 9 Uninit, 10 &, 11 &mut (args: what it is of), 12 a type parameter (name), 13 a function with parameters (sizes,
-// types, args: its type), 14 a function (args: parameters, then the result), 15 an unknown (n), and the sizes: 20 a
-// constant (n), 21 any, 22 a size parameter (name), 23 an unknown size (n).
+// types, args: its type), 14 a function (args: parameters, then the result; name: the fnc wire suffix or empty),
+// 15 an unknown (n), and the sizes: 20 a constant (n), 21 any, 22 a size parameter (name), 23 an unknown size (n).
 // A function of an impl, as the checks against its trait read it
 struct Defined { name: String, params: List<String>, ptys: List<Int>, rty: Int, sizes: Int, term: Int, sigNode: Int };
 impl Clone for Defined { };
@@ -97,6 +97,7 @@ struct St {
     subst: HashMap<Int, Int>,
     sizeSubst: HashMap<Int, Int>,
     next: Int,
+    unitKey: String,
     wireVersion: Bool,
     wireProtocols: HashMap<String, List<String>>,
     wireOwnership: HashMap<String, List<String>>,
@@ -211,6 +212,7 @@ fn copyState(st: &St) -> St ~ {
         subst: clone(st.subst),
         sizeSubst: clone(st.sizeSubst),
         next: clone(st.next),
+        unitKey: clone(st.unitKey),
         wireVersion: clone(st.wireVersion),
         wireProtocols: clone(st.wireProtocols),
         wireOwnership: clone(st.wireOwnership),
@@ -478,7 +480,29 @@ fn boxTy(st: St, inner: Int) -> St ~ {
 };
 
 fn fnTy(st: St, params: List<Int>, ret: Int) -> St ~ {
-    return addTy(st, Ty { kind: 14, name: "", args: push(params, ret), n: 0, flag: false, sizes: [], types: [] });
+    return fnTyWithContract(st, params, ret, "");
+};
+
+fn fnTyWithContract(st: St, params: List<Int>, ret: Int, suffix: String) -> St ~ {
+    return addTy(st, Ty { kind: 14, name: suffix, args: push(params, ret), n: 0, flag: false, sizes: [], types: [] });
+};
+
+fn fnContractSuffix(c: &FnContract) -> String ~ {
+    out = catStrings(" ", intText(size(c.names)));
+    for name in &c.names { out = catStrings(catStrings(out, " "), quoteName(name)); };
+    return fnClauseTokens(fnClauseTokens(out, &c.requires), &c.ensures);
+};
+
+fn fnClauseTokens(out: String, clauses: &List<List<Token>>) -> String ~ {
+    out = catStrings(catStrings(out, " "), intText(size(clauses)));
+    for clause in clauses {
+        out = catStrings(catStrings(out, " "), intText(size(clause)));
+        for token in clause {
+            if token.quoted { out = catStrings(catStrings(out, " q "), quoteName(&token.text)); }
+            else { out = catStrings(catStrings(out, " w "), &token.text); };
+        };
+    };
+    return out;
 };
 
 fn arrayTy(st: St, elem: Int, sz: Int) -> St ~ {
@@ -678,6 +702,7 @@ fn unify(st: St, a: Int, b: Int) -> St ~ {
     };
     if kx >= 7 && kx <= 11 { return unify(st, argAt(st, x, 0), argAt(st, y, 0)); };
     if kx = 14 {
+        if nameOf(st, x) != nameOf(st, y) { return St { ok: false, ..st }; };
         xs = argsOf(st, x);
         ys = argsOf(st, y);
         if size(xs) != size(ys) { return St { ok: false, ..st }; };
@@ -690,6 +715,7 @@ fn unify(st: St, a: Int, b: Int) -> St ~ {
             if !st.ok { return st; };
             i = i + 1;
         };
+        if size(nameOf(&st, x).bytes) > 0 { return St { ok: sameTy(&st, x, y), ..st }; };
         return St { ok: true, ..st };
     };
     return St { ok: false, ..st };
@@ -818,6 +844,33 @@ fn wrapped(prefix: &String, inner: String, suffix: &String) -> String ~ {
     return catStrings(catStrings(prefix, inner), suffix);
 };
 
+fn fnNameWithContract(parts: List<String>, ret: &String, suffix: &String) -> String ~ {
+    if size(suffix.bytes) = 0 { return catStrings(wrapped("fn(", joinWith(&parts, ", "), ") -> "), ret); };
+    tokens = tokenize(suffix);
+    ts = &tokens.value;
+    if !tokens.ok || size(ts) = 0 { return "fn with malformed contract"; };
+    count = countAt(ts, 0);
+    if !count.ok { return "fn with malformed contract"; };
+    names = namesAt(ts, count.pos, count.value);
+    if !names.ok { return "fn with malformed contract"; };
+    requires = fnClausesAt(ts, names.pos);
+    if !requires.ok { return "fn with malformed contract"; };
+    ensures = fnClausesAt(ts, requires.pos);
+    if !ensures.ok { return "fn with malformed contract"; };
+    i = 0;
+    while i < size(parts) && i < size(names.value) [{ affirm i >= 0; }] shrinks size(parts) - i {
+        name = get(names.value, i);
+        if size(name.bytes) > 0 { parts = set(parts, i, catStrings(catStrings(name, ": "), get(parts, i))); };
+        i = i + 1;
+    };
+    out = catStrings(wrapped("fn(", joinWith(&parts, ", "), ") -> "), ret);
+    requiresText = renderFnClauses(&requires.value, 1);
+    ensuresText = renderFnClauses(&ensures.value, 1);
+    if size(requiresText.bytes) = 0 { requiresText = " [{}]"; };
+    if size(ensuresText.bytes) = 0 { ensuresText = " [{}]"; };
+    return catStrings(catStrings(out, requiresText), ensuresText);
+};
+
 // A type as the rendered name of an instance writes it (Types.renderTypeForName)
 fn typeNameText(st: &St, t: Int, deep: Bool) -> String ~ {
     r = t;
@@ -848,7 +901,7 @@ fn typeNameText(st: &St, t: Int, deep: Bool) -> String ~ {
             parts = push(parts, typeNameText(st, get(x.args, i), deep));
             i = i + 1;
         };
-        return catStrings(wrapped("fn(", joinWith(&parts, ", "), ") -> "), typeNameText(st, nth(&x.args, size(x.args) - 1), deep));
+        return fnNameWithContract(parts, typeNameText(st, nth(&x.args, size(x.args) - 1), deep), &x.name);
     };
     return catStrings("?", intText(x.n));
 };
@@ -901,7 +954,7 @@ fn render(st: &St, t: Int) -> String ~ {
             parts = push(parts, render(st, get(x.args, i)));
             i = i + 1;
         };
-        return catStrings(wrapped("fn(", joinWith(&parts, ", "), ") -> "), render(st, nth(&x.args, size(x.args) - 1)));
+        return fnNameWithContract(parts, render(st, nth(&x.args, size(x.args) - 1)), &x.name);
     };
     return "?";
 };

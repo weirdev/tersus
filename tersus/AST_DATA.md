@@ -250,12 +250,27 @@ type's argument tokens: it does not interpret them. In Haskell the type is
 deliberately not `Syntax`'s `ValidationStatement` (`Syntax` imports
 `Types`, so the contract side could not hold the syntax type without a
 cycle); the Tersus codec mirrors it as `Type::TFnContract` with an
-`FnContract` of token lists. No writer emits `fnc` for a plain `TFn`, and
-no user syntax produces one yet: the phase that gives function types
-contracts in the language assigns the clause token vocabulary and makes
-the parser and elaborator produce and read these types. Until then every
-reader accepts both forms and every existing program's `fn` data is
-byte-identical.
+`FnContract` of token lists. No writer emits `fnc` for a plain `TFn`; its
+encoding is unchanged.
+
+For source function types, the parser emits one token list per relational
+`affirm` (splitting a conjunction as it does for function declarations). Each
+list is one prefix proof term expressed in the existing `w` and `q` tokens:
+
+```
+term:  w name q <formal name>
+     | w int w <signed decimal>
+     | w bool w <true or false>
+     | w app w <builtin> w <arity> <term>...
+```
+
+The builtins are `Eq`, `NotEq`, `Lt`, `Gt`, `LtEq`, `GtEq`, `Plus`, `Minus`,
+`Times` (two arguments), and `Size` (one argument). For example, `affirm x > 0;`
+is `7 w app w Gt w 2 w name q "x" w int w 0`. An empty block has zero clauses.
+The validator decodes the terms into its existing proof syntax. These are
+self-contained: there are no references to the containing AST arena. Lowering
+preserves the tokens in MIR3 until validation; the runtime view uses the
+plain function signature.
 
 `Type TYPE` and `Size SIZE` use the exact MIR recursive codecs and Tersus
 `Type`/`Size` enums, including the MIR `TNamed`'s preserved argument tokens.

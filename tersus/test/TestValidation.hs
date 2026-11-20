@@ -577,7 +577,7 @@ testCallsUseContracts =
             , -- A function is known as the value it is, where it is named as one and not by a fact in every proof of every function
               -- (which made the time to validate grow with the square of the number of functions; the proofs here are of 80 functions)
               parseValidProgramHelper chainOfFunctions
-            , parseValidProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; g = id; x = g(3); affirm x = 3;"
+            , parseValidateFailProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; g = id; x = g(3); affirm x = 3;" "Could not prove: x = 3"
             ]
 
 -- What the validator written in Haskell proved, compared program by program with this one
@@ -589,7 +589,7 @@ testHaskellParity =
         , parseValidProgramHelper "fn inc(n: Int) -> Int { return n + 1; }; fn dec(n: Int) -> Int { return n - 1; }; f = inc; if 2 > 1 { f = dec; }; return f(10);"
         , parseValidProgramHelper "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return n; }; h = f; h = g; return f(1) + h(2);"
         , parseValidProgramHelper "fn inc(n: Int) -> Int { return n + 1; }; return size(push([], inc));"
-        , parseValidProgramHelper "f = first; return f([7, 2, 3]);"
+        , parseValidateFailProgramHelper "f = first; return f([7, 2, 3]);" "function conversion"
         , parseValidProgramHelper "fn choose(flag: Bool, a: &Int, b: &Int) -> &Int from (a, b) { if flag { return a; } else { return b; }; }; x = 1; y = 2; r = choose(true, x, y); return *r;"
         , parseValidProgramHelper "enum Rose { Leaf { n: Int }, Node { kids: List<Rose> } }; impl Eq for Rose { }; return 0;"
         , -- (the Haskell validator took a reassigned parameter in an output contract

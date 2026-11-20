@@ -5,7 +5,9 @@ module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateBy
 
 import Control.Monad (foldM, guard)
 import Data.Containers.ListUtils (nubOrd)
+import Data.Graph (SCC (..), stronglyConnComp)
 import Data.List (find, isInfixOf, isPrefixOf, nub, sortOn)
+import Text.Read (readMaybe)
 import FieldPaths (fieldPaths)
 import MirMoves (liveness)
 import Data.Maybe (fromMaybe, isJust, mapMaybe, isNothing)
@@ -529,7 +531,8 @@ inputReadersOf functions = grow seeds
         M.Assign _ (M.ListOp op _) -> op `elem` inputOps
         M.Peek _ (M.ListOp op _) -> op `elem` inputOps
         _ -> False
-    seeds = Set.fromList [n | (n, fn) <- Map.toList functions, any reads (statementsOf fn)]
+    seeds = Set.fromList [n | (n, fn) <- Map.toList functions, M.callsThroughFunctionBound n || any reads (statementsOf fn) || any isIndirect (Map.elems (M.fnBlocks fn))]
+    isIndirect blk = isJust (indirectCallee (M.blockTerminator blk))
     -- A direct callee is not the only way to reach one: `h = f; h();` calls f
     -- through a local, so the closure follows every function a body names, the
     -- way `M.readersOfInput` does.
@@ -1060,6 +1063,105 @@ forallFactSteps env (Forall index guards body) b0
         e : _ -> Just e
         [] -> Nothing
 forallFactSteps _ _ _ = Nothing
+
+fnContractSpec :: [Type] -> Type -> FnContract -> Maybe ([ValidationStatement], [ValidationStatement])
+fnContractSpec args result contract = do
+    let names = fnParamNames contract
+        named = filter (not . null) names
+        params = Map.fromList (filter (not . null . fst) (zip names (map unref args)))
+    guard (length args == length names && length (nub named) == length named && "return" `notElem` named)
+    (,) <$> clauses params (fnRequires contract) <*> clauses (Map.insert "return" result params) (fnEnsures contract)
+  where
+    clauses env = traverse $ \(FnClause tokens) -> do
+        -- Only relational assertions reach contractSteps as assumptions.
+        (TBool, expr@(FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel _)) _)) _), []) <- term env tokens
+        pure (ProofAssert expr)
+    term env (FnWord "name" : FnName name : rest) = do
+        ty <- Map.lookup name env
+        pure (ty, ATerm name, rest)
+    term _ (FnWord "int" : FnWord text : rest) = do
+        n <- readMaybe text
+        guard (inIntRange n)
+        pure (TInt, CTerm (VInt n), rest)
+    term _ (FnWord "bool" : FnWord text : rest) = do
+        b <- lookup text [("true", True), ("false", False)]
+        pure (TBool, CTerm (VBool b), rest)
+    term env (FnWord "app" : FnWord "Size" : FnWord "1" : rest) = do
+        (ty, arg, tail') <- term env rest
+        guard (isSized ty)
+        pure (TInt, apply Size [arg], tail')
+    term env (FnWord "app" : FnWord name : FnWord "2" : rest) = do
+        (a, left, rest') <- term env rest
+        (b, right, tail') <- term env rest'
+        guard (a == b)
+        case readMaybe name of
+            Just rel | a == TInt || (a == TBool && rel `elem` [Eq, NotEq]) ->
+                pure (TBool, apply (Rel rel) [left, right], tail')
+            _ -> do
+                guard (a == TInt)
+                op <- lookup name [("Plus", Plus), ("Minus", Minus), ("Times", Times)]
+                pure (TInt, apply op [left, right], tail')
+    term _ _ = Nothing
+    apply op = FApp (CTerm (builtinFunct op))
+    isSized TList{} = True
+    isSized TArrayOf{} = True
+    isSized (TBox TArrayOf{}) = True
+    isSized _ = False
+
+fnValueType :: Type -> Maybe ([Type], Type, FnContract)
+fnValueType ty = case ty of
+    TFn args result -> Just (args, result, FnContract (replicate (length args) "") [] [])
+    TFnContract args result contract -> Just (args, result, contract)
+    _ -> Nothing
+
+localTypeOf :: M.Function -> M.Local -> Maybe Type
+localTypeOf fn l = M.localType <$> Map.lookup l (M.fnLocals fn)
+
+fnValueSignature :: Map.Map Name M.TypeDecl -> Type -> Maybe ([Type], Type, FnContract, [ValidationStatement], [ValidationStatement])
+fnValueSignature types ty = do
+    (args, result, contract) <- fnValueType ty
+    -- The type does not say where an escaping reference comes from, nor how to version an update.
+    guard (all (not . holdsRefStored types . unref) args && not (holdsRefStored types result))
+    guard (not (any isMutable args) && not (any mentionsParameter (result : args)))
+    guard (all (permissionFree Set.empty . unref) args && permissionFree Set.empty result)
+    (requires, ensures) <- fnContractSpec args result contract
+    pure (args, result, contract, requires, ensures)
+  where
+    isMutable TMutRef{} = True
+    isMutable _ = False
+    permissionFree seen ty = case ty of
+        TBlock{} -> False
+        TUninit t -> permissionFree seen t
+        TArrayOf t _ -> permissionFree seen t
+        TNamed base namedArgs ->
+            all (permissionFree seen) [t | ArgType t <- namedArgs]
+                && declarationFree seen (instanceName base namedArgs) base
+        TVariant name -> declarationFree seen name (takeWhile (/= ':') name)
+        _ -> True
+    declarationFree seen name base
+        | Set.member name seen = True
+        | otherwise = case Map.lookup name types <|> Map.lookup base types of
+            Just (M.StructDecl fields) -> all (permissionFree (Set.insert name seen) . snd) fields
+            Just (M.EnumDecl variants) -> all (all (permissionFree (Set.insert name seen) . snd) . snd) variants
+            Nothing -> base `elem` ["List", "Box"]
+
+indirectCall :: Map.Map Name M.TypeDecl -> Rules -> M.Function -> M.Local -> [M.Operand] -> M.Local -> Build -> Maybe ([MirValue], Build)
+indirectCall types rules caller callee args dest b0 = do
+    ty <- localTypeOf caller callee
+    (parameters, _, contract, requires, ensures) <- fnValueSignature types ty
+    guard (length args == length parameters)
+    (snaps, b1) <- foldM snapshot ([], b0) args
+    let env = Map.fromList [(name, M.Copy local) | (name, (local, _)) <- zip (fnParamNames contract) snaps, not (null name)]
+        resultEnv = Map.insert "return" (M.Copy dest) env
+    (checks, b2) <- contractSteps rules False env requires b1
+    (posts, b3) <- contractSteps rules True resultEnv ensures b2
+    (value, b4) <- operand (M.Copy callee) b3
+    pure (step "RequireDefined" [("value", value)] : map snd snaps ++ checks ++ [step "Havoc" [("local", MInt (localNum dest))]] ++ posts, b4)
+  where
+    snapshot (snaps, b) arg = do
+        (value, b1) <- operand arg b
+        let (local, _, b2) = temporary b1
+        pure (snaps ++ [(local, step "Assign" [("local", MInt (localNum local)), ("value", value)])], b2)
 
 -- Evaluate total expressions before assuming a clause. The reference can
 -- assume partial expressions without proving their safety, so decline those
@@ -2034,90 +2136,6 @@ exprOperand env expr b0 = case expr of
         pure (steps ++ [apply], ref, b2)
 
 
--- The function each local holds where each block's statements end, when
--- every path to it agrees (a local assigned a function constant, or a copy
--- of a local that holds one; anything else it is assigned or written forgets it)
-fnValuesAtEnd :: Aliasing -> M.Function -> Map.Map M.BlockId (Map.Map M.Local Name)
-fnValuesAtEnd alias fn = Map.mapWithKey (\bid _ -> transfer (Map.findWithDefault Map.empty bid entries) bid) (M.fnBlocks fn)
-  where
-    entries = go (Map.singleton (M.BlockId 0) Map.empty) (2 * Map.size (M.fnBlocks fn) + 2)
-    transfer start bid = case Map.lookup bid (M.fnBlocks fn) of
-        Just blk -> foldl apply start (M.blockStatements blk)
-        Nothing -> start
-    apply known st = case st of
-        M.Assign d (M.Use (M.Const (M.CFn n))) -> Map.insert d n known
-        M.Assign d (M.Use (M.Copy src)) -> maybe (Map.delete d known) (\n -> Map.insert d n known) (Map.lookup src known)
-        M.Assign d (M.Use (M.Move src)) -> maybe (Map.delete d known) (\n -> Map.insert d n known) (Map.lookup src known)
-        M.Assign d _ -> Map.delete d known
-        M.AssignRef{} -> foldr Map.delete known (changedBy alias st)
-        _ -> known
-    outOf known bid blk =
-        let after = transfer known bid
-         in case M.blockTerminator blk of
-                M.Call _ _ d _ -> foldr Map.delete after (d : Map.findWithDefault [] bid (aliasCallChanges alias))
-                _ -> after
-    successors blk = case M.blockTerminator blk of
-        M.Goto t -> [t]
-        M.SwitchBool _ y n -> [y, n]
-        M.Call _ _ _ t -> [t]
-        _ -> []
-    meet a b = Map.filterWithKey (\k v -> Map.lookup k b == Just v) a
-    go known 0 = known
-    go known k =
-        let outs = [(t, outOf (Map.findWithDefault Map.empty bid known) bid blk) | (bid, blk) <- Map.toList (M.fnBlocks fn), Map.member bid known, t <- successors blk]
-            next = foldl (\m (t, o) -> Map.insertWith meet t o m) (Map.singleton (M.BlockId 0) Map.empty) outs
-         in if next == known then known else go next (k - 1)
-
--- The functions a local can hold anywhere in its function: the constants
--- assigned to it, and those of the locals copied to it (Nothing when it is
--- also assigned something else, a call's result say, or written through a reference)
-fnValueCandidates :: Aliasing -> M.Function -> M.Local -> Maybe [Name]
-fnValueCandidates alias f local = fmap nub (go Set.empty local)
-  where
-    stmts = concatMap M.blockStatements (Map.elems (M.fnBlocks f))
-    terms = map M.blockTerminator (Map.elems (M.fnBlocks f))
-    go seen l
-        | Set.member l seen = Just []
-        | any (\t -> case t of M.Call _ _ d _ -> d == l; _ -> False) terms = Nothing
-        | l `elem` M.fnParams f = Nothing
-        | otherwise = do
-            written <- writtenWhole l
-            fmap concat (mapM (source (Set.insert l seen)) ([rv | M.Assign d rv <- stmts, d == l] ++ written))
-    -- (a write through a reference to the whole local is one more value of it)
-    writtenWhole l
-        | l `elem` concat (Map.elems (aliasCallChanges alias)) = Nothing
-        | otherwise = mapM (wholeWrite l) [st | st@M.AssignRef{} <- stmts, l `elem` changedBy alias st]
-    wholeWrite l (M.AssignRef root steps rv) = case writeTarget alias root of
-        (top, above, True) | top == l, null above, null steps -> Just rv
-        _ -> Nothing
-    wholeWrite _ _ = Nothing
-    source _ (M.Use (M.Const (M.CFn n))) = Just [n]
-    source seen (M.Use (M.Copy l)) = go seen l
-    source seen (M.Use (M.Move l)) = go seen l
-    source _ _ = Nothing
-
--- Locals that hold one known function: assigned exactly once in the whole
--- function, to a function constant or to another such local, and never
--- written through a reference. A call through one of these is a call to that
--- function; anything else is not modelled.
-fnValueLocals :: Aliasing -> M.Function -> Map.Map M.Local Name
-fnValueLocals alias f = Map.fromList [(d, n) | (d, _) <- fnAssignments, Just n <- [resolve Set.empty d]]
-  where
-    stmts = concatMap M.blockStatements (Map.elems (M.fnBlocks f))
-    terms = map M.blockTerminator (Map.elems (M.fnBlocks f))
-    fnAssignments = [(d, src) | M.Assign d (M.Use src) <- stmts, isFnSource src]
-    isFnSource (M.Const (M.CFn _)) = True
-    isFnSource (M.Copy _) = True
-    isFnSource _ = False
-    assignmentCount d = length [() | M.Assign d' _ <- stmts, d' == d] + length [() | M.Call _ _ d' _ <- terms, d' == d]
-    resolve seen d
-        | Set.member d seen = Nothing
-        | assignmentCount d /= 1 || Set.member d (aliasRewritten alias) = Nothing
-        | otherwise = case [src | (d', src) <- fnAssignments, d' == d] of
-            [M.Const (M.CFn n)] -> Just n
-            [M.Copy src] -> resolve (Set.insert d seen) src
-            _ -> Nothing
-
 localValue :: M.Local -> MirValue
 localValue local = record "ValueRef::Local" [("local", MInt (localNum local))]
 
@@ -2229,7 +2247,8 @@ typeContainsReferences types = go []
     go _ TByte = False
     go _ TBool = False
     go _ (TWord _ _) = False
-    go _ (TFn _ _) = False
+    go _ TFn{} = False
+    go _ TFnContract{} = False
     -- (a type this cannot see into may hold one)
     go _ _ = True
 
@@ -2397,9 +2416,8 @@ candidatePlaces alias types functions fn = do
         replace src table (root, path)
             | isReference src = memberInsert (root, path) (roots targets src) table
             | otherwise = foldl (\m ((r, sub), points) -> if r == src then memberInsert (root, path ++ sub) points m else m) table (members)
-    calleeAt bid called = case called of
+    calleeAt _ called = case called of
         M.Const (M.CFn name) -> Map.lookup name functions
-        M.Copy l -> (Map.lookup l (Map.findWithDefault Map.empty bid (fnValuesAtEnd alias fn)) <|> Map.lookup l (fnValueLocals alias fn)) >>= (`Map.lookup` functions)
         _ -> Nothing
     call (targets, members) (bid, M.Call called args dest _) = case calleeAt bid called of
         Just callee ->
@@ -2526,13 +2544,12 @@ invariantParents alias types invariants functions fn = close Map.empty
         M.Assign dest (M.MakeData _ fields) -> put parents dest (Set.unions [parentsOf parents source | (_, op) <- fields, Just source <- [operandLocal op]])
         M.Assign dest rv | [op] <- case rv of M.Use value -> [value]; M.CopyOf value -> [value]; M.MakeBox value -> [value]; M.Unbox value -> [value]; M.Deref value -> [value]; M.AsVariant value _ -> [value]; _ -> [], Just source <- operandLocal op -> put parents dest (parentsOf parents source)
         _ -> parents
-    call parents bid (M.Call called args dest _) = case resolved of
+    call parents _ (M.Call called args dest _) = case resolved of
         Just callee -> put parents dest (Set.unions [owner parents source | (param, arg) <- zip (M.fnParams callee) args, param `elem` M.fnFrom callee, Just source <- [operandLocal arg]])
         Nothing -> parents
       where
         resolved = case called of
             M.Const (M.CFn name) -> Map.lookup name functions
-            M.Copy local -> (Map.lookup local (Map.findWithDefault Map.empty bid (fnValuesAtEnd alias fn)) <|> Map.lookup local (fnValueLocals alias fn)) >>= (`Map.lookup` functions)
             _ -> Nothing
     call parents _ _ = parents
     close parents =
@@ -2587,7 +2604,6 @@ data Aliasing = Aliasing
     , aliasRefRoots :: Set.Set M.Local -- the update references among those, which a write can go through
     , aliasHolders :: Set.Set M.Local -- the locals that hold an update reference, or are a reference to something that does
     , aliasCallChanges :: Map.Map M.BlockId [M.Local] -- what the call ending a block may change besides its destination
-    , aliasRewritten :: Set.Set M.Local -- what writes through references and calls may change
     , aliasJoined :: Set.Set M.Local -- the references lent more than one place, or copied from one that is
     , aliasCandidates :: Maybe (RefTargets, RefMembers) -- every place each reference and each held reference may be to, when all of the function is described
     }
@@ -2595,7 +2611,7 @@ data Aliasing = Aliasing
 aliasingOf :: Map.Map Name M.TypeDecl -> Map.Map Name M.Function -> M.Function -> Aliasing
 aliasingOf types functions fn = alias
   where
-    alias = Aliasing tracked escaped escapedPaths unplaced refRoots holders callChanges rewritten joined (candidatePlaces alias types functions fn)
+    alias = Aliasing tracked escaped escapedPaths unplaced refRoots holders callChanges joined (candidatePlaces alias types functions fn)
     blocks = M.fnBlocks fn
     stmts = concatMap M.blockStatements (Map.elems blocks)
     terms = map M.blockTerminator (Map.elems blocks)
@@ -2667,7 +2683,6 @@ aliasingOf types functions fn = alias
                 _ -> []
          in Just (nubOrd (updates ++ heldStale functions alias callee args))
     callChangesOf _ = Nothing
-    rewritten = Set.fromList (concat [changedBy alias st | st@M.AssignRef{} <- stmts] ++ concat (Map.elems callChanges))
 
 -- What a call makes out of date through the references held in what it is
 -- given (a builtin writes through none): every place a reference escaped
@@ -2803,6 +2818,101 @@ definitelyAssigned alias fn = go (Map.insert entry (Set.fromList (M.fnParams fn)
                 Nothing -> old) ins
          in if ins' == ins then ins else go ins' (k - 1)
 
+indirectCallee :: M.Terminator -> Maybe M.Local
+indirectCallee (M.Call op _ _ _) = operandLocal op
+indirectCallee _ = Nothing
+
+fnConversions :: M.Function -> Either String [(Name, Type)]
+fnConversions fn = concat <$> traverse inBlock (Map.elems (M.fnBlocks fn))
+  where
+    inBlock blk = do
+        let valueOperands = case M.blockTerminator blk of
+                M.Call _ args _ _ -> args
+                M.SwitchBool op _ _ -> [op]
+                _ -> []
+        rejectConstants valueOperands
+        concat <$> traverse conversion (M.blockStatements blk)
+    conversion (M.Assign dest (M.Use (M.Const (M.CFn name)))) = case localTypeOf fn dest of
+        Just ty | isJust (fnValueType ty) -> Right [(name, ty)]
+        _ -> Left ("a function pointer without a function type in " ++ M.fnName fn)
+    conversion (M.Assign dest (M.Use source)) | Just src <- operandLocal source,
+        Just a <- localTypeOf fn src, Just b <- localTypeOf fn dest, a /= b,
+        isJust (fnValueType a), isJust (fnValueType b) = Left ("a local function value retyped in " ++ M.fnName fn)
+    conversion stmt = do
+        rejectConstants $ case stmt of
+            M.Assign _ rv -> M.operandsOfRvalue rv
+            M.AssignRef _ path rv -> [i | M.RefIndex i <- path] ++ M.operandsOfRvalue rv
+            M.Peek _ rv -> M.operandsOfRvalue rv
+            _ -> []
+        Right []
+    rejectConstants ops
+        | any containsPointer ops = Left ("a function pointer not materialized with its declared type in " ++ M.fnName fn)
+        | otherwise = Right ()
+    containsPointer (M.Const c) = pointer c
+    containsPointer _ = False
+    pointer M.CFn{} = True
+    pointer (M.CData _ fields) = any (pointer . snd) fields
+    pointer (M.CList xs) = any pointer xs
+    pointer (M.CArray xs) = any pointer xs
+    pointer _ = False
+
+functionShape :: M.Function -> Maybe ([Type], Type)
+functionShape fn = do
+    args <- traverse parameter (M.fnParams fn)
+    (,) args <$> M.fnReturns fn
+  where
+    parameter local = do
+        ty <- localTypeOf fn local
+        pure $ if local `elem` M.fnMutBorrowed fn then TMutRef ty else if local `elem` M.fnBorrowed fn then TRef ty else ty
+
+-- Synthetic proof-only functions isolate the implication from facts at the
+-- conversion site, and let the existing call and return checks prove it.
+conversionWitness :: Map.Map Name M.TypeDecl -> Map.Map Name M.Function -> Int -> (Name, Type) -> Maybe M.Function
+conversionWitness types functions index (name, target) = do
+    (args, result, contract, requires, ensures) <- fnValueSignature types target
+    let params = map M.Local [1 .. length args]
+        argNames = fnParamNames contract
+        env = Map.fromList [(n, M.Copy p) | (n, p) <- zip argNames params, not (null n)]
+        spec = M.emptySpec{M.specEnv = env, M.specRequires = requires, M.specEnsures = ensures}
+        dest = M.Local 0
+        locs = Map.fromList ((dest, M.LocalDecl result Nothing) : [(p, M.LocalDecl (unref ty) (if null n then Nothing else Just n)) | (p, ty, n) <- zip3 params args argNames])
+        callBlocks callee = Map.fromList [(M.BlockId 0, M.BasicBlock [] (M.Call callee (map M.Copy params) dest (M.BlockId 1))), (M.BlockId 1, M.BasicBlock [] M.Return)]
+        borrowed = [p | (p, TRef _) <- zip params args]
+        witness label locals parameters blocks = M.Function
+            { M.fnName = "function conversion " ++ label ++ " #" ++ show index, M.fnParams = parameters, M.fnReturns = Just result
+            , M.fnLocals = locals, M.fnBlocks = blocks, M.fnSizeParams = [], M.fnTypeParams = [], M.fnBorrowed = borrowed
+            , M.fnMutBorrowed = [], M.fnFrom = [], M.fnSpec = spec }
+    callee <- Map.lookup name functions
+    guard (not ("extern " `isPrefixOf` name) && not (isStubName name) && not (mayDivergeFn callee))
+    guard (null (M.fnSizeParams callee) && null (M.fnTypeParams callee) && null (M.fnFrom callee))
+    guard (null (M.specMutParams (M.fnSpec callee)) && null (M.specWrites (M.fnSpec callee)) && null (M.specFrom (M.fnSpec callee)))
+    guard (functionShape callee == Just (args, result))
+    if "builtin::" `isPrefixOf` name
+        then do
+            guard (M.fnParams callee == params && Map.keys (M.fnLocals callee) == Map.keys locs)
+            pure (witness name locs params (M.fnBlocks callee))
+        else pure (witness name locs params (callBlocks (M.Const (M.CFn name))))
+
+-- Contracts say nothing about the call chain. Reject cycles that could go
+-- through a pointer; direct cycles still use their ordinary shrinks checks.
+indirectCycle :: Map.Map Name M.Function -> M.Function -> [(Name, Type)] -> Maybe Name
+indirectCycle fs main conversions = find inIndirectCycle (Map.keys allFns)
+  where
+    allFns = Map.insert (M.fnName main) main fs
+    addressTaken = Map.fromListWith Set.union
+        [(shape, Set.singleton name) | (name, _) <- conversions, Just shape <- [Map.lookup name fs >>= functionShape]]
+    indirectEdges fn = Set.unions
+        [ Map.findWithDefault Set.empty (args, ret) addressTaken
+        | blk <- Map.elems (M.fnBlocks fn), Just local <- [indirectCallee (M.blockTerminator blk)]
+        , Just (args, ret, _) <- [localTypeOf fn local >>= fnValueType] ]
+    indirect = Map.map indirectEdges allFns
+    edges name fn = callNamesOf fn ++ Set.toList (Map.findWithDefault Set.empty name indirect)
+    components = stronglyConnComp [(name, name, edges name fn) | (name, fn) <- Map.toList allFns]
+    cyclic = Set.fromList
+        [ n | CyclicSCC names <- components, let inComponent = Set.fromList names, n <- names
+        , not (Set.null (Map.findWithDefault Set.empty n indirect `Set.intersection` inComponent)) ]
+    inIndirectCycle = (`Set.member` cyclic)
+
 -- The callees of a function, by name.
 callNamesOf :: M.Function -> [Name]
 callNamesOf f = [n | blk <- Map.elems (M.fnBlocks f), M.Call (M.Const (M.CFn n)) _ _ _ <- [M.blockTerminator blk]]
@@ -2884,24 +2994,15 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                     | condLocal == dest && yes == M.loopBody spec -> Just (yes, no, (Eq, M.Copy dest, M.Const (M.CBool True)))
                     | condLocal == dest && no == M.loopBody spec -> Just (no, yes, (Eq, M.Copy dest, M.Const (M.CBool False)))
                 _ -> Nothing
-            name <- case calleeOp of
-                M.Const (M.CFn n) -> Just n
-                M.Copy local -> case Map.lookup local (Map.findWithDefault Map.empty blockId (fnValuesAtEnd alias fn)) of
-                    Just n -> Just n
-                    Nothing -> Map.lookup local (fnValueLocals alias fn)
-                _ -> Nothing
-            (callSteps, posts, heldPosts, b2) <- case Map.lookup name functions of
-                Just callee -> directCall types invariants rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
-                _ -> do
-                    (cs, bb) <- builtinCall (stripBuiltin name) args dest b1
-                    pure (cs, [], [], bb)
+            (callSteps, posts, heldPosts, b2) <- callProof calleeOp args dest b1
             if null posts && null heldPosts && null (callStale calleeOp args) then Just () else Nothing
             (left, b3) <- operand (let (_, a, _) = compare in a) b2
             (right, b4) <- operand (let (_, _, c) = compare in c) b3
             let (r, _, _) = compare
-            (destSteps, b4') <- afterChange endDefined True dest b4
-            (loopExtra, loopEnd, b5) <- encodeLoop spec yes no (M.Local 0) (r, left, right, Nothing, b4')
-            Just (callSteps ++ destSteps ++ loopExtra, loopEnd, b5)
+            (typeFacts, b4') <- typeSteps rules types invariants fn dest b4
+            (destSteps, after) <- afterChange endDefined True dest b4'
+            (loopExtra, loopEnd, b5) <- encodeLoop spec yes no (M.Local 0) (r, left, right, Nothing, after)
+            Just (callSteps ++ typeFacts ++ destSteps ++ loopExtra, loopEnd, b5)
         (Just _, _) -> Nothing
         (Nothing, M.Return) -> do
             -- (a parameter the body reassigns is, in the output contract, the
@@ -2956,43 +3057,16 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                 ending = record "ExecutionEnd::BooleanBranch"
                     [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
             Just ([required], ending, b3)
-        (Nothing, M.Call (M.Copy local) args dest target)
-            | allowCalls
-            , Nothing <- Map.lookup local (Map.findWithDefault Map.empty blockId (fnValuesAtEnd alias fn))
-            , Nothing <- Map.lookup local (fnValueLocals alias fn)
-            , Just candidates <- fnValueCandidates alias fn local
-            , not (null candidates)
-            , all opaqueCallable candidates
-            , Set.null (aliasJoined alias) -> do
-                -- (a call of one of several functions, none of which needs anything of its
-                -- arguments: its result is a value of its type, of which nothing else is known)
-                (argRefs, b2) <- foldM (\(rs, bb) a -> do
-                    (r, bb') <- operand a bb
-                    pure (rs ++ [r], bb')) ([], b1) args
-                let _ = argRefs
-                let stale = filter (/= dest) (callStale (M.Copy local) args)
-                guard (all (checkedWhenStale endDefined (Set.toList (aliasEscaped alias))) stale)
-                (heldSteps, b2') <- havocAll endDefined stale b2
-                (typeFacts, b3) <- typeSteps rules types invariants fn dest b2'
-                (destSteps, b4) <- afterChange endDefined True dest b3
-                Just (heldSteps ++ [step "Havoc" [("local", MInt (toInteger (localNum dest)))]] ++ typeFacts ++ destSteps, jump target, b4)
         (Nothing, M.Call calleeOp args dest target) | allowCalls -> do
-            name <- case calleeOp of
-                M.Const (M.CFn n) -> Just n
-                M.Copy local -> case Map.lookup local (Map.findWithDefault Map.empty blockId (fnValuesAtEnd alias fn)) of
-                    Just n -> Just n
-                    Nothing -> Map.lookup local (fnValueLocals alias fn)
-                _ -> Nothing
-            (callSteps, posts, heldPosts, b') <- case Map.lookup name functions of
-                Just callee | not ("builtin::" `isPrefixOf` name) -> directCall types invariants rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
-                _ -> do
-                    (cs, bb) <- builtinCall (stripBuiltin name) args dest b1
-                    pure (cs, [], [], bb)
+            (callSteps, posts, heldPosts, b') <- callProof calleeOp args dest b1
+            let direct = case calleeOp of
+                    M.Const (M.CFn name) -> Map.lookup name functions
+                    _ -> Nothing
             guard (modelled alias)
-            (mutSteps, b'') <- case Map.lookup name functions of
+            (mutSteps, b'') <- case direct of
                 Just callee -> foldM (versionArg endDefined callee posts) ([], b') (zip (M.fnParams callee) args)
                 _ -> pure ([], b')
-            (heldWrites, written, bw) <- case Map.lookup name functions of
+            (heldWrites, written, bw) <- case direct of
                 Just callee -> foldM (heldArg endDefined callee args) ([], [], b'') heldPosts
                 _ -> pure ([], [], b'')
             -- (what the call may change through references held in what it is given becomes arbitrary, and a local
@@ -3032,20 +3106,16 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             let next = live `Set.union` Set.fromList ([owner | (ref, points) <- Map.toList targets, Set.member ref live, (owner, _) <- points] ++ [owner | ((holder, _), points) <- members, Set.member holder live, (owner, _) <- points] ++ [top | ref <- Set.toList live, let (top, _) = resolveRef (aliasBorrows alias) ref])
              in if next == live then live else closeLive next
         Nothing -> live `Set.union` Set.fromList [top | ref <- Set.toList live, let (top, _) = resolveRef (aliasBorrows alias) ref]
-    -- A function a call can be made to without knowing which: it needs
-    -- nothing of its arguments, changes none of them, returns no reference,
-    -- terminates, and is not the function itself or one that reaches it
-    opaqueCallable name = case Map.lookup name functions of
-        Just callee ->
-            not ("builtin::" `isPrefixOf` name)
-                && null [() | ProofAssert _ <- M.specRequires (M.fnSpec callee)]
-                && null [() | Rewrite _ <- M.specRequires (M.fnSpec callee)]
-                && null (M.specMutParams (M.fnSpec callee))
-                && null (M.specFrom (M.fnSpec callee))
-                && M.specTermination (M.fnSpec callee) /= Just MayDiverge
-                && name /= M.fnName fn
-                && not (reachesName functions fn name (M.fnName fn))
-        Nothing -> False
+    callProof calleeOp args dest b = case calleeOp of
+        M.Const (M.CFn name) -> case Map.lookup name functions of
+            Just callee | not ("builtin::" `isPrefixOf` name) -> directCall types invariants rules fn callee args dest termInfo (reachesName functions fn name (M.fnName fn)) b
+            _ -> do
+                (cs, next) <- builtinCall (stripBuiltin name) args dest b
+                pure (cs, [], [], next)
+        M.Copy local -> do
+            (cs, next) <- indirectCall types rules fn local args dest b
+            pure (cs, [], [], next)
+        _ -> Nothing
     -- The variants that the tests before this block, on the path that reaches
     -- it by their false edges, found the same value not to be, when that path
     -- is the only way into each block on it
@@ -3991,6 +4061,7 @@ encodeMono :: Bool -> M.Program -> Either String [(Name, (MirValue, MirValue, In
 encodeMono physical program
     | Just fn <- find unsupportedFunction allFunctions = Left ("a type of a local, the result or a reference result of " ++ M.fnName fn)
     | Just (name, _) <- find (unsupportedDecl . snd) (Map.toList (M.progTypes program)) = Left ("a field type of " ++ name)
+    | Just (whereUsed, _) <- find (not . validAnnotation . snd) declaredTypes = Left ("an invalid function type contract in " ++ whereUsed)
     | not (null (M.fnParams (M.progMain program))) = Left "a main function with parameters"
     | not (null (M.specRequires mainSpec) && null (M.specEnsures mainSpec)) = Left "a contract on the program itself"
     -- (two modules may each define a function of one source name: their
@@ -4008,19 +4079,36 @@ encodeMono physical program
             types = M.progTypes program
         rules' <- maybe (Left "an axiom or proof rule") Right (collectRules program)
         let encodeOne fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v)) (encodeFunction physical types invariants functions rules' True fn)
-        -- A function with type parameters is a template, checked where a
-        -- call decides its types; a function with bounds the copy step
-        -- kept generic (`$generic`), a check function among them, is
-        -- checked as written, and its copies are not (validated).
-        -- (a builtin used as a value, builtin::first, is a function whose body is
-        -- the builtin: every call of it is checked as the builtin's, so it is not
-        -- checked as a function with no contract)
+        conversions <- fmap (Set.toAscList . Set.fromList . concat) (traverse fnConversions allFunctions)
+        case indirectCycle functions (M.progMain program) conversions of
+            Just name -> Left ("potential recursion through a function value in " ++ name)
+            Nothing -> Right ()
+        witnesses <- traverse (\(index, coercion@(source, _)) ->
+            maybe (Left ("an unsupported function conversion: " ++ show source)) Right (conversionWitness types functions index coercion)) (zip [1 ..] conversions)
+        -- Bounded bodies and their check functions are validated generically, not again in every copy.
         checked <- traverse encodeOne [fn | fn <- Map.elems functions, not (externFunction fn), not ("builtin::" `isPrefixOf` M.fnName fn), validated fn]
+        checkedConversions <- traverse encodeOne witnesses
         main <- encodeOne (M.progMain program)
         let ruleEntries = [("rule " ++ name, v) | entry@(name, _) <- Map.toList rules', Just v <- [encodeRule rules' entry]]
-        pure (checked ++ ruleEntries ++ [main])
+        pure (checked ++ checkedConversions ++ ruleEntries ++ [main])
   where
     allFunctions = M.progMain program : Map.elems (M.progFunctions program)
+    declaredTypes = [(M.fnName f, ty) | f <- allFunctions, ty <- map M.localType (Map.elems (M.fnLocals f)) ++ maybe [] pure (M.fnReturns f)]
+        ++ [(name, ty) | (name, decl) <- Map.toList (M.progTypes program), ty <- case decl of
+                M.StructDecl fields -> map snd fields
+                M.EnumDecl variants -> map snd (concatMap snd variants)]
+    validAnnotation ty = case ty of
+        TFnContract args result c -> isJust (fnContractSpec args result c) && all validAnnotation (result : args)
+        TFn args result -> all validAnnotation (result : args)
+        TNamed _ args -> all validAnnotation [t | ArgType t <- args]
+        TArrayOf t _ -> validAnnotation t
+        TForall _ _ t -> validAnnotation t
+        TRef t -> validAnnotation t
+        TMutRef t -> validAnnotation t
+        TBlock t -> validAnnotation t
+        TAddr t -> validAnnotation t
+        TUninit t -> validAnnotation t
+        _ -> True
     externFunction fn = "extern " `isPrefixOf` M.fnName fn
     -- (a function with bounds is checked once, generically, and its copies are not; a trait's stub is the trait's contract,
     -- which the trait's impls are checked against, and is not checked itself)

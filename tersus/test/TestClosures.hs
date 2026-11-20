@@ -1,6 +1,7 @@
 module TestClosures (testClosures, closureAdder, closureCounter, closureModuleFiles) where
 
 import qualified MirEval
+import Pipeline (compileSource)
 import Syntax
 import TestHarness
 import Utils (Result (..), bindResult)
@@ -14,6 +15,10 @@ testClosures =
         runs src expected = parseEvalProgramHelper src (Just (VInt expected))
         valid src = parseValidProgramHelper src
         rejected src expected = parseValidateFailProgramHelper src expected
+        checked src result = testAssertEq (compileSource src `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt result)))
+        rejects src expected = testAssertErrorContains expected (compileSource src)
+        increment = "fn step(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n + 1; }] { return n + 1; }; "
+        positiveStep = "fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }]"
      in TestList
             "testClosures"
             [ testCase "a function object through an Fn bound, called as f(x)" (runs (adder ++ "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; a = Adder { n: 10 }; return apply(&a, 5);") 15)
@@ -103,6 +108,49 @@ testClosures =
                             , ("app/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
                             ]
                     pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
+                ]
+            , TestList
+                "thin function contracts"
+                [ testCase "conversion checks weaker precondition and stronger postcondition with positional names"
+                    (checked (increment ++ "let f: " ++ positiveStep ++ " = step; r = f(41); affirm r > 41; return r;") 42)
+                , testCase "different argument names and positions are preserved at call"
+                    (checked ("fn sub(a: Int, b: Int) -> Int [{ affirm a > b; }] [{ affirm return = a - b; }] { return a - b; }; let f: fn(x: Int, y: Int) -> Int [{ affirm x > y; }] [{ affirm return = x - y; }] = sub; r = f(43, 1); affirm r = 42; return r;") 42)
+                , testCase "an indirect call must meet the declared precondition"
+                    (rejects (increment ++ "let f: " ++ positiveStep ++ " = step; return f(0);") "x > 0")
+                , testCase "a stronger advertised result is refused at conversion, even without a call"
+                    (rejects (increment ++ "let f: fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x + 5; }] = step; return 0;") "function conversion")
+                , testCase "the caller cannot use the known named target's stronger postcondition"
+                    (rejects (increment ++ "let f: fn(x: Int) -> Int [{ affirm x > 0; }] [{ }] = step; r = f(41); affirm r > 41; return r;") "r > 41")
+                , testCase "implicit inference cannot discard a needed precondition"
+                    (rejects (increment ++ "let f = step; return 0;") "function conversion")
+                , testCase "an uncontracted parameter cannot receive a preconditioned function"
+                    (rejects (increment ++ "fn ignore(f: fn(Int) -> Int) -> Int { return 0; }; return ignore(step);") "function conversion")
+                , testCase "a return cannot discard a needed precondition"
+                    (rejects (increment ++ "fn give() -> fn(Int) -> Int { return step; }; return 0;") "function conversion")
+                , testCase "field construction cannot discard a needed precondition"
+                    (rejects (increment ++ "struct Holder { f: fn(Int) -> Int }; h = Holder { f: step }; return 0;") "function conversion")
+                , testCase "list inference cannot discard a needed precondition"
+                    (rejects (increment ++ "xs = push([], step); return 0;") "function conversion")
+                , testCase "branch selection cannot discard a needed precondition"
+                    (rejects (increment ++ "fn id(x: Int) -> Int { return x; }; f = if argCount() > 1 { step } else { id }; return 0;") "function conversion")
+                , testCase "an indirect result is unknown across multiple ordinary targets"
+                    (checked "fn a(x: Int) -> Int { return x + 1; }; fn b(x: Int) -> Int { return x + 2; }; f = a; if 1 > 0 { f = b; }; return f(40);" 42)
+                , testCase "a declared contract survives return and concrete field storage"
+                    (checked (increment ++ "struct Holder { f: " ++ positiveStep ++ " }; fn give() -> (" ++ positiveStep ++ ") { return step; }; h = Holder { f: give() }; f = h.f; r = f(41); affirm r > 41; return r;") 42)
+                , testCase "a plain function value meets Fn"
+                    (checked "fn inc(x: Int) -> Int { return x + 1; }; fn use<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; g = inc; return use(g, 41);" 42)
+                , testCase "a function value meets a contracted Fn bound by proof"
+                    (checked (increment ++ "fn use<F: Fn(arg: Int) -> Int [{ affirm arg > 0; }] [{ affirm return > arg; }]>(f: &F, x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return f(x); }; let g: " ++ positiveStep ++ " = step; return use(g, 41);") 42)
+                , testCase "an Fn bound cannot discard a function value precondition"
+                    (rejects (increment ++ "fn use<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; let g: " ++ positiveStep ++ " = step; return use(g, 41);") "Could not prove")
+                , testCase "a builtin through a pointer checks its declared input at the call"
+                    (rejects "let f: fn(xs: &List<Int>) -> Int [{ affirm size(xs) > 0; }] = first; let xs: List<Int> = []; return f(xs);" "size(xs) > 0")
+                , testCase "a plain function value meets FnMut and FnOnce"
+                    (checked "fn inc(x: Int) -> Int { return x + 1; }; fn mutate<F: FnMut(Int) -> Int>(f: &mut F) -> Int { return f(19); }; fn once<F: FnOnce(Int) -> Int>(f: F) -> Int { return f(21); }; p = inc; return mutate(p) + once(p);" 42)
+                , testCase "termination cannot be justified by hiding recursion through a callback"
+                    (rejects "fn apply(f: fn() -> Int) -> Int { return f(); }; fn cycle() -> Int { return apply(cycle); }; return cycle();" "potential recursion through a function value")
+                , testCase "an indirect world reader does not give a deterministic result to its callers"
+                    (rejects "fn read() -> Int { return readByte(); }; fn invoke(f: fn() -> Int) -> Int { return f(); }; f = read; a = invoke(f); b = invoke(f); affirm a = b; return 0;" "a = b")
                 ]
             , TestList
                 "higher-order library"

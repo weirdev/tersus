@@ -28,6 +28,7 @@ module Mir
     , completeInstances
     , completeErasedInstances
     , readersOfInput
+    , callsThroughFunctionBound
     , functionsNamed
     , slotsOf
     , dropFunction
@@ -46,7 +47,7 @@ module Mir
     , renderRvalue
     ) where
 
-import Data.List (intercalate)
+import Data.List (intercalate, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (listToMaybe)
@@ -57,7 +58,7 @@ import Text.ParserCombinators.ReadPrec (lift)
 import Text.Read (readPrec)
 import qualified Data.Set as Set
 import Types (Arg (..), Name, Rel (..), Type (..), Variable, instanceFields, instanceName, tupleGeneric, Size (..), pattern TArray, pattern TList, pattern TBox)
-import Syntax (Termination (..), ValidationStatement (..), RwRule (..), Expression, VariableProof, exprToProof)
+import Syntax (Termination (..), ValidationStatement (..), RwRule (..), Expression, VariableProof, exprToProof, parseImplCheckName)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
 -- expressions left. It follows Rust's MIR where Tersus is like Rust: a function is blocks of simple statements, each
@@ -360,6 +361,7 @@ completeInstancesWith erased program
         TRef t -> namedArgs t
         TMutRef t -> namedArgs t
         TFn args ret -> concatMap namedArgs (ret : args)
+        TFnContract args ret _ -> concatMap namedArgs (ret : args)
         TForall _ _ t -> namedArgs t
         _ -> []
     go types _ [] = types
@@ -394,6 +396,7 @@ completeInstancesWith erased program
         TRef t -> typeNames t
         TMutRef t -> typeNames t
         TFn args ret -> concatMap typeNames (ret : args)
+        TFnContract args ret _ -> concatMap typeNames (ret : args)
         TForall _ _ t -> typeNames t
         _ -> []
     rvalueNames rv = case rv of
@@ -674,17 +677,26 @@ renderTerminator Unreachable = "unreachable;"
 readsWorldOp :: ListOp -> Bool
 readsWorldOp op = op `elem` [ReadByte, ArgCount, ArgByte, PathByte, FileLoad, FileByte, StoreByte, FileStore, AddrAlloc, AddrResize, BlockAssume]
 
--- The functions of the program that read the standard input or the arguments (`readByte`, `argCount`, `argByte`), or call or mention one that does. What such a function gives is not
--- determined by its arguments, so a validator may not say that two calls with the same arguments give the same value.
+-- A function value or a generic function-trait stub can dispatch to a world reader.
+callsThroughFunctionBound :: Name -> Bool
+callsThroughFunctionBound name = case parseImplCheckName name of
+    Just (trait, "$Self", "call") -> any (`isPrefixOf` trait) ["Fn$", "FnMut$", "FnOnce$"]
+    _ -> False
+
+-- The functions that may read the world, directly or through a function they mention. Their return
+-- values are not determined by their arguments alone.
 readersOfInput :: Program -> Set.Set Name
-readersOfInput program = grow (Set.fromList [name | (name, fn) <- functions, any reads (statementsOf fn)])
+readersOfInput program = grow (Set.fromList [name | (name, fn) <- functions, callsThroughFunctionBound name || any reads (Map.elems (fnBlocks fn))])
   where
     functions = Map.toList (progFunctions program)
-    reads s = case s of
+    reads (BasicBlock stmts term) = indirect term || any readsStatement stmts
+    indirect (Call (Const (CFn _)) _ _ _) = False
+    indirect Call{} = True
+    indirect _ = False
+    readsStatement s = case s of
         Assign _ (ListOp op _) -> readsWorldOp op
         Peek _ (ListOp op _) -> readsWorldOp op
         _ -> False
-    statementsOf fn = concatMap blockStatements (Map.elems (fnBlocks fn))
     -- (the functions that a function names, as the callee of a call or anywhere a value is used: the same relation `SelfHostedMir.inputReadersOf` grows its set over)
     mentions = functionsNamed
     grow known =
