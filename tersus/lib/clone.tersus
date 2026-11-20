@@ -55,3 +55,162 @@ fn cloneBoxedArray<T: Clone>(b: &Box<Array<T>>) -> Box<Array<T>> [{ }] [{ affirm
     };
     return Box::new(Array::fromList(out));
 };
+
+// Higher-order functions over lists and arrays, written with the function-trait bounds of the closures
+// plan (Phase 3): each takes its closure through an Fn bound, as a free function in the way size and get
+// are free functions. An element is cloned out of the sequence to give to the closure, so the element
+// type is Clone. What a caller can prove is said without calling the closure: map keeps the size,
+// filter and its array form keep at most the size, find gives an index in range or -1, and a sort
+// keeps the size.
+
+fn map<T: Clone, U, F: Fn(T) -> U>(xs: &List<T>, func: &F) -> List<U> [{ }] [{ affirm size(return) = size(xs); }] {
+    out = [];
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); affirm size(out) = i; }] shrinks size(xs) - i {
+        out = push(out, func(get(xs, i).clone()));
+        i = i + 1;
+    };
+    return out;
+};
+
+fn filter<T: Clone, F: Fn(T) -> Bool>(xs: &List<T>, func: &F) -> List<T> [{ }] [{ affirm size(return) <= size(xs); }] {
+    out = [];
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); affirm size(out) <= i; }] shrinks size(xs) - i {
+        if func(get(xs, i).clone()) { out = push(out, get(xs, i).clone()); };
+        i = i + 1;
+    };
+    return out;
+};
+
+fn fold<T: Clone, A, F: Fn(A, T) -> A>(xs: &List<T>, init: A, func: &F) -> A [{ }] [{ }] {
+    acc = init;
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); }] shrinks size(xs) - i {
+        acc = func(acc, get(xs, i).clone());
+        i = i + 1;
+    };
+    return acc;
+};
+
+fn any<T: Clone, F: Fn(T) -> Bool>(xs: &List<T>, func: &F) -> Bool [{ }] [{ }] {
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); }] shrinks size(xs) - i {
+        if func(get(xs, i).clone()) { return true; };
+        i = i + 1;
+    };
+    return false;
+};
+
+fn all<T: Clone, F: Fn(T) -> Bool>(xs: &List<T>, func: &F) -> Bool [{ }] [{ }] {
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); }] shrinks size(xs) - i {
+        if !func(get(xs, i).clone()) { return false; };
+        i = i + 1;
+    };
+    return true;
+};
+
+fn find<T: Clone, F: Fn(T) -> Bool>(xs: &List<T>, func: &F) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(xs); }] {
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); }] shrinks size(xs) - i {
+        if func(get(xs, i).clone()) { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+fn sortBy<T: Clone, F: Fn(T, T) -> Bool>(xs: &List<T>, less: &F) -> List<T> [{ }] [{ affirm size(return) = size(xs); }] {
+    out = xs.clone();
+    n = size(out);
+    i = 0;
+    while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = n; }] shrinks n - i {
+        j = 0;
+        while j + 1 < n - i [{ affirm j >= 0; affirm size(out) = n; }] shrinks n - j {
+            if less(get(out, j + 1).clone(), get(out, j).clone()) {
+                tmp = get(out, j).clone();
+                out = set(out, j, get(out, j + 1).clone());
+                out = set(out, j + 1, tmp);
+            };
+            j = j + 1;
+        };
+        i = i + 1;
+    };
+    return out;
+};
+
+fn mapArray<T: Clone, U, F: Fn(T) -> U, n>(xs: &Array<T, n>, func: &F) -> Array<U, n> [{ }] [{ affirm size(return) = size(xs); }] {
+    out = [];
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); affirm size(out) = i; }] shrinks size(xs) - i {
+        out = push(out, func(get(xs, i).clone()));
+        i = i + 1;
+    };
+    return Array::fromList(out);
+};
+
+fn filterArray<T: Clone, F: Fn(T) -> Bool, n>(xs: &Array<T, n>, func: &F) -> List<T> [{ }] [{ affirm size(return) <= size(xs); }] {
+    out = [];
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); affirm size(out) <= i; }] shrinks size(xs) - i {
+        if func(get(xs, i).clone()) { out = push(out, get(xs, i).clone()); };
+        i = i + 1;
+    };
+    return out;
+};
+
+fn foldArray<T: Clone, A, F: Fn(A, T) -> A, n>(xs: &Array<T, n>, init: A, func: &F) -> A [{ }] [{ }] {
+    acc = init;
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); }] shrinks size(xs) - i {
+        acc = func(acc, get(xs, i).clone());
+        i = i + 1;
+    };
+    return acc;
+};
+
+fn anyArray<T: Clone, F: Fn(T) -> Bool, n>(xs: &Array<T, n>, func: &F) -> Bool [{ }] [{ }] {
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); }] shrinks size(xs) - i {
+        if func(get(xs, i).clone()) { return true; };
+        i = i + 1;
+    };
+    return false;
+};
+
+fn allArray<T: Clone, F: Fn(T) -> Bool, n>(xs: &Array<T, n>, func: &F) -> Bool [{ }] [{ }] {
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); }] shrinks size(xs) - i {
+        if !func(get(xs, i).clone()) { return false; };
+        i = i + 1;
+    };
+    return true;
+};
+
+fn findArray<T: Clone, F: Fn(T) -> Bool, n>(xs: &Array<T, n>, func: &F) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(xs); }] {
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); }] shrinks size(xs) - i {
+        if func(get(xs, i).clone()) { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+fn sortArrayBy<T: Clone, F: Fn(T, T) -> Bool, n>(xs: &Array<T, n>, less: &F) -> Array<T, n> [{ }] [{ affirm size(return) = size(xs); }] {
+    out = xs.clone();
+    m = size(out);
+    i = 0;
+    while i < m [{ affirm i >= 0; affirm i <= m; affirm size(out) = m; }] shrinks m - i {
+        j = 0;
+        while j + 1 < m - i [{ affirm j >= 0; affirm size(out) = m; }] shrinks m - j {
+            if less(get(out, j + 1).clone(), get(out, j).clone()) {
+                tmp = get(out, j).clone();
+                out = set(out, j, get(out, j + 1).clone());
+                out = set(out, j + 1, tmp);
+            };
+            j = j + 1;
+        };
+        i = i + 1;
+    };
+    return out;
+};

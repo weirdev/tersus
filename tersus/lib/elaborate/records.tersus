@@ -210,6 +210,10 @@ fn nativeFn(nodes: &List<AstNode>, v: Int) -> NativeFn ~ {
     return NativeFn { ok: true, ps: f.ps, ins: f.ins, outs: f.outs, body: f.body, exports: f.exports, sig: nf.sig, term: nf.term, stmts: nf.stmts };
 };
 
+fn childRefs(node: &AstNode) -> List<Int> [{ }] [{ }] {
+    return nodeRefs(node);
+};
+
 // Whether a variable of this name is read anywhere under a node (as an expression or a proof term)
 fn mentionsVariable(nodes: &List<AstNode>, root: Int, name: &String) -> Bool ~ {
     todo = push([], root);

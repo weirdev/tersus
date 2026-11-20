@@ -43,6 +43,71 @@ testClosures =
                         "app/main.tersus"
                         closureModuleFiles
                 pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
+            , TestList
+                "closures"
+                [ testCase "a closure reads a Copy capture, copied at creation" (runs "n = 10; f = fn(x: Int) -> Int => x + n; return f(5);" 15)
+                , testCase "a copied capture does not see a later update" (runs "n = 1; f = fn(x: Int) -> Int => x + n; n = 100; return f(1);" 2)
+                , testCase "a closure borrows a read-only list capture" (runs "xs = push(push([], 1), 2); f = fn() -> Int => size(xs); return f() * 10 + size(xs);" 22)
+                , testCase "a closure that updates a capture is called directly" (runs "count = 0; f = fn() -> Int { count = count + 1; return count; }; a = f(); return a * 10 + count;" 11)
+                , testCase "an updating closure called directly twice, checked" (valid "count = 0; f = fn() -> Int { count = count + 1; return count; }; a = f(); b = f(); return a * 100 + b * 10 + count;")
+                , testCase "an updating closure through an FnMut bound" (runs "fn once<F: FnMut() -> Int>(f: &mut F) -> Int { return f(); }; count = 0; c = fn() -> Int { count = count + 1; return count; }; return once(&mut c) * 10 + count;" 11)
+                , testCase "an updating closure through an FnMut bound twice, checked" (valid "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; count = 0; c = fn() -> Int { count = count + 1; return count; }; return twice(&mut c) * 100 + count;")
+                , testCase "a read-only closure meets an FnMut bound" (runs "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; n = 1; c = fn() -> Int => n; return twice(&mut c);" 11)
+                , testCase "types are inferred from the bound" (runs "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; return apply(fn(x) => x * 2, 21);" 42)
+                , testCase "a type is inferred from the other arguments and the result" (runs "fn applyAt<T, F: Fn(T) -> T>(f: &F, x: T) -> T { return f(x); }; return applyAt(fn(x) => x, 41);" 41)
+                , testCase "a closure argument is checked after the other arguments" (runs "fn apply2<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; return apply2(fn(x) => x + 1, 41);" 42)
+                , testCase "an expression body and a block body agree" (runs "f = fn(x: Int) -> Int => x + 1; g = fn(x: Int) -> Int { return x + 1; }; return f(10) * 100 + g(10);" 1111)
+                , testCase "a missing parameter type with no bound is an error" (rejected "f = fn(x) -> Int => x; return 0;" "write the type of x: nothing here says what this closure takes")
+                , testCase "an updating closure does not meet an Fn bound" (rejected "fn apply<F: Fn() -> Int>(f: &F) -> Int { return f(); }; count = 0; c = fn() -> Int { count = count + 1; return count; }; return apply(&c);" "is FnMut and cannot be given where Fn(...) is wanted")
+                , testCase "an updating closure given directly does not meet an Fn bound" (rejected "fn apply<F: Fn() -> Int>(f: &F) -> Int { return f(); }; count = 0; return apply(fn() -> Int { count = count + 1; return count; });" "updates count, so it is FnMut")
+                , testCase "a closure moves a captured list out, as FnOnce" (runs "fn useOnce<F: FnOnce() -> List<Int>>(f: F) -> Int { ys = f(); return size(ys); }; xs = push(push([], 1), 2); f = fn() -> List<Int> => xs; return useOnce(f);" 2)
+                , testCase "a moving closure does not meet an Fn bound" (rejected "fn apply<F: Fn() -> List<Int>>(f: &F) -> Int { ys = f(); return size(ys); }; xs = push([], 1); return apply(fn() -> List<Int> => xs);" "moves xs out, so it is FnOnce")
+                , testCase "move captures by value, and an update changes the closure's own copy" (runs "n = 1; f = move fn() -> Int { n = n + 1; return n; }; a = f(); return a * 10 + n;" 21)
+                , testCase "move captures a list by value" (runs "xs = push(push([], 1), 2); f = move fn() -> Int => size(xs); return f();" 2)
+                , testCase "a capture-only clause is the closure's invariant" (runs "n = 5; step = fn(x: Int) -> Int [{ affirm n > 0; }] [{ affirm return > x; }] => x + n; return step(1);" 6)
+                , testCase "the invariant is proved where the closure is made" (rejected "n = 0 - 5; step = fn(x: Int) -> Int [{ affirm n > 0; }] [{ affirm return > x; }] => x + n; return step(1);" "Could not prove")
+                , testCase "a closure meets two bounds with two impls over one body" (runs "fn asFn<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; fn asOnce<F: FnOnce(x: Int) -> Int>(f: F, x: Int) -> Int { return f(x); }; f = fn(x: Int) -> Int => x + 1; return asFn(&f, 10) * 100 + asOnce(f, 10);" 1111)
+                , testCase "a borrowed capture goes through a bound" (runs "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; xs = push(push([], 1), 2); f = fn(x: Int) -> Int => x + size(xs); return apply(&f, 10);" 12)
+                , testCase "a let-bound variable is captured" (runs "let n = 10; f = fn() -> Int => n; return f();" 10)
+                , testCase "a closure in a method reads the receiver" (runs "struct P { n: Int }; impl P { fn get(self: &Self) -> Int { f = fn() -> Int => self.n; return f(); }; }; p = P { n: 7 }; return p.get();" 7)
+                , testCase "a parameter named fn is a variable, not a closure" (runs "struct P { items: List<Int> }; fn count(fn: &P) -> Int { return size(fn.items); }; p = P { items: push(push([], 1), 2) }; return count(&p);" 2)
+                , testCase "a variable named fn used bare" (runs "fn len(fn: &List<Int>) -> Int { return size(fn); }; xs = push(push([], 7), 8); return len(&xs);" 2)
+                , testCase "a closure over a type parameter of the enclosing function" (runs "fn countOf<T>(xs: &List<T>, n: Int) -> Int { f = fn() -> Int => size(xs) + n; return f(); }; return countOf(push(push([], 1), 2), 10);" 12)
+                , TestCase "many functions with lets and fn parameters" $ do
+                    let defs = concat [ "fn f" ++ show i ++ "(fn: &List<Int>) -> Int { let a = size(fn); let b = a + " ++ show i ++ "; return b; }; " | i <- [1 .. 40 :: Integer] ]
+                        calls = concat [ "f" ++ show i ++ "(&xs) + " | i <- [1 .. 40 :: Integer] ]
+                        src = defs ++ "xs = push(push([], 1), 2); return " ++ calls ++ "0;"
+                        expected = sum [ 2 + i | i <- [1 .. 40 :: Integer] ]
+                    pure (runs src expected)
+                , TestCase "a closure across modules" $ do
+                    program <-
+                        programFromFiles
+                            "app/main.tersus"
+                            [ ("app/package.tersus", "")
+                            , ("app/main.tersus", "import app::apply; n = 10; return apply::apply(fn(x) => x + n, 5);")
+                            , ("app/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
+                            ]
+                    pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
+                ]
+            , TestList
+                "higher-order library"
+                [ testCase "map doubles a list" (runs "xs = push(push(push([], 1), 2), 3); ys = map(xs, fn(x) => x * 2); return get(ys, 2) * 10 + size(ys);" 63)
+                , testCase "map with a capturing closure" (runs "factor = 3; xs = push(push([], 1), 2); ys = map(xs, fn(x) => x * factor); return get(ys, 1) * 10 + size(ys);" 62)
+                , testCase "map with a named function" (runs "fn double(x: Int) -> Int { return x * 2; }; xs = push(push([], 1), 2); ys = map(xs, double); return get(ys, 1) * 10 + size(ys);" 42)
+                , testCase "a caller proves with map's size contract" (runs "fn sameSize(xs: &List<Int>) -> Int [{ }] [{ affirm return = size(xs); }] { return size(map(xs, fn(x) => x * 2)); }; return sameSize(push(push([], 1), 2));" 2)
+                , testCase "filter keeps what passes" (runs "xs = push(push(push([], 1), 2), 3); ys = filter(xs, fn(x) => x > 1); return size(ys) * 10 + get(ys, 0);" 22)
+                , testCase "a caller proves with filter's size contract" (runs "fn keptAtMost(xs: &List<Int>) -> Int [{ }] [{ affirm return <= size(xs); }] { return size(filter(xs, fn(x) => x > 0)); }; return keptAtMost(push(push([], 1), 2));" 2)
+                , testCase "fold sums and multiplies" (runs "xs = push(push(push([], 1), 2), 3); return fold(xs, 0, fn(acc, x) => acc + x) * 10 + fold(xs, 1, fn(acc, x) => acc * x);" 66)
+                , testCase "fold over an empty list is the init" (runs "xs = []; return fold(xs, 41, fn(acc: Int, x: Int) => acc + x) + size(xs);" 41)
+                , testCase "any and all" (runs "xs = push(push(push([], 1), 2), 3); r = 0; if any(xs, fn(x) => x > 2) { r = r + 10; }; if all(xs, fn(x) => x > 0) { r = r + 1; }; if any(xs, fn(x) => x > 9) { r = r + 100; }; return r;" 11)
+                , testCase "find gives the index or -1" (runs "xs = push(push(push([], 1), 2), 3); return find(xs, fn(x) => x = 2) * 10 + find(xs, fn(x) => x > 9) + 1;" 10)
+                , testCase "sortBy sorts ascending and descending" (runs "xs = push(push(push([], 3), 1), 2); up = sortBy(xs, fn(a, b) => a < b); down = sortBy(xs, fn(a, b) => a > b); return get(up, 0) * 1000 + get(up, 2) * 100 + get(down, 0) * 10 + size(up);" 1333)
+                , testCase "an updating closure does not meet map's Fn bound" (rejected "xs = push([], 1); count = 0; ys = map(xs, fn(x) -> Int { count = count + 1; return x; }); return 0;" "is FnMut and cannot be given where Fn(...) is wanted")
+                , testCase "mapArray doubles an array" (runs "a = #[1, 2, 3]; doubled = mapArray(a, fn(x) => x * 2); return get(doubled, 2) * 10 + size(doubled);" 63)
+                , testCase "filterArray gives a list" (runs "a = #[1, 2, 3]; big = filterArray(a, fn(x) => x > 1); return size(big) * 10 + get(big, 0);" 22)
+                , testCase "foldArray, findArray, anyArray, allArray" (runs "a = #[1, 2, 3]; r = foldArray(a, 0, fn(acc, x) => acc + x) * 100 + findArray(a, fn(x) => x = 2) * 10; if anyArray(a, fn(x) => x > 2) { r = r + 2; }; if allArray(a, fn(x) => x > 0) { r = r + 1; }; return r;" 613)
+                , testCase "sortArrayBy sorts an array" (runs "a = #[3, 1, 2]; sorted = sortArrayBy(a, fn(x, y) => x < y); return get(sorted, 0) * 100 + get(sorted, 2) * 10 + size(sorted);" 133)
+                ]
             ]
 
 closureAdder :: String
