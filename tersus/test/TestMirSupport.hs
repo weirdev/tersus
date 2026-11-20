@@ -120,9 +120,9 @@ emitterFileLayout (loaded, compiled, program) = firstFailure
     , testAssertEq (length [m | m <- Package.compiledModules compiled, Package.compiledModuleId m == entryId]) 1
     , testAssertEq [name | file <- files, S.Assign name (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]
         [name | file <- files, S.Assign name (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file), '$' `notElem` name]
-    , testAssertEq (length [() | file <- files, S.Assign _ (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]) 156
+    , testAssertEq (length [() | file <- files, S.Assign _ (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]) 157
     , testAssertEq (Set.fromList [name | file <- files, S.StructDef name _ _ _ <- fileBody (Mod.loadedParsed file)])
-        (Set.fromList ["Held", "Entry", "Gen", "Sig", "Ctor", "Ctx", "LT", "LTG", "CtorAt", "FnOut", "Storage"])
+        (Set.fromList ["Held", "EmitResult", "Gen", "Sig", "Ctor", "Ctx", "LT", "LTG", "CtorAt", "FnOut", "Storage"])
     , testAssertEq (all (`Map.member` M.progFunctions program) ["ir", "outline", "bodies", "fieldOffset", "operandValue", "emitStatement", "emitFunction", "<String>::then"]) True
     , firstFailure
         [ testAssertEq (Set.fromList [stem | ri <- Mod.loadedImports file, Mod.resolvedTargetModule ri == entryId, Just stem <- [Mod.resolvedTargetFile ri]]) (Set.fromList expected)
@@ -137,8 +137,8 @@ emitterFileLayout (loaded, compiled, program) = firstFailure
 phaseLocalOwners :: (Mod.LoadedPackage, Package.CompiledPackage, M.Program) -> TestResult
 phaseLocalOwners (loaded, _, _) = firstFailure
     [ testAssertEq [Mod.loadedFileStem file | file <- files, name `elem` Mod.loadedDeclNames file]
-        (if phase == Just "mir_erase" && name `elem` ["global", "slotsOf"] then [] else [owner])
-    | name <- ["layoutOf", "fieldsLayout", "global", "slotsOf", "<String>::then"] ++ ["Held" | phase == Just "emit"]
+        (if phase == Just "mir_erase" && name `elem` ["global", "slotsOf"] then [] else [if name `elem` ["EmitResult", "readEmitterInput"] then "emit" else owner])
+    | name <- ["layoutOf", "fieldsLayout", "global", "slotsOf", "<String>::then"] ++ (if phase == Just "emit" then ["Held", "EmitResult", "readEmitterInput"] else [])
     ]
   where
     phase = Mod.moduleName (Mod.packageEntryModule loaded)

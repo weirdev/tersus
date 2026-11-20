@@ -1,7 +1,7 @@
 import data::codec::codec { Token, Parsed, Size, Type, hexValue, quoted, catStrings, renderTypeForName, printInt, printName, printNames, newLine, printType };
 import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram, printBool, printAst };
 import data::arena::arena { reorderArena, nodeChildren };
-import parser::syntax::unicode { parserUnicodeAlphaNum, parserUnicodeLetter, parserUnicodeLower, parserUnicodeUpper };
+import data::unicode::unicode { parserUnicodeAlphaNum, parserUnicodeLetter, parserUnicodeLower, parserUnicodeUpper };
 
 // The Tersus parser, written in Tersus, as declarations: the driver (lib/parser/parser.tersus) runs its host protocols, and the
 // elaborator parses with it in process. It writes the AST as data (`tersus-ast 1 parsed`, AST_DATA.md), using the shared

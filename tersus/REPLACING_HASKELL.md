@@ -136,9 +136,9 @@ validate -> eraseGhosts -> expandRefWrites -> lowerLists
          -> monomorphize -> ownership -> verifyProgram -> emitter
 ```
 
-The host's `insertOwnership` calls `MirMono.monomorphize` before invoking the
-Tersus ownership pass. The reference-write entry point runs earlier; moving
-monomorphization itself remains separate work. Reference-write expansion
+The host's `insertOwnership` invokes native monomorphization before native
+ownership through the selected emitter. The reference-write entry point runs
+earlier. Reference-write expansion
 rebuilds logical fields and sequences before list operations become helper
 calls, while generic function bodies still contain symbolic types and sizes.
 Assignments through reference-typed roots remain reference writes for the
@@ -186,14 +186,25 @@ must also stay within the agreed performance budget against the same-host base.
 
 ### 1. Native monomorphization
 
-Replace `MirMono.monomorphize` after the ownership gates pass. (`MirCopies`, the copy
-step of functions with bounds, runs before it at link time and makes copies the
-same way, from MIR; MIR.md, "The copy step".) Its baseline is
-276 lines, but it needs a data
-contract for generic type templates and type/size substitution, reachable
-instances, and implicit Drop instantiation. `monomorphizeForValidation` preserves
-contracts and serves `SelfHostedMir`; moving the native path does not authorize
-stripping that validation metadata or deleting the validation path.
+`lib/mir/mono/` implements native specialization over the complete MIR3 codec
+in `lib/mir/full/`. Linking and pruning remain in Haskell. The emitter accepts
+`pass mono`; the host adapter is `MirHousekeeping.monomorphizeWith`.
+The matching published seed runs this pass during cold bootstrap. The native
+Haskell binding and finisher are removed; validation specialization is retained.
+
+The pass substitutes types and sizes, builds reachable instances and preserves
+implicit Drop instantiation. Canonical declaration and selector keys are
+separate from ordinary function-argument rendering, and final-name collisions
+retain the Haskell structural-key precedence. The no-generic path preserves
+all proof metadata; otherwise only function specifications and ghosts are
+removed before completing erased declarations.
+
+`TestMirMono` checks canonical raw output, raw and actual pre-native-stage
+corpus inputs, metadata, refusals and mutation controls. The current
+`testHostValidation:emitter` group validates its functions.
+`monomorphizeForValidation` and its shared helpers, cached named-type map,
+contracts and ghost environments stay in Haskell. `MirCopies` still runs
+before native specialization at link time.
 
 ### 2. Elaboration and the package frontend
 
@@ -561,7 +572,7 @@ P1 and P0 for the parser's own tests, its fixpoint, `dev/parser-seed` and
 link). The module request's `package` section is gone on both sides. The CLI
 compiles a package from one `package` load of its snapshot.
 
-The parser's Unicode classifier (`lib/parser/syntax/unicode.tersus`) is checked
+The parser's Unicode classifier (`lib/data/unicode/unicode.tersus`) is checked
 in, pinned to Unicode 15.0 (`dev/parser-unicode/generate.py` refuses another
 version), and the frontend fingerprint covers it: it was generated from the
 tables of the GHC that built the compiler, so F0, now the parser of every

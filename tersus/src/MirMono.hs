@@ -1,8 +1,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 
 module MirMono
-    ( monomorphize
-    , monomorphizeForValidation
+    ( monomorphizeForValidation
     ) where
 
 import Data.List (intercalate)
@@ -24,24 +23,9 @@ import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox,
 -- parameters replaced by the constants. A call gives a constant, or a size parameter of the function that calls, which the copy of
 -- that one has replaced, so the copies there are to make are those that the program reaches, and there are finitely many (a size is
 -- never worked out from others). A program with no function of the kind is returned as it is.
-monomorphize :: Program -> Program
-monomorphize = monoWith unspecifiedFunction completeErasedInstances
-
--- The copies a call decides, with the contracts and ghost statements
--- kept: what a validator is given, since it checks the copies by the
--- contracts the template declares (native code is given the copies
--- with them stripped, by monomorphize).
+-- The copies a call decides, with contracts and ghost statements kept for validation.
 monomorphizeForValidation :: Program -> Program
 monomorphizeForValidation = monoWith id completeInstances
-
--- A function with its contracts and ghost statements stripped, as
--- native code is given a copy
-unspecifiedFunction :: Function -> Function
-unspecifiedFunction f = f{fnSpec = emptySpec, fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock [s | s <- stmts, not (isGhost s)] term) (fnBlocks f)}
-  where
-    isGhost s = case s of
-        Ghost _ _ -> True
-        _ -> False
 
 -- (native code is given its structs without their permissions, which the
 -- validator reads)

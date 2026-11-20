@@ -14,7 +14,7 @@ import System.Process (CreateProcess (..), StdStream (..), getPid, proc, waitFor
 import System.IO (hClose, hGetContents)
 import CacheLock (copyFileCloexec, openTempFileCloexec)
 import System.IO.Error (isDoesNotExistError)
-import System.FilePath ((</>), takeDirectory)
+import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.Process (getProcessID, getProcessGroupID, getProcessGroupIDOf)
 import System.Timeout (timeout)
@@ -114,7 +114,7 @@ primingSource = do
             Just source -> pure (saved, Right source)
             Nothing -> do
                 ready <- timed "ordinary tool-cache preparation (not the genuine cold pair)" $ do
-                    emitter <- Bootstrap.cachedEmitter
+                    emitter <- Bootstrap.cachedSourceEmitter
                     parser <- TersusParser.runParserTool False ["return 42;"]
                     directory <- cacheDirectory
                     pure $ case (emitter, parser, directory) of
@@ -411,11 +411,11 @@ emitterRetryStages = inPrimedWorker "emitter-repair" ["parser-seed-", "seed-"] $
         case found of
             Nothing -> pure ()
             Just path -> createFileLink path (bin </> name)) ["sha256sum", "shasum"]
-    parserFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just (home </> "missing-parser.ll")) Bootstrap.cachedEmitter
-    clangFailed <- withSetting "PATH" (Just bin) Bootstrap.cachedEmitter
+    parserFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just (home </> "missing-parser.ll")) Bootstrap.cachedSourceEmitter
+    clangFailed <- withSetting "PATH" (Just bin) Bootstrap.cachedSourceEmitter
     evictEmitterSeed
-    emitterFailed <- withSetting "TERSUS_SEED_FILE" (Just (home </> "missing-emitter.ll")) Bootstrap.cachedEmitter
-    ready <- Bootstrap.cachedEmitter
+    emitterFailed <- withSetting "TERSUS_SEED_FILE" (Just (home </> "missing-emitter.ll")) Bootstrap.cachedSourceEmitter
+    ready <- Bootstrap.cachedSourceEmitter
     case firstFailure [refused "P0" parserFailed, refused "clang" clangFailed, refused "E0" emitterFailed] of
         Just e -> pure (Just e)
         Nothing -> case ready of
@@ -475,21 +475,30 @@ coldStages = do
                 Right [Import ["bootstrapprobe", "math"] Nothing (Just ["twice"]) 1 1] -> pure ()
                 Left e -> fail e
                 Right imports -> fail ("unexpected user-package import metadata: " ++ show imports)
-            emitter <- timed "E1+checker+eraser+ListBox" Bootstrap.cachedEmitter
+            emitter <- timed "E1+checker+eraser+ListBox" Bootstrap.cachedSourceEmitter
             parser <- timed "P1" (TersusParser.parseFileNative emptyDecls "return 42;")
             source <- timed "source" (evaluate (Pipeline.compileSource "return 42;"))
             package <- timed "user package" $ evaluate $ case Pipeline.loadFromEntry (resolver userPackage) "bootstrapprobe/main.tersus" of
                 Left e -> Error e
                 Right (PackageResult pkg) -> Pipeline.compileModulesValidated (Modules.packageSnapshot pkg)
                 Right _ -> Error "the importing user program is not a package"
-            emitterIdentity <- Housekeeping.emitterKey
+            let emitterIdentity = case emitter of
+                    Error e -> Error e
+                    Ok path | "emitter-" `isPrefixOf` takeFileName path -> Ok (drop (length "emitter-") (takeFileName path))
+                            | otherwise -> Error ("forced SOURCE returned a non-source emitter: " ++ path)
             parserIdentity <- TersusParser.parserKey
             case (emitterIdentity, parserIdentity) of
                 (Ok e, Ok p) -> putStrLn ("[BOOT-KEYS] " ++ e ++ " " ++ p)
                 _ -> pure ()
             entries <- listDirectory home
+            prepared <- mapM (readFile . (home </>))
+                [name | name <- entries, "prepared-" `isPrefixOf` name, not (".lock" `isSuffixOf` name)]
             pure $ firstFailure
                 [ if null before then Nothing else Just ("cold worker started with " ++ show before)
+                , testAssertTrue (any (any isEmitterType . lines) prepared)
+                , case emitter of
+                    Ok path -> testAssertTrue (takeFileName path /= "seed-" ++ seedHash)
+                    Error e -> Just e
                 , case seed of Error e -> Just e; Ok _ -> Nothing
                 , case emitter of Error e -> Just e; Ok _ -> Nothing
                 , case parser of Left e -> Just e; Right (parsed, _) -> testAssertEq (fileBody parsed) [Return (Val (VInt 42))]
@@ -504,6 +513,9 @@ coldStages = do
                 ]
   where
     resolver = resolverFromFiles
+    isEmitterType line = case words line of
+        "struct" : name : _ -> "EmitResult\"" `isSuffixOf` name
+        _ -> False
     userMain = "import bootstrapprobe::math { twice }; return twice(21);"
     userPackage =
         [ ("bootstrapprobe/package.tersus", "")
@@ -513,9 +525,11 @@ coldStages = do
 
 warmStages :: IO TestResult
 warmStages = do
+    emitter <- Bootstrap.cachedSourceEmitter
     answer <- TersusParser.parseFileNative emptyDecls "return 42;"
     ir <- Bootstrap.tersusLlvm "return 42;"
-    pure $ firstFailure [either Just (const Nothing) answer, case ir of Error e -> Just e; Ok _ -> Nothing]
+    pure $ firstFailure [case emitter of Error e -> Just e; Ok _ -> Nothing,
+        either Just (const Nothing) answer, case ir of Error e -> Just e; Ok _ -> Nothing]
 
 {-# NOINLINE coldReuseResults #-}
 coldReuseResults :: MVar (Maybe (TestResult, TestResult, TestResult))
@@ -613,7 +627,7 @@ parserFixpoint = sharedPhase snd parserFixpointRecipe
 
 parserFixpointRecipe :: IO TestResult
 parserFixpointRecipe = inPrimedWorker "fixpoint" [] $ do
-    emitter <- Bootstrap.cachedEmitter
+    emitter <- Bootstrap.cachedSourceEmitter
     expected <- TersusParser.emitParserIr
     compiledInput <- Housekeeping.parserInput
     replies <- newIORef []

@@ -466,7 +466,7 @@ packaged parser as a native executable (P1). `ParserSeed` first verifies
 the compiler's own sources where the host still parses them (`StdLibDefs` and the
 snapshot's import prefixes), and the current parser and MIR packages are loaded by
 F0 and compiled as every package is. The embedded snapshot includes package
-markers, shared data modules and `lib/parser/syntax/unicode.tersus`, the
+markers, shared data modules and `lib/data/unicode/unicode.tersus`, the
 classifiers of code points from 128 up, pinned to Unicode 15.0. The emitter seed builds current E1,
 which emits P1. `Native.cachedProgram` supplies the existing caches and build
 locks; imported source, parser pin, compiler and runtime changes rekey them.
@@ -573,7 +573,7 @@ declaration records; `AstData` depends on `Syntax`, not the checker.
 
 Immutable input is indexed once; consumed state uses lightweight checkpoints
 and append-only arena rollback. Flat arena-list emission is iterative.
-`lib/parser/syntax/unicode.tersus` is checked in: balanced comparisons over the
+`lib/data/unicode/unicode.tersus` is checked in: balanced comparisons over the
 Unicode 15.0 general categories (letter is L*, upper is Lu or Lt, lower is Ll,
 alphanum is L* or N*), split into functions of at most 32 intervals so that each
 validates. `dev/parser-unicode/generate.py` writes it and refuses to run on a

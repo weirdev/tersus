@@ -47,6 +47,8 @@ import TestBytes
 import TestConnectives
 import TestMirData
 import TestMirOwnership
+import TestMirMono
+import TestMirMonoOwnership
 import TestMirEval
 import TestMirReader
 import TestMirVerify
@@ -55,6 +57,7 @@ import TestMirCopies
 import TestMirEmit
 import TestMirSupport
 import TestBootstrap
+import TestEmitterProvenance
 import TestEq
 import TestHashMap
 import TestHashSet
@@ -213,6 +216,8 @@ originalGroups =
     , testMirData
     , testMirLowered
     , testMirOwnership
+    , testMirMono
+    , testMirMonoOwnership
     , testOwnershipMetadata
     , testOwnershipInterpreted
     , testMirEvalLists
@@ -224,6 +229,7 @@ originalGroups =
     , testMirEmit
     , testMirEmitPrograms
     , testBootstrap
+    , testEmitterProvenance
     , testEq
     , testHashMap
     , testHashSet

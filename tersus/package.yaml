@@ -16,6 +16,12 @@ extra-source-files:
 - lib/mir/package.tersus
 - lib/mir/reader/reader.tersus
 - lib/mir/support/support.tersus
+- lib/mir/full/full.tersus
+- lib/mir/full/tokens.tersus
+- lib/mir/full/records.tersus
+- lib/mir/full/read.tersus
+- lib/mir/full/write.tersus
+- lib/mir/full/environments.tersus
 - lib/mir/emit/emit.tersus
 - lib/mir/emit/types.tersus
 - lib/mir/emit/values.tersus
@@ -24,7 +30,12 @@ extra-source-files:
 - lib/mir/emit/helpers.tersus
 - lib/mir/mir_reader/mir_reader.tersus
 - lib/mir/writer/writer.tersus
+- lib/mir/mono/mono.tersus
+- lib/mir/mono/tokens.tersus
+- lib/mir/mono/functions.tersus
+- lib/mir/mono/types.tersus
 - lib/mir/ownership/ownership.tersus
+- lib/mir/ownership/mono.tersus
 - lib/mir/ownership/common.tersus
 - lib/mir/ownership/analysis.tersus
 - lib/mir/ownership/rewrite.tersus
@@ -74,7 +85,7 @@ extra-source-files:
 - lib/parser/package.tersus
 - lib/parser/parser.tersus
 - lib/parser/syntax/syntax.tersus
-- lib/parser/syntax/unicode.tersus
+- lib/data/unicode/unicode.tersus
 - lib/mir/mir_verify/mir_verify.tersus
 - lib/mir/mir_erase/mir_erase.tersus
 - lib/validation/package.tersus

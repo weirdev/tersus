@@ -256,7 +256,7 @@ The emitter written in Tersus (`lib/mir/emit/emit.tersus`, `Bootstrap`) lowers t
 - **Type parameters.** A function with type parameters (`fnTypeParams`) has locals whose types can be `TParam`; the validator and the executor run it as it is (values have no types there), and `MirVerify` takes a `TParam` for any type. `MirMono` makes a copy for each list of types (and sizes) that a call gives: it finds the types by matching the types of the parameters of the callee with the types of the arguments, and its result with the local that gets it (`typeArguments`), defaulting to `Int`, and replaces `TParam` in the types of the copy (`substitute`). So the ownership pass and the native code see only concrete types, and know whether a value owns something.
 - **Box payload borrows.** Native lowering distinguishes a handle from a payload using the reference target and follows slot-zero addresses, never consuming `Unbox`. The verifier reads a native container slot's exact type from its declared `addr` field rather than reconstructing it from the instance name; a native Box handle is not implicitly unwrapped after a slot step.
 - **Lent parameters.** A function lists the parameters it only reads in `fnBorrowed`, and in a type of a function value they are `TRef` (`fn(&List<Int>) -> Int`); the locals have the type without the `&`. The ownership pass does not move or clone an argument for a lent parameter (it is read, and a constant that owns something is made into a local first), never frees a lent parameter, and clones one that the function takes (`_0 = _1`, an argument for a parameter that is not lent). Natively a lent parameter held inline has no room of its own, the parameter is the address of the caller's words, and the result room of a call whose argument is the local that gets it is one of the function's own, since the callee does not copy what it reads.
-- **Size parameters.** A function with size parameters (`fnSizeParams`) takes them as its last parameters, and its locals have types such as `Array<Int, n>`. The validator and the executor run it as it is. For native code `MirMono.monomorphize` (run first by `insertOwnership`) makes a copy of it for each list of constants that a call gives (`dot<3>`), with those parameters removed, the operands that read them the constants and the types' sizes replaced, and redirects the calls; the specifications and ghost statements are dropped, since they name the functions that are no longer there and only the validator reads them. A program with no function of the kind is left alone.
+- **Size parameters.** A function with size parameters (`fnSizeParams`) takes them as its last parameters, and its locals have types such as `Array<Int, n>`. The validator and the executor run it as it is. For native code `MirHousekeeping.monomorphizeWith` (run first by `insertOwnership`) makes a copy of it for each list of constants that a call gives (`dot<3>`), with those parameters removed, the operands that read them the constants and the types' sizes replaced, and redirects the calls; the specifications and ghost statements are dropped, since they name the functions that are no longer there and only the validator reads them. A program with no function of the kind is left alone.
 - **Structs with sizes.** A struct with sizes is declared in `progGenerics` and is a struct of its own, named by its sizes (`Packet<4>`), in `progTypes` for each one the program mentions (`completeInstances`); in a function with sizes the name has a size parameter in it (`Packet<n>`), and `MirMono` gives the copy for 4 the name `Packet<4>` in every type, constructor and constant, then declares what the copies mention and drops the declarations that name a size parameter. The names are printed without the sizes (`Packet { ... }`), and `MirEval` takes the struct for its name without them, so the executor can run a function with sizes as it is.
 - **A Box of an array.** To the validator and the executor, `size`, `get`, `first`, `last` and `set` on a `Box<Array<T, N>>` or `Box<Array<T, ?>>` are the `ListOp`s of an array, and `ListOp NewBoxed n x` (`Array::boxed(n, x)`) and `Unsize` are the same value as the array they stand for, which is why the validator gives `NewBoxed` the contract of `NewArray` and treats `Unsize` like `MakeBox`. Native code has no Box of an array: `MirLists` makes each one a `List<T>` with as many elements as room, so those operations are those of a list, `NewBoxed` is a call of `listFilled`, `NewEmptyBoxed` one of `listNew` and `Unsize` the list as it is (see A list in native code). `ListOp Pop` takes the last element out of a list (before `MirLists` it is a list operation; after, a call of `listPop`). `ListOp NewEmptyBoxed` (`Array::empty()`) is the Box of an array of no elements: a null address and the count 0, so nothing is allocated.
 - **Bytes.** `TByte` is a type of the MIR (the checker's `Byte`): one word, held, copied and printed as an `Int`, and `ListOp ToByte [x]` and `ListOp FromByte [b]` (`toByte(x)` and `toInt(b)`) are the same value as their operand, `ToByte` with the contract that it is from 0 to 255. The validator adds `0 <= x < 256` to every local of type `TByte` (`withTypeFacts`, as it adds the size of an array), which is sound because only `ToByte` makes one and it asks for the range; `MirVerify` accepts a constant `CInt` from 0 to 255 where a `TByte` is wanted. Native code treats `TByte` as `TInt` everywhere (`llvmType`, `loadAt`, `storeAt`, `toWord`) with a descriptor of its own of the same kind.
@@ -273,6 +273,25 @@ The emitter written in Tersus (`lib/mir/emit/emit.tersus`, `Bootstrap`) lowers t
 - **Arithmetic.** `Add`, `Sub` and `Mul` are `llvm.s{add,sub,mul}.with.overflow.i64` followed by a branch to the function's `overflow` block, which calls `tersus_overflow` (the message `Evaluation failed: Integer overflow` and exit status 1 of `tersus run`). `Div` rounds down, where `sdiv` truncates, so it subtracts 1 from the quotient when the remainder is not 0 and has the other sign than the divisor, and the one quotient that does not fit (the smallest `Int` divided by -1) goes to the overflow block. `Mod` takes the sign of the divisor, with `srem` by 1 in place of -1, which `srem` leaves undefined for the smallest `Int`, and the result 0 that follows.
 - **Contracts are not checked.** A divisor that is not 0, an index in range, a list that is not empty are what validation proved, and the operations assume them as `unreachable` would (`sdiv` by 0 is undefined in LLVM). A bug in the validator is undefined behaviour in native code, where `tersus run` reports it. Overflow is the one trap, since nothing proves it cannot happen.
 - **Tests.** `TestNative` builds programs and compares what the executable prints, and its exit status, with `tersus eval` (every example, structs, enums and lists and their operations, divisions of every sign, loops, recursion, and each overflow; calls of function values are lowered without validation, since the validator cannot follow them yet); the builds pass without clang.
+
+## Native monomorphization
+
+`lib/mir/mono/` specializes generic functions over the complete MIR3 codec.
+It keeps canonical declaration and selector keys distinct from ordinary
+function-argument rendering, substitutes types and sizes, follows reachable
+calls and instantiates implicit Drop functions. Final-name collisions follow
+the Haskell structural-key precedence.
+
+Without a generic function, the pass preserves the complete original program.
+Otherwise it removes function specifications and ghosts, completes erased
+instances and drops symbolic declarations; program invariants and the remaining
+generic, bounded and instance metadata survive. The validation specialization
+path in `MirMono` retains its contracts, ghosts and cached named-type map.
+
+The emitter's `pass mono` entry reads strict, EOF-exact MIR3. The published
+matching seed runs this pass during cold builds; linking and pruning remain
+the Haskell `Link` pass. `TestMirMono` compares canonical raw bytes on raw and
+pre-native-stage inputs, and the current host-validator group proves the pass.
 
 ## Moves
 
@@ -297,8 +316,8 @@ signature stubs remain present during those checks, then leave the unit.
 
 The production transformations are `insertOwnership` and `expandRefWrites` in
 `lib/mir/ownership/`, hosted by `MirHousekeeping`. The order is ghost
-erasure, reference-write expansion, list lowering, Haskell `MirMono`
-monomorphization, Tersus ownership, verification, then emission. The
+erasure, reference-write expansion, list lowering, native monomorphization,
+Tersus ownership, verification, then emission. The
 operand-role classification move checking uses is in `MirMoves`; the heap
 model of `TestOwnership` has its own drop classification.
 
@@ -312,6 +331,16 @@ original local declarations, function headers, type declarations or function
 sets. Original block IDs are retained so loop specifications keep valid
 references. Uncalled Drop/Clone implementations are not pruned at this boundary.
 `forNative` still removes proof metadata only for emitter data.
+
+`monomorphizeOwnershipWith` fuses adjacent Mono and ownership calls only when
+functions are generic. Its `pass mono-ownership` request carries strict MIR3;
+the native entry specializes it and feeds the existing ownership reader token
+records without another text round trip. It returns the specialized MIR3 and
+owned MIR2 receipts, both consumed by the host, so `restoreOwnership` remains
+the metadata authority. A program without generic functions still uses the
+original MIR2 ownership request and need not serialize its proof AST as MIR3.
+The separate `pass mono` and `pass ownership` entries remain available for
+staged comparisons. Expansion and list lowering stay before both passes.
 
 The emitter executable includes the ownership request dispatcher. The pinned
 stage-0 seed runs reference-write expansion and ownership on every program the
@@ -545,9 +574,9 @@ stack run tersus-exe -- check lib/mir/emit/emit.tersus              # prints OK
 | `mir/reader/reader.tersus` | The MIR record types and parsers; imports the common token and type codec (`programAt` for version 1, `ghostProgramAt` for version 2 with `ghost`/`dissolve`). It declares only, and runs nothing |
 | `mir/support/support.tersus` | Shared declaration lookup, variant ownership, array classification, primitive layout results, type/name rendering and LLVM escaping. Owns its result records and Clone impls; reuses the codec's `catStrings` for text construction. Imports the codec and reader; full layouts and wire writers are not shared |
 | `mir/writer/writer.tersus` | Shared normalizing writer. `printProgram` writes MIR v1; `printProgramWithGhosts` writes MIR v2 with `ghost N` identities; `printProgramAsRead` writes MIR v1 with the `list` and `box` tokens of older data kept (the eraser's output). Structural type/size arguments and function metadata are retained |
-| `mir/ownership/ownership.tersus` | Declarations-only request dispatcher imported by the emitter. `pass ownership` or `pass expand` followed by MIR v2 produces MIR v2. `isOwnershipRequest` and `runOwnership` dispatch to the algorithms in `rewrite` and `refwrites`; `common`, `analysis` and `drops` provide their shared data and analyses. The host retains the Haskell monomorphization adapter and metadata sidecars |
+| `mir/ownership/ownership.tersus` | Declarations-only request dispatcher imported by the emitter. `pass ownership` or `pass expand` followed by MIR v2 produces MIR v2. `isOwnershipRequest` and `runOwnership` dispatch to the algorithms in `rewrite` and `refwrites`; `common`, `analysis` and `drops` provide their shared data and analyses. The host retains metadata sidecars; native monomorphization runs first through the full MIR3 codec |
 | `mir/mir_reader/mir_reader.tersus` | The round-trip entry: imports the shared reader and writer |
-| `mir/emit/emit.tersus` | Emitter entry and program assembly. It writes LLVM IR for MIR v1, or dispatches `pass ownership` and `pass expand` requests over MIR v2 to the ownership module. The pinned emitter seed includes both passes |
+| `mir/emit/emit.tersus` | Emitter entry and program assembly. It writes LLVM IR for MIR v1, dispatches `pass ownership` and `pass expand` over MIR v2, and runs `pass mono` over complete MIR3. The pinned emitter seed includes all three passes |
 | `mir/emit/types.tersus` | Emitter model, layouts, symbols, type closure and cached context; owns the module-local `String.then` |
 | `mir/emit/values.tersus` | Generation state, memory primitives, constants, operands and reference places |
 | `mir/emit/operations.tersus` | Arithmetic, array/address operations, rvalues, aggregate construction and statements |

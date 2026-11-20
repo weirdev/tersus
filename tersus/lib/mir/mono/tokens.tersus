@@ -1,0 +1,273 @@
+import data::codec::codec { Token, isBareLowerName };
+import mir::full as full;
+
+struct MonoBinding { name: String, tokens: List<Token> };
+impl Clone for MonoBinding { };
+
+fn monoLookup(bs: &List<MonoBinding>, key: &String) -> List<Token> ~ {
+    for b in bs { if b.name = key { return clone(b.tokens); }; };
+    return [];
+};
+
+fn monoBind(bs: List<MonoBinding>, key: String, tokens: List<Token>) -> List<MonoBinding> ~ {
+    if size(monoLookup(bs, key)) = 0 { bs = push(bs, MonoBinding { name: key, tokens: tokens }); };
+    return bs;
+};
+
+fn monoForallBody(ts: &List<Token>, p: Int) -> Int ~ {
+    ns = full::tokens::numberAt(ts, p + 1);
+    if ns < 0 { return 0 - 1; };
+    nt = full::tokens::numberAt(ts, p + 2 + ns);
+    if nt < 0 || p + 3 + ns + nt >= size(ts) { return 0 - 1; };
+    return p + 3 + ns + nt;
+};
+
+fn monoSizeName(ts: &List<Token>, p: Int) -> String ~ {
+    if full::tokens::wordIs(ts, p, "any") { return "?"; };
+    if full::tokens::wordIs(ts, p, "v") { return "_".concat(full::tokens::textAt(ts, p + 1)); };
+    return full::tokens::textAt(ts, p + 1);
+};
+
+fn monoTypeName(ts: &List<Token>, p: Int, forInstance: Bool) -> String ~ {
+    if p < 0 || p >= size(ts) { return ""; };
+    w = full::tokens::textAt(ts, p);
+    if w = "int" { return "Int"; }; if w = "bool" { return "Bool"; }; if w = "byte" { return "Byte"; };
+    if w = "i8" { return "I8"; }; if w = "i16" { return "I16"; }; if w = "i32" { return "I32"; }; if w = "u16" { return "U16"; }; if w = "u32" { return "U32"; };
+    if w = "param" { n = full::tokens::textAt(ts, p + 1); if forInstance { return "'".concat(n); }; return n; };
+    if w = "var" { if forInstance { return "?".concat(full::tokens::textAt(ts, p + 1)); }; return "?"; };
+    if w = "variant" { return full::tokens::textAt(ts, p + 1); };
+    if w = "named" { return monoNamedName(ts, p, forInstance); };
+    if w = "fn" { return monoFnTypeName(ts, p, forInstance); };
+    if w = "forall" { return monoForallName(ts, p, forInstance); };
+    inner = monoTypeName(ts, p + 1, forInstance);
+    if w = "ref" { return "&".concat(inner); }; if w = "mutref" { return "&mut ".concat(inner); };
+    if w = "array" { return "Array<".concat(inner).concat(", ").concat(monoSizeName(ts, full::tokens::typeEnd(ts, p + 1))).concat(">"); };
+    prefix = "";
+    if w = "list" { prefix = "List"; }; if w = "box" { prefix = "Box"; }; if w = "addr" { prefix = "Addr"; }; if w = "block" { prefix = "Block"; }; if w = "uninit" { prefix = "Uninit"; };
+    return prefix.concat("<").concat(inner).concat(">");
+};
+
+fn monoForallName(ts: &List<Token>, p: Int, forInstance: Bool) -> String ~ {
+    rendered = monoTypeName(ts, monoForallBody(ts, p), forInstance);
+    if forInstance { return rendered; };
+    ns = full::tokens::numberAt(ts, p + 1); nt = full::tokens::numberAt(ts, p + 2 + ns);
+    if ns < 0 || nt < 0 { return rendered; };
+    names = [];
+    for i in 0..nt { names = push(names, full::tokens::textAt(ts, p + 3 + ns + i)); };
+    for i in 0..ns { names = push(names, full::tokens::textAt(ts, p + 2 + i)); };
+    out = "<";
+    for i in 0..size(names) { if i > 0 { out = out.concat(", "); }; out = out.concat(get(names, i)); };
+    return out.concat(">").concat(rendered);
+};
+
+fn monoNamedName(ts: &List<Token>, p: Int, forInstance: Bool) -> String ~ {
+    base = full::tokens::textAt(ts, p + 1);
+    n = full::tokens::numberAt(ts, p + 2);
+    if n <= 0 { if forInstance && isBareLowerName(base) { return "`".concat(base); }; return base; };
+    if !forInstance && n = 1 && (base = "List" || base = "Box") && full::tokens::wordIs(ts, p + 3, "type") {
+        return base.concat("<").concat(monoTypeName(ts, p + 4, false)).concat(">");
+    };
+    out = base.concat("<");
+    at = p + 3;
+    for i in 0..n {
+        if i > 0 { out = out.concat(", "); };
+        if full::tokens::wordIs(ts, at, "type") { out = out.concat(monoTypeName(ts, at + 1, true)); at = full::tokens::typeEnd(ts, at + 1); }
+        else { out = out.concat(monoSizeName(ts, at + 1)); at = full::tokens::sizeEnd(ts, at + 1); };
+    };
+    return out.concat(">");
+};
+
+fn monoInstanceTypeName(ts: &List<Token>, p: Int) -> String ~ {
+    if full::tokens::numberAt(ts, p + 2) <= 0 { return full::tokens::textAt(ts, p + 1); };
+    return monoNamedName(ts, p, true);
+};
+
+fn monoFnTypeName(ts: &List<Token>, p: Int, forInstance: Bool) -> String ~ {
+    out = "fn(";
+    n = full::tokens::numberAt(ts, p + 1);
+    if n < 0 { return ""; };
+    at = p + 2;
+    for i in 0..n { if i > 0 { out = out.concat(", "); }; out = out.concat(monoTypeName(ts, at, forInstance)); at = full::tokens::typeEnd(ts, at); };
+    return out.concat(") -> ").concat(monoTypeName(ts, at, forInstance));
+};
+
+fn monoSubstitute(ts: &List<Token>, sizes: &List<MonoBinding>, types: &List<MonoBinding>) -> List<Token> ~ {
+    out = [];
+    i = 0;
+    while i < size(ts) [{ affirm i >= 0; affirm i <= size(ts); }] ~ {
+        if full::tokens::wordIs(ts, i, "forall") { return full::tokens::appendTokens(out, monoSubstituteForall(ts, i, sizes, types)); };
+        if i + 1 < size(ts) && (full::tokens::wordIs(ts, i, "param") || full::tokens::wordIs(ts, i, "p")) {
+            replacement = monoLookup(types, full::tokens::textAt(ts, i + 1));
+            if full::tokens::wordIs(ts, i, "p") { replacement = monoLookup(sizes, full::tokens::textAt(ts, i + 1)); };
+            if size(replacement) > 0 { out = full::tokens::appendTokens(out, replacement); i = i + 2; }
+            else { out = push(out, clone(get(ts, i))); i = i + 1; };
+        } else { out = push(out, clone(get(ts, i))); i = i + 1; };
+    };
+    return out;
+};
+
+fn monoSubstituteForall(ts: &List<Token>, p: Int, sizes: &List<MonoBinding>, types: &List<MonoBinding>) -> List<Token> ~ {
+    body = monoForallBody(ts, p);
+    if body < 0 { return full::tokens::sliceTokens(ts, p, size(ts)); };
+    ns = full::tokens::numberAt(ts, p + 1);
+    if ns < 0 { return full::tokens::sliceTokens(ts, p, size(ts)); };
+    ss = []; tt = [];
+    for b in sizes {
+        hidden = false;
+        for i in 0..ns { if full::tokens::textAt(ts, p + 2 + i) = b.name { hidden = true; }; };
+        if !hidden { ss = push(ss, clone(b)); };
+    };
+    nt = full::tokens::numberAt(ts, p + 2 + ns);
+    if nt < 0 { return full::tokens::sliceTokens(ts, p, size(ts)); };
+    for b in types {
+        hidden = false;
+        for i in 0..nt { if full::tokens::textAt(ts, p + 3 + ns + i) = b.name { hidden = true; }; };
+        if !hidden { tt = push(tt, clone(b)); };
+    };
+    end = full::tokens::typeEnd(ts, body);
+    out = full::tokens::sliceTokens(ts, p, body);
+    out = full::tokens::appendTokens(out, monoSubstitute(full::tokens::sliceTokens(ts, body, end), ss, tt));
+    return full::tokens::appendTokens(out, monoSubstitute(full::tokens::sliceTokens(ts, end, size(ts)), sizes, types));
+};
+
+fn monoCompareInt(a: Int, b: Int) -> Int {
+    if a < b { return 0 - 1; }; if a > b { return 1; }; return 0;
+};
+
+fn monoCompareText(a: &String, b: &String) -> Int ~ {
+    if a = b { return 0; };
+    if full::records::beforeText(a, b) { return 0 - 1; }; return 1;
+};
+
+fn monoCompareDecimal(a: &String, b: &String) -> Int ~ {
+    left = full::tokens::decimalText(a); right = full::tokens::decimalText(b);
+    ln = size(left.bytes) > 0 && get(left.bytes, 0) = toByte(45);
+    rn = size(right.bytes) > 0 && get(right.bytes, 0) = toByte(45);
+    if ln && !rn { return 0 - 1; }; if rn && !ln { return 1; };
+    if ln { if size(left.bytes) < 1 || size(right.bytes) < 1 { return 0; }; left = left.slice(1, size(left.bytes)); right = right.slice(1, size(right.bytes)); };
+    order = monoCompareInt(size(left.bytes), size(right.bytes));
+    if order = 0 { order = monoCompareText(left, right); };
+    if ln { return 0 - order; }; return order;
+};
+
+fn monoCompareNames(a: &List<String>, b: &List<String>, numeric: Bool) -> Int ~ {
+    for i in 0..size(a) {
+        if i >= size(b) { return 1; };
+        order = monoCompareText(get(a, i), get(b, i));
+        if numeric { order = monoCompareDecimal(get(a, i), get(b, i)); };
+        if order != 0 { return order; };
+    };
+    return monoCompareInt(size(a), size(b));
+};
+
+// Types derives Ord in this constructor order; rendered names are not keys.
+fn monoTypeRank(ts: &List<Token>) -> Int ~ {
+    w = full::tokens::textAt(ts, 0);
+    if w = "int" { return 0; }; if w = "byte" { return 1; }; if w = "bool" { return 2; };
+    if w = "i8" || w = "i16" || w = "i32" || w = "u16" || w = "u32" { return 3; };
+    if w = "array" { return 4; }; if w = "fn" { return 5; }; if w = "named" { return 6; };
+    if w = "variant" { return 7; }; if w = "var" { return 8; }; if w = "forall" { return 9; };
+    if w = "param" { return 10; }; if w = "addr" { return 11; }; if w = "block" { return 12; };
+    if w = "uninit" { return 13; }; if w = "ref" { return 14; }; return 15;
+};
+
+fn monoSizeCompare(a: &List<Token>, b: &List<Token>) -> Int ~ {
+    aw = full::tokens::textAt(a, 0); bw = full::tokens::textAt(b, 0);
+    ranks = push(push(push(push([], "c"), "any"), "p"), "v");
+    ar = 0; br = 0;
+    for i in 0..size(ranks) { if get(ranks, i) = aw { ar = i; }; if get(ranks, i) = bw { br = i; }; };
+    order = monoCompareInt(ar, br); if order != 0 { return order; };
+    if ar = 1 { return 0; };
+    if ar = 2 { return monoCompareText(full::tokens::textAt(a, 1), full::tokens::textAt(b, 1)); };
+    return monoCompareDecimal(full::tokens::textAt(a, 1), full::tokens::textAt(b, 1));
+};
+
+fn monoTypeItems(ts: &List<Token>, start: Int, count: Int, args: Bool) -> List<List<Token>> ~ {
+    out = []; at = start;
+    if count < 0 { return out; };
+    for i in 0..count {
+        end = full::tokens::typeEnd(ts, at);
+        if args { end = full::tokens::argEnd(ts, at); };
+        if end <= at { return out; };
+        out = push(out, full::tokens::sliceTokens(ts, at, end)); at = end;
+    };
+    return out;
+};
+
+fn monoCompareTypeLists(a: &List<List<Token>>, b: &List<List<Token>>, args: Bool) -> Int ~ {
+    for i in 0..size(a) {
+        if i >= size(b) { return 1; };
+        order = 0;
+        if args { order = monoArgCompare(get(a, i), get(b, i)); }
+        else { order = monoTypeCompare(get(a, i), get(b, i)); };
+        if order != 0 { return order; };
+    };
+    return monoCompareInt(size(a), size(b));
+};
+
+fn monoArgCompare(a: &List<Token>, b: &List<Token>) -> Int ~ {
+    asize = full::tokens::wordIs(a, 0, "size"); bsize = full::tokens::wordIs(b, 0, "size");
+    if asize && !bsize { return 0 - 1; }; if bsize && !asize { return 1; };
+    left = full::tokens::sliceTokens(a, 1, size(a)); right = full::tokens::sliceTokens(b, 1, size(b));
+    if asize { return monoSizeCompare(left, right); }; return monoTypeCompare(left, right);
+};
+
+fn monoTypeCompare(a: &List<Token>, b: &List<Token>) -> Int ~ {
+    if size(a) = 0 || size(b) = 0 { return monoCompareInt(size(a), size(b)); };
+    left = full::tokens::normalizeTypes(clone(a)); right = full::tokens::normalizeTypes(clone(b));
+    rank = monoTypeRank(left); order = monoCompareInt(rank, monoTypeRank(right));
+    if order != 0 { return order; }; if rank < 3 { return 0; };
+    if rank = 3 { return monoWordCompare(left, right); };
+    if rank = 4 { return monoArrayCompare(left, right); };
+    if rank = 5 { return monoFnCompare(left, right); };
+    if rank = 6 { return monoNamedCompare(left, right); };
+    if rank = 7 || rank = 10 { return monoCompareText(full::tokens::textAt(left, 1), full::tokens::textAt(right, 1)); };
+    if rank = 8 { return monoCompareDecimal(full::tokens::textAt(left, 1), full::tokens::textAt(right, 1)); };
+    if rank = 9 { return monoForallCompare(left, right); };
+    return monoTypeCompare(full::tokens::sliceTokens(left, 1, size(left)), full::tokens::sliceTokens(right, 1, size(right)));
+};
+
+fn monoWordCompare(a: &List<Token>, b: &List<Token>) -> Int ~ {
+    aw = full::tokens::textAt(a, 0); bw = full::tokens::textAt(b, 0);
+    ai = aw = "i8" || aw = "i16" || aw = "i32"; bi = bw = "i8" || bw = "i16" || bw = "i32";
+    if ai && !bi { return 1; }; if bi && !ai { return 0 - 1; };
+    if size(aw.bytes) < 1 || size(bw.bytes) < 1 { return 0; };
+    return monoCompareDecimal(aw.slice(1, size(aw.bytes)), bw.slice(1, size(bw.bytes)));
+};
+
+fn monoArrayCompare(a: &List<Token>, b: &List<Token>) -> Int ~ {
+    ae = full::tokens::typeEnd(a, 1); be = full::tokens::typeEnd(b, 1);
+    order = monoTypeCompare(full::tokens::sliceTokens(a, 1, ae), full::tokens::sliceTokens(b, 1, be));
+    if order != 0 { return order; };
+    return monoSizeCompare(full::tokens::sliceTokens(a, ae, size(a)), full::tokens::sliceTokens(b, be, size(b)));
+};
+
+fn monoFnCompare(a: &List<Token>, b: &List<Token>) -> Int ~ {
+    an = full::tokens::numberAt(a, 1); bn = full::tokens::numberAt(b, 1);
+    if an < 0 || bn < 0 { return 0; };
+    order = monoCompareTypeLists(monoTypeItems(a, 2, an, false), monoTypeItems(b, 2, bn, false), false);
+    if order != 0 { return order; };
+    ap = 2; bp = 2;
+    for i in 0..an { ap = full::tokens::typeEnd(a, ap); }; for i in 0..bn { bp = full::tokens::typeEnd(b, bp); };
+    return monoTypeCompare(full::tokens::sliceTokens(a, ap, size(a)), full::tokens::sliceTokens(b, bp, size(b)));
+};
+
+fn monoNamedCompare(a: &List<Token>, b: &List<Token>) -> Int ~ {
+    order = monoCompareText(full::tokens::textAt(a, 1), full::tokens::textAt(b, 1));
+    if order != 0 { return order; };
+    return monoCompareTypeLists(monoTypeItems(a, 3, full::tokens::numberAt(a, 2), true), monoTypeItems(b, 3, full::tokens::numberAt(b, 2), true), true);
+};
+
+fn monoQuotedNames(ts: &List<Token>, start: Int, count: Int) -> List<String> ~ {
+    out = []; if count < 0 { return out; }; for i in 0..count { out = push(out, full::tokens::textAt(ts, start + i)); }; return out;
+};
+
+fn monoForallCompare(a: &List<Token>, b: &List<Token>) -> Int ~ {
+    an = full::tokens::numberAt(a, 1); bn = full::tokens::numberAt(b, 1);
+    order = monoCompareNames(monoQuotedNames(a, 2, an), monoQuotedNames(b, 2, bn), false);
+    if order != 0 { return order; };
+    at = full::tokens::numberAt(a, an + 2); bt = full::tokens::numberAt(b, bn + 2);
+    order = monoCompareNames(monoQuotedNames(a, an + 3, at), monoQuotedNames(b, bn + 3, bt), false);
+    if order != 0 { return order; };
+    return monoTypeCompare(full::tokens::sliceTokens(a, monoForallBody(a, 0), size(a)), full::tokens::sliceTokens(b, monoForallBody(b, 0), size(b)));
+};

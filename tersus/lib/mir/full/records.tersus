@@ -1,0 +1,229 @@
+import data::codec::codec { Token, Parsed, parseInt };
+import mir::full::tokens { appendTokens, integerAt, intToken, name, namesEnd, numberAt, operandEnd, quotedAt, sliceTokens, textAt, word, wordIs };
+import data::ast::ast { AstNode, AstStatements, AstStatement, AstValidation, AstValidations, AstValue, AstExpression, AstOptTermination };
+
+struct EnvEntry { name: String, value: List<Token> };
+impl Clone for EnvEntry { };
+
+fn envStart(ts: &List<Token>) -> Int ~ {
+    if wordIs(ts, 0, "env") { return 1; };
+    if wordIs(ts, 0, "loop") { return 9; };
+    if wordIs(ts, 0, "ghost") { return 2; };
+    return 0 - 1;
+};
+fn envEnd(ts: &List<Token>, p: Int) -> Int ~ {
+    n = numberAt(ts, p + 1);
+    if p < 0 || n < 0 { return 0 - 1; };
+    at = p + 2;
+    for i in 0..n {
+        if !quotedAt(ts, at) { return 0 - 1; };
+        at = operandEnd(ts, at + 1);
+        if at < 0 { return at; };
+    };
+    return at;
+};
+fn envEntries(ts: &List<Token>, p: Int) -> List<EnvEntry> ~ {
+    out = [];
+    n = numberAt(ts, p + 1);
+    at = p + 2;
+    if n < 0 { return out; };
+    for i in 0..n {
+        end = operandEnd(ts, at + 1);
+        if !quotedAt(ts, at) || end < 0 { return []; };
+        out = push(out, EnvEntry { name: textAt(ts, at), value: sliceTokens(ts, at + 1, end) });
+        at = end;
+    };
+    return out;
+};
+fn entryAt(entries: &List<EnvEntry>, key: &String) -> Int ~ {
+    i = 0;
+    for e in entries { if e.name = key { return i; }; i = i + 1; };
+    return 0 - 1;
+};
+fn emptyEntries() -> List<EnvEntry> ~ { return []; };
+fn keyBefore(keys: &List<String>, a: Int, b: Int, numeric: Bool) -> Bool ~ {
+    if a < 0 || b < 0 || a >= size(keys) || b >= size(keys) { return false; };
+    if numeric {
+        x = parseInt(get(keys, a));
+        y = parseInt(get(keys, b));
+        return x.value < y.value;
+    };
+    return beforeText(get(keys, a), get(keys, b));
+};
+fn keyMerge(keys: &List<String>, left: &List<Int>, right: &List<Int>, numeric: Bool) -> List<Int> ~ {
+    out = []; i = 0; j = 0; active = true;
+    while active [{ affirm i >= 0; affirm j >= 0; }] ~ {
+        if i >= size(left) && j >= size(right) { active = false; } else {
+        if j >= size(right) { if i < size(left) { out = push(out, get(left, i)); i = i + 1; }; } else {
+            if i >= size(left) { out = push(out, get(right, j)); j = j + 1; } else {
+                if keyBefore(keys, get(right, j), get(left, i), numeric) { out = push(out, get(right, j)); j = j + 1; } else { out = push(out, get(left, i)); i = i + 1; };
+            };
+        };
+        };
+    };
+    return out;
+};
+fn keyRange(keys: &List<String>, lo: Int, hi: Int, numeric: Bool) -> List<Int> ~ {
+    if lo < 0 || hi < lo || hi > size(keys) || lo = hi { return []; };
+    if hi - lo = 1 { return push([], lo); };
+    middle = lo + (hi - lo) / 2;
+    return keyMerge(keys, keyRange(keys, lo, middle, numeric), keyRange(keys, middle, hi, numeric), numeric);
+};
+fn keyOrder(keys: &List<String>, numeric: Bool) -> List<Int> ~ { return keyRange(keys, 0, size(keys), numeric); };
+fn orderEntries(entries: List<EnvEntry>) -> List<EnvEntry> ~ {
+    keys = []; for e in &entries { keys = push(keys, clone(e.name)); };
+    out = emptyEntries();
+    for i in keyOrder(&keys, false) { if i >= 0 && i < size(entries) { out = push(out, clone(get(&entries, i))); }; };
+    return out;
+};
+fn mergeEntries(a: &List<EnvEntry>, b: &List<EnvEntry>) -> List<EnvEntry> ~ {
+    out = emptyEntries(); i = 0; j = 0; active = true;
+    while active [{ affirm i >= 0; affirm j >= 0; }] ~ {
+        if i >= size(a) && j >= size(b) { active = false; } else {
+        if j >= size(b) { if i < size(a) { out = push(out, clone(get(a, i))); i = i + 1; }; } else {
+            if i >= size(a) { out = push(out, clone(get(b, j))); j = j + 1; } else {
+                x = get(a, i); y = get(b, j);
+                if x.name = y.name { out = push(out, clone(x)); i = i + 1; j = j + 1; } else {
+                    if beforeText(&x.name, &y.name) { out = push(out, clone(x)); i = i + 1; } else { out = push(out, clone(y)); j = j + 1; };
+                };
+            };
+        };
+        };
+    };
+    return out;
+};
+fn beforeText(a: &String, b: &String) -> Bool ~ {
+    i = 0;
+    while i < size(a.bytes) && i < size(b.bytes) [{ affirm i >= 0; }] ~ {
+        x = get(a.bytes, i); y = get(b.bytes, i);
+        if x != y { return toInt(x) < toInt(y); };
+        i = i + 1;
+    };
+    return size(a.bytes) < size(b.bytes);
+};
+fn envTokens(entries: &List<EnvEntry>) -> List<Token> ~ {
+    out = push(push([], word("none")), intToken(size(entries)));
+    for e in entries {
+        out = push(out, name(clone(e.name)));
+        out = appendTokens(out, &e.value);
+    };
+    return out;
+};
+fn replaceEnv(ts: &List<Token>, entries: &List<EnvEntry>) -> List<Token> ~ {
+    p = envStart(ts); end = envEnd(ts, p);
+    if p < 0 || end < 0 { return clone(ts); };
+    out = appendTokens(sliceTokens(ts, 0, p), envTokens(entries));
+    return appendTokens(out, sliceTokens(ts, end, size(ts)));
+};
+fn uniqueEntries(entries: &List<EnvEntry>) -> Bool ~ {
+    names = HashSet::new();
+    for e in entries {
+        if HashSet::contains(&names, &e.name) { return false; };
+        names = names.insert(clone(e.name));
+    };
+    return true;
+};
+fn expandEnv(ts: &List<Token>, shared: &List<List<EnvEntry>>) -> Parsed<List<Token>> ~ {
+    bad = Parsed<List<Token>> { value: [], pos: 0, ok: false };
+    p = envStart(ts);
+    if p < 0 { return Parsed<List<Token>> { value: clone(ts), pos: 0, ok: true }; };
+    end = envEnd(ts, p);
+    if end < 0 { return bad; };
+    own = orderEntries(envEntries(ts, p));
+    if !uniqueEntries(&own) { return bad; };
+    if !wordIs(ts, p, "none") {
+        id = integerAt(ts, p);
+        if !id.ok || id.value < 0 || id.value >= size(shared) { return bad; };
+    };
+    out = replaceEnv(ts, &own);
+    if p >= 0 && p < size(out) && p < size(ts) { out = set(out, p, clone(get(ts, p))); };
+    return Parsed<List<Token>> { value: out, pos: end, ok: true };
+};
+fn payloadSlots(ts: &List<Token>) -> List<Int> ~ {
+    out = [];
+    if wordIs(ts, 0, "invariant") { return push([], 2); };
+    if wordIs(ts, 0, "spec") {
+        out = push(push([], 2), 4);
+        if !wordIs(ts, 6, "none") { out = push(out, 6); };
+    };
+    if wordIs(ts, 0, "loop") {
+        out = push([], 5);
+        if !wordIs(ts, 7, "none") { out = push(out, 7); };
+    };
+    if wordIs(ts, 0, "ghost") && (wordIs(ts, 1, "validation") || wordIs(ts, 1, "axiom") || wordIs(ts, 1, "proof")) {
+        out = push(out, envEnd(ts, 2));
+    };
+    if wordIs(ts, 0, "assumes") {
+        n = numberAt(ts, 1);
+        if n >= 0 { for i in 0..n { out = push(out, i + 2); }; };
+    };
+    return out;
+};
+fn mapPayloadLine(ts: List<Token>, map: &List<Int>) -> List<Token> ~ {
+    slots = payloadSlots(&ts);
+    for p in &slots {
+        r = integerAt(&ts, p);
+        if p >= 0 && p < size(ts) && r.ok && r.value >= 0 && r.value < size(map) {
+            ts = set(ts, p, intToken(get(map, r.value)));
+        };
+    };
+    return ts;
+};
+fn nodeAt(nodes: &List<AstNode>, id: Int) -> AstNode ~ {
+    if id < 0 || id >= size(nodes) { return AstNode::Statements { value: AstStatements::End }; };
+    return clone(get(nodes, id));
+};
+fn statementAt(nodes: &List<AstNode>, id: Int) -> AstStatement ~ {
+    node = nodeAt(nodes, id);
+    if node is AstNode::Statement { return (node as AstNode::Statement).value; };
+    return AstStatement::Mark { line: 0, col: 0 };
+};
+fn listItems(nodes: &List<AstNode>, root: Int) -> List<Int> ~ {
+    out = [];
+    id = root;
+    while id >= 0 && id < size(nodes) [{ }] ~ {
+        node = nodeAt(nodes, id);
+        if !(node is AstNode::Statements) { return []; };
+        v = (node as AstNode::Statements).value;
+        if v is AstStatements::End { return out; };
+        item = v as AstStatements::Cons;
+        out = push(out, item.head); id = item.tail;
+    };
+    return [];
+};
+fn blockPayload(nodes: &List<AstNode>, id: Int) -> Bool ~ {
+    node = nodeAt(nodes, id);
+    if !(node is AstNode::Statement) || !((node as AstNode::Statement).value is AstStatement::Block) { return false; };
+    xs = listItems(nodes, ((node as AstNode::Statement).value as AstStatement::Block).xs);
+    for s in &xs { if !(statementAt(nodes, s) is AstStatement::ValidationStatement) { return false; }; };
+    return true;
+};
+fn terminationPayload(nodes: &List<AstNode>, id: Int) -> Bool ~ {
+    stmt = statementAt(nodes, id);
+    if !(stmt is AstStatement::While) { return false; };
+    v = stmt as AstStatement::While;
+    expr = nodeAt(nodes, v.e);
+    if !(expr is AstNode::Expression) || !((expr as AstNode::Expression).value is AstExpression::Val) { return false; };
+    value = nodeAt(nodes, ((expr as AstNode::Expression).value as AstExpression::Val).v);
+    if !(value is AstNode::Value) || !((value as AstNode::Value).value is AstValue::VBool) || !((value as AstNode::Value).value as AstValue::VBool).b { return false; };
+    invariant = nodeAt(nodes, v.vs); body = nodeAt(nodes, v.xs);
+    if !(invariant is AstNode::Validations) || !((invariant as AstNode::Validations).value is AstValidations::End) || !(body is AstNode::Statements) || !((body as AstNode::Statements).value is AstStatements::End) { return false; };
+    term = nodeAt(nodes, v.t);
+    return term is AstNode::OptTermination && (term as AstNode::OptTermination).value is AstOptTermination::SomeTermination;
+};
+fn payloadMatches(ts: &List<Token>, p: Int, nodes: &List<AstNode>, id: Int) -> Bool ~ {
+    if id < 0 || id >= size(nodes) { return false; };
+    if wordIs(ts, 0, "invariant") || ((wordIs(ts, 0, "spec") && (p = 2 || p = 4)) || (wordIs(ts, 0, "loop") && p = 5)) { return blockPayload(nodes, id); };
+    if (wordIs(ts, 0, "spec") && p = 6) || (wordIs(ts, 0, "loop") && p = 7) { return terminationPayload(nodes, id); };
+    stmt = statementAt(nodes, id);
+    if wordIs(ts, 0, "assumes") {
+        if stmt is AstStatement::Return { return true; };
+        if !(stmt is AstStatement::ValidationStatement) { return false; };
+        node = nodeAt(nodes, (stmt as AstStatement::ValidationStatement).v);
+        return node is AstNode::Validation && (node as AstNode::Validation).value is AstValidation::Assume;
+    };
+    if wordIs(ts, 1, "validation") { return stmt is AstStatement::ValidationStatement; };
+    if wordIs(ts, 1, "axiom") { return stmt is AstStatement::AxiomDef; };
+    if wordIs(ts, 1, "proof") { return stmt is AstStatement::ProofDef; };
+    return false;
+};
