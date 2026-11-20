@@ -508,13 +508,17 @@ testLinkNative = TestList "testLinkNative"
                 functionsOf out = [takeWhile (/= ' ') (drop 9 l) | l <- lines out, take 9 l == "function "]
                 -- (the owned MIR version 2 the fused tool writes after its MIR version 3 receipt)
                 ownedPart out = dropWhile (/= "tersus-mir 2") (lines out)
+                -- (a declared type whose name sorts after a held instance's: the owned rows come in the order the declarations do)
+                withZ = program{M.progTypes = Map.singleton "Z" (M.StructDecl [("n", TInt)])}
+                zRow = "owned \"Z\" \"\" \"\" \"\" \"\" \"\" \"\" \"\""
                 -- (a tuple's declared struct has no facts of its own; a near miss of its name is an ordinary struct, which has to)
                 withTuple n = program{M.progTypes = Map.singleton n (M.StructDecl [("0", TInt), ("1", TInt)])}
-            case (programData program, programData (withTuple "Tuple2"), programData (withTuple "Tuple02")) of
-                (Error e, _, _) -> pure (Just e)
-                (_, Error e, _) -> pure (Just e)
-                (_, _, Error e) -> pure (Just e)
-                (Ok text, Ok tupleText, Ok nearTupleText) -> do
+            case (programData program, programData (withTuple "Tuple2"), programData (withTuple "Tuple02"), programData withZ) of
+                (Error e, _, _, _) -> pure (Just e)
+                (_, Error e, _, _) -> pure (Just e)
+                (_, _, Error e, _) -> pure (Just e)
+                (_, _, _, Error e) -> pure (Just e)
+                (Ok text, Ok tupleText, Ok nearTupleText, Ok zText) -> do
                     tool <- actualEmitterTool
                     case tool of
                         Error e -> pure (Just e)
@@ -522,6 +526,10 @@ testLinkNative = TestList "testLinkNative"
                             let checked = withRows ["ownership 2", vRow, wRow] text
                             (tupleStatus, _, tupleErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 2", vRow, wRow] tupleText)
                             (_, nearTuple, nearTupleErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 2", vRow, wRow] nearTupleText)
+                            (zStatus, zFused, zErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 3", vRow, wRow, zRow] zText)
+                            let zOwned = ownedPart zFused
+                                -- (the declarations and their rows, as the owned program writes them)
+                                zRecords = [l | l <- zOwned, any (`isPrefixOf` l) ["struct ", "enum ", "storage ", "ownership ", "owned "]]
                             (_, mono, monoErrors) <- Native.runWithInputFull executable ("pass mono\n" ++ checked)
                             (fusedStatus, fused, fusedErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ checked)
                             (_, missing, missingErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 1", vRow] text)
@@ -556,6 +564,13 @@ testLinkNative = TestList "testLinkNative"
                                 , testAssertTrue (any ("call i64 @\"fn.dropW<Int>\"" `isInfixOf`) (lines llvm))
                                 , firstFailure [testAssertEq missing "1\n", testAssertEq missingErrors "Type error: W<Int> has no checked ownership facts\n"]
                                 , firstFailure [testAssertEq tupleErrors "", testAssertEq tupleStatus ExitSuccess]
+                                , firstFailure
+                                    [ testAssertEq zErrors "", testAssertEq zStatus ExitSuccess
+                                    , testAssertEq zRecords
+                                        [ "struct \"W<Int>\" 1 \"x\" int", "struct \"Z\" 1 \"n\" int", "storage \"\" \"\"", "ownership 2"
+                                        , "owned \"W<Int>\" \"\" \"D\" \"dropW<Int>\" \"C\" \"cloneW<Int>\" \"\" \"\"", zRow ]
+                                    , testAssertTrue ("drop 1" `elem` dropWhile (\l -> take 5 l /= "main ") zOwned)
+                                    ]
                                 , firstFailure [testAssertEq nearTuple "1\n", testAssertEq nearTupleErrors "Type error: Tuple02 has no checked ownership facts\n"]
                                 -- (facts of another instance of the same struct are not the held instance's)
                                 , firstFailure [testAssertEq nearMiss "1\n", testAssertEq nearMissErrors "Type error: W<Int> has no checked ownership facts\n"]
