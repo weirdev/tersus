@@ -6,7 +6,7 @@ import qualified PackageCompile
 import PreludeSource (toolPackageFiles, parserPackageFiles)
 import qualified TersusParser
 import qualified MirHousekeeping
-import MirData (writeProgram)
+import MirData (writeOwnedProgram)
 import Seed (compilerSnapshotHash)
 import LlvmRuntime (runtimeSource)
 import Hash (fingerprint)
@@ -87,8 +87,10 @@ testDataCodec = TestList "testDataCodec"
             changed target = [(path, source ++ if path == target then "\n" else "") | (path, source) <- parserPackageFiles]
             manifest = testAssertTrue (all (\(path, _) -> hash (changed path) /= original) parserPackageFiles)
         pure $ case (producer, actual, TersusParser.ownedParserProgram) of
-            (Ok emitter, Ok key, Ok program) -> firstFailure
-                [testAssertEq key (MirHousekeeping.ownedContentKey emitter (writeProgram program) []), manifest]
+            -- (the owned input is written with its checked facts, as MirHousekeeping.prepareProgram writes it)
+            (Ok emitter, Ok key, Ok program) -> case writeOwnedProgram program of
+                Error e -> Just e
+                Ok input -> firstFailure [testAssertEq key (MirHousekeeping.ownedContentKey emitter input []), manifest]
             (Error e, _, _) -> Just e
             (_, Error e, _) -> Just e
             (_, _, Error e) -> Just e

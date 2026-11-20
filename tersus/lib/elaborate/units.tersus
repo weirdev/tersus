@@ -4,11 +4,11 @@ import data::codec::codec { catStrings, intAt };
 import data::reader::reader { parseAstLines, readRecord };
 import elaborate::decls { Decls, FileDecl, declsFromStatements, emptyDecls, fileDeclarations, locating, textLess };
 import elaborate::elaborate { Answer, Program, Unit, Wire, elaborateUnit, joinBlock, malformed, noProgram, noWire, printAnswerBody, printIntWord, printQuoted, readBlock, readProtocols, withMir };
-import elaborate::libraries { Catalog, Lib, closure, declaredNames, libIndex, libraryContexts, librariesFor, probeModule, readCatalog, seenLibraries, shapedLibraries };
-import elaborate::load { LFile, LS, Loaded, ModId, PMod, PR, RImp, dependenciesOf, emptyMod, layoutNames, soloLayout, stateOfLoad, idLess, loadEntry, modKey, newLS, parseWith, renderPath, resolvedKey, sameId, sortNames, statementsOfProgram };
+import elaborate::libraries { Catalog, Lib, closure, declaredNames, libIndex, libraryContexts, librariesFor, probeModule, readCatalog, seenLibraries };
+import elaborate::load { MarkerBinding, Config, LFile, LS, Loaded, ModId, PMod, PR, RImp, markerConfig, placeBindings, dependenciesOf, emptyMod, layoutNames, soloLayout, stateOfLoad, idLess, loadEntry, modKey, newLS, parseWith, renderPath, resolvedKey, sameId, sortNames, statementsOfProgram };
 import elaborate::records { listItems, nameText, nodeIn };
 import elaborate::resolve { Decl, Imp, Line, PFile, Pkg, finishPackage, moduleKey, noPackage, readLine, textAt, wordIs };
-import elaborate::rewrite { functValue, reservedError, statementOf };
+import elaborate::rewrite { functValue, statementOf };
 import elaborate::snapshot { Snap, Source, hasFile, joinPath, readFile, readSnapshot, showText, showTexts };
 import elaborate::state { indexIn, intText, joinWith };
 import parser::syntax::syntax as ps;
@@ -44,7 +44,7 @@ fn answerLoad(line: &Line, version2: Bool) -> Int ~ {
     if snap.kind = "graph" { return answerGraph(&snap, &libs); };
     if snap.kind = "package" { return answerPackage(&snap, &libs, &table.value, &catalog, &wire); };
     if snap.kind = "program" || snap.kind = "parse" || snap.kind = "equality" { return answerProgram(&snap, &libs, &table.value, &catalog, &wire); };
-    if snap.kind = "libraries" { return answerLibraries(&libs, &table.value, &wire); };
+    if snap.kind = "libraries" { return answerLibraries(&snap, &libs, &table.value, &wire); };
     return malformed();
 };
 
@@ -53,11 +53,9 @@ fn answerLoad(line: &Line, version2: Bool) -> Int ~ {
 struct LibFile { stem: String, imports: List<ps::FileImport>, program: AstProgram };
 impl Clone for LibFile { };
 
-// One entry per library module, in the sources' order. The sources are in one of two shapes: each a module of the synthetic
-// tersuslib package, importing others as `tersuslib::name` (compiled as the libraries have been, by their bare names), or
-// the modules of the ordinary std package, importing `std::module` or `std::module::file` with the names they use, a module
-// of several files being consecutive sources named `module/file` (std: the latter)
-struct LibParse { ok: Bool, msg: String, names: List<String>, deps: List<List<String>>, files: List<List<LibFile>>, decls: Decls, regular: Int, nativeOk: Bool, nativeMsg: String, std: Bool };
+// One entry per module of the std package, in the sources' order: a source imports `std::module` or `std::module::file`
+// with the names it uses, and the files of one module are consecutive sources named `module/file`
+struct LibParse { ok: Bool, msg: String, names: List<String>, deps: List<List<String>>, files: List<List<LibFile>>, decls: Decls, regular: Int, nativeOk: Bool, nativeMsg: String };
 
 fn libDepsOf(libs: &LibParse, name: &String) -> List<String> ~ {
     i = indexIn(&libs.names, name);
@@ -160,13 +158,9 @@ fn parseLibrary(libs: LibParse, source: &Source) -> LibParse ~ {
     if !prefix.ok { return LibParse { ok: false, msg: prefix.message, ..libs }; };
     deps = [];
     if sameModule && last >= 0 && last < size(libs.deps) { deps = clone(get(&libs.deps, last)); };
-    if stdShaped(source) != libs.std { return LibParse { ok: false, msg: catStrings(catStrings("lib module ", source.name), " is not in the shape of the libraries before it"), ..libs }; };
     for imp in &prefix.imports {
-        if libs.std && (size(imp.path) < 2 || size(imp.path) > 3 || get(&imp.path, 0) != "std" || imp.hasAlias) {
+        if size(imp.path) < 2 || size(imp.path) > 3 || get(&imp.path, 0) != "std" || imp.hasAlias {
             return LibParse { ok: false, msg: catStrings("compiler library import must name a std module: ", showImport(imp)), ..libs };
-        };
-        if !libs.std && (size(imp.path) != 2 || get(&imp.path, 0) != "tersuslib" || imp.hasAlias || imp.hasNames) {
-            return LibParse { ok: false, msg: catStrings("compiler library import must name a tersuslib module: ", showImport(imp)), ..libs };
         };
         if size(imp.path) < 2 { return LibParse { ok: false, msg: catStrings("compiler library import must name a module: ", showImport(imp)), ..libs }; };
         dep = clone(get(&imp.path, 1));
@@ -191,8 +185,7 @@ fn parseLibrary(libs: LibParse, source: &Source) -> LibParse ~ {
 
 // The implicit libraries in their order, then the native storage helpers after them (LibParsed.libParsed, nativeLibParsed)
 fn parseLibraries(sources: &List<Source>) -> LibParse ~ {
-    libs = LibParse { ok: true, msg: "", names: [], deps: [], files: [], decls: emptyDecls(), regular: 0, nativeOk: true, nativeMsg: "", std: false };
-    if size(sources) > 0 { libs = LibParse { std: stdShaped(&get(sources, 0)), ..libs }; };
+    libs = LibParse { ok: true, msg: "", names: [], deps: [], files: [], decls: emptyDecls(), regular: 0, nativeOk: true, nativeMsg: "" };
     for s in sources {
         if !s.native && libs.ok { libs = parseLibrary(libs, s); };
     };
@@ -211,23 +204,8 @@ fn parseLibraries(sources: &List<Source>) -> LibParse ~ {
     return libs;
 };
 
-// A source of the std shape: a file of a module of several, or one that imports from std
-fn stdShaped(source: &Source) -> Bool ~ {
-    for b in &source.name.bytes { if toInt(b) = 47 { return true; }; };
-    prefix = ps::importPrefixText(ps::newSt(), clone(source.text));
-    if !prefix.ok { return false; };
-    for imp in &prefix.imports { if size(imp.path) > 0 && get(&imp.path, 0) = "std" { return true; }; };
-    return false;
-};
-
-fn libPackageName(libs: &LibParse) -> String ~ {
-    if libs.std { return "std"; };
-    return "tersuslib";
-};
-
 // The std package that the libraries are modules of, for their names to be resolved and made canonical as any package's are
 fn libPackage(libs: &LibParse) -> Pkg ~ {
-    if !libs.std { return noPackage(); };
     files = [];
     decls = [];
     fi = 0;
@@ -436,17 +414,6 @@ fn joinedProgram(ls: &LS, files: &List<LFile>) -> Program ~ {
     return program;
 };
 
-// Whether the elaborated module declares the trait Eq itself (LibPackage.withoutReplacedEq)
-fn declaresEq(out: &AstProgram) -> Bool ~ {
-    root = nodeIn(&out.nodes, out.root);
-    if !(root is AstNode::Elaborated) { return false; };
-    for s in listItems(&out.nodes, (root as AstNode::Elaborated).value.statements) {
-        stmt = statementOf(&out.nodes, s);
-        if stmt is AstStatement::TraitDef && nameText(&out.nodes, (stmt as AstStatement::TraitDef).n) = "Eq" { return true; };
-    };
-    return false;
-};
-
 fn libKeys(catalog: &Catalog, names: &List<String>) -> List<String> ~ {
     out = [];
     for n in names {
@@ -485,7 +452,7 @@ fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
         parsed = parseAstLines(&lib.lines);
         if !parsed.ok { return malformed(); };
         seen = seen.insert(clone(lib.key), clone(parsed.value));
-        t = Ifaces { programs: t.programs.insert(clone(lib.key), parsed.value), ids: t.ids.insert(clone(lib.key), ModId { pkg: libPackageName(libs), modu: clone(lib.name), has: true }) };
+        t = Ifaces { programs: t.programs.insert(clone(lib.key), parsed.value), ids: t.ids.insert(clone(lib.key), ModId { pkg: "std", modu: clone(lib.name), has: true }) };
     };
     compiled = [];
     for id in &ls.order {
@@ -506,10 +473,13 @@ fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
         if given { unitCatalog = Catalog { ok: true, libs: clone(catalog.libs) }; };
         definitionPrograms = [];
         for ctx in &defining { definitionPrograms = push(definitionPrograms, programsOf(&t, ctx)); };
+        unitKey = modKey(id);
+        bindingsOwn = ownBindings(&pkg, &unitKey, &id.modu, id.has, &pm.layout.bindings);
         unit = Unit { pkgName: clone(id.pkg), modu: clone(id.modu), hasModule: id.has, predeclaring: true, viewing: false, extracting: true, libExtract: false,
             ifaces: programsOf(&t, &depKeys), ifaceKeys: clone(depKeys), definitions: definitionPrograms, definitionKeys: clone(defining),
             hasCatalog: given, catalog: unitCatalog, pkg: clone(pkg), stdPkg: clone(stdPkg), program: joinedProgram(&ls, &pm.files),
-            wireVersion: wire.version, wireProtocols: clone(wire.protocols) };
+            wireVersion: wire.version, wireProtocols: clone(wire.protocols),
+            ownRoles: bindingsOwn.roles, ownProviders: bindingsOwn.providers, boundMsg: bindingsOwn.msg, packageRoles: boundRoles(&pm.layout.bindings) };
         answer = elaborateUnit(table, unit, &seen);
         if answer.status < 0 { return malformed(); };
         if answer.status != 0 {
@@ -517,9 +487,7 @@ fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
             "end\n".print();
             return 0;
         };
-        names = [];
-        replaced = declaresEq(&answer.out);
-        for n in seenLibraries(&catalog.libs, &answer.selected) { if !replaced || n != "eq" { names = push(names, clone(n)); }; };
+        names = seenLibraries(&catalog.libs, &answer.selected);
         libContexts = [];
         for ctx in libraryContexts(&catalog.libs, &answer.selected) { libContexts = push(libContexts, libKeys(catalog, &ctx)); };
         for ctx in &defining { libContexts = push(libContexts, clone(ctx)); };
@@ -543,30 +511,6 @@ fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
 };
 
 // ---- a program (SourceParse.parseSourcePartsWith, parseWithEqualityWith; Compile.lowerSourcePartsWith) ----
-
-fn reservedNames() -> List<String> ~ {
-    names = push(push(push(push(push(push(push([], "List"), "Box"), "listNew"), "listLen"), "listGet"), "listFirst"), "listLast");
-    return push(push(push(push(push(push(names, "listPop"), "listSet"), "listPush"), "listFilled"), "boxNew"), "boxUnbox");
-};
-
-fn reservedName(nodes: &List<AstNode>, stmts: &List<Int>) -> String ~ {
-    reserved = reservedNames();
-    for s in stmts {
-        stmt = statementOf(nodes, s);
-        name = "";
-        if stmt is AstStatement::Assign && functValue(nodes, (stmt as AstStatement::Assign).e) >= 0 { name = nameText(nodes, (stmt as AstStatement::Assign).n); };
-        if stmt is AstStatement::StructDef { name = nameText(nodes, (stmt as AstStatement::StructDef).n); };
-        if stmt is AstStatement::EnumDef { name = nameText(nodes, (stmt as AstStatement::EnumDef).n); };
-        if stmt is AstStatement::TraitDef { name = nameText(nodes, (stmt as AstStatement::TraitDef).n); };
-        if stmt is AstStatement::BoundedDef {
-            inner = statementOf(nodes, (stmt as AstStatement::BoundedDef).s);
-            if inner is AstStatement::Assign { name = nameText(nodes, (inner as AstStatement::Assign).n); };
-        };
-        if size(name.bytes) > 0 && indexIn(&reserved, &name) >= 0 { return name; };
-    };
-    return "";
-};
-
 
 struct SourceParse { ok: Bool, msg: String, names: List<String>, program: AstProgram };
 
@@ -615,10 +559,10 @@ fn parseSource(snap: &Snap, libs: &LibParse, text: &String) -> SourceParse ~ {
         if equality { return sourceFailed(probe.msg); };
         return sourceFailed(catStrings("Parse error: ", probe.msg));
     };
-    chosen = shapedLibraries(&libs.names, librariesFor(probeModule(&probe.program.nodes, statementsOfProgram(&probe.program), noPrograms())));
+    chosen = librariesFor(probeModule(&probe.program.nodes, statementsOfProgram(&probe.program), noPrograms()));
     if equality {
         restricted = [];
-        for n in &chosen { if n = "types" || n = "clone" || n = "core" || n = "eq" { restricted = push(restricted, clone(n)); }; };
+        for n in &chosen { if n = "core" || n = "eq" { restricted = push(restricted, clone(n)); }; };
         chosen = restricted;
     };
     declared = libDecls(libs, &chosen, libs.regular);
@@ -637,10 +581,6 @@ fn parseSource(snap: &Snap, libs: &LibParse, text: &String) -> SourceParse ~ {
 
 fn checkedSource(snap: &Snap, parsed: PR, names: List<String>) -> SourceParse ~ {
     if size(parsed.imports) > 0 { return sourceFailed(catStrings("imports are not linked yet: ", importsText(&parsed.imports))); };
-    if snap.reserving {
-        name = reservedName(&parsed.program.nodes, statementsOfProgram(&parsed.program));
-        if size(name.bytes) > 0 { return sourceFailed(reservedError(&name)); };
-    };
     return SourceParse { ok: true, msg: "", names: names, program: parsed.program };
 };
 
@@ -661,7 +601,7 @@ fn answerProgram(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
     unit = Unit { pkgName: "main", modu: "", hasModule: false, predeclaring: false, viewing: false, extracting: false, libExtract: false,
         ifaces: [], ifaceKeys: [], definitions: [], definitionKeys: [], hasCatalog: given, catalog: unitCatalog, pkg: noPackage(), stdPkg: libPackage(libs),
         program: joinBlock(Program { nodes: [], roots: [] }, &source.program),
-        wireVersion: wire.version, wireProtocols: clone(wire.protocols) };
+        wireVersion: wire.version, wireProtocols: clone(wire.protocols), ownRoles: [], ownProviders: [], boundMsg: "", packageRoles: [] };
     seen = HashMap::new();
     answer = elaborateUnit(table, unit, &seen);
     if answer.status < 0 { return malformed(); };
@@ -671,9 +611,7 @@ fn answerProgram(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
         return 0;
     };
     if answer.status = 0 {
-        names = [];
-        replaced = declaresEq(&answer.out);
-        for n in seenLibraries(&catalog.libs, &answer.selected) { if !replaced || n != "eq" { names = push(names, clone(n)); }; };
+        names = seenLibraries(&catalog.libs, &answer.selected);
         ifaces = [];
         for n in &names {
             i = libIndex(&catalog.libs, n);
@@ -709,7 +647,7 @@ fn libContextsFor(libs: &LibParse, ifaces: &List<String>, deps: &List<String>) -
     return out;
 };
 
-fn compileLibrary(libs: &LibParse, pkg: &Pkg, table: &AstProgram, t: &Ifaces, done: &List<String>, i: Int, wire: &Wire) -> Answer ~ {
+fn compileLibrary(libs: &LibParse, pkg: &Pkg, table: &AstProgram, t: &Ifaces, done: &List<String>, i: Int, wire: &Wire, marker: &Config) -> Answer ~ {
     name = "";
     if i >= 0 && i < size(libs.names) { name = clone(get(&libs.names, i)); };
     deps = libDepsOf(libs, &name);
@@ -718,23 +656,88 @@ fn compileLibrary(libs: &LibParse, pkg: &Pkg, table: &AstProgram, t: &Ifaces, do
     contexts = libContextsFor(libs, done, &deps);
     definitionPrograms = [];
     for ctx in &contexts { definitionPrograms = push(definitionPrograms, programsOf(t, ctx)); };
-    unit = Unit { pkgName: libPackageName(libs), modu: clone(name), hasModule: true, predeclaring: true, viewing: true, extracting: true, libExtract: true,
+    unit = Unit { pkgName: "std", modu: clone(name), hasModule: true, predeclaring: true, viewing: true, extracting: true, libExtract: true,
         ifaces: programsOf(t, &depKeys), ifaceKeys: depKeys, definitions: definitionPrograms, definitionKeys: contexts,
         hasCatalog: false, catalog: Catalog { ok: true, libs: [] }, pkg: clone(pkg), stdPkg: noPackage(), program: libProgramOf(libs, &name),
-        wireVersion: wire.version, wireProtocols: clone(wire.protocols) };
+        wireVersion: wire.version, wireProtocols: clone(wire.protocols), ownRoles: [], ownProviders: [], boundMsg: "", packageRoles: [] };
+    libKeyText = moduleKey("std", &name, true);
+    bindingsOwn = ownBindings(pkg, &libKeyText, &name, true, &marker.bindings);
+    unit = Unit { ownRoles: bindingsOwn.roles, ownProviders: bindingsOwn.providers, boundMsg: bindingsOwn.msg, ..unit };
     seen = HashMap::new();
     return elaborateUnit(table, unit, &seen);
 };
 
-fn answerLibraries(libs: &LibParse, table: &AstProgram, wire: &Wire) -> Int ~ {
+// The marker of the package the library sources are the modules of: the package.tersus of the request's std root,
+// whose bindings give the libraries' own declarations their roles; libraries given with no std root provide none
+fn libraryMarker(snap: &Snap, libs: &LibParse) -> Config ~ {
+    none = Config { ok: true, msg: "", noPrelude: false, bindings: [] };
+    if !snap.hasStd { return none; };
+    path = joinPath(&snap.std, "package.tersus");
+    read = readFile(snap, &path);
+    if !read.ok { return Config { ok: false, msg: catStrings("package marker not found: ", &path), ..none }; };
+    config = markerConfig(&path, &read.text);
+    if !config.ok { return config; };
+    rootStems = [];
+    placed = placeBindings(&config.bindings, &libs.names, &rootStems);
+    if size(placed.msg.bytes) > 0 { return Config { ok: false, msg: catStrings(catStrings(catStrings("package configuration: ", showText(&path)), ": "), &placed.msg), ..config }; };
+    return Config { bindings: placed.bindings, ..config };
+};
+
+struct Own { roles: List<String>, providers: List<String>, msg: String };
+
+// The roles a module's own declarations are given by its package's bindings: each binding of the module names one
+// declaration of it, of the kind of its role (a type for List and Box, a trait for the others), by that declaration's
+// canonical name; a binding of the module that names none, or names more than one, is refused
+fn boundRoles(bindings: &List<MarkerBinding>) -> List<String> ~ {
+    roles = [];
+    for b in bindings { roles = push(roles, clone(b.role)); };
+    return roles;
+};
+
+fn ownBindings(pkg: &Pkg, key: &String, modu: &String, hasModu: Bool, bindings: &List<MarkerBinding>) -> Own ~ {
+    roles = [];
+    providers = [];
+    for b in bindings {
+        if size(b.path) >= 2 {
+            first = clone(get(&b.path, 0));
+            mine = (b.rooted && !hasModu) || (!b.rooted && hasModu && first = clone(modu));
+            if mine {
+                local = clone(get(&b.path, size(b.path) - 1));
+                stem = "";
+                hasStem = false;
+                if b.rooted { stem = clone(first); hasStem = true; } else { if size(b.path) = 3 { stem = clone(get(&b.path, 1)); hasStem = true; }; };
+                kind = 2;
+                if b.role = "List" || b.role = "Box" { kind = 0; };
+                found = [];
+                for d in &pkg.decls {
+                    if d.key = clone(key) && d.local = local && (!hasStem || d.stem = stem) && d.kind = kind && indexIn(&found, &d.canonical) < 0 { found = push(found, clone(d.canonical)); };
+                };
+                shown = joinWith(&b.path, "::");
+                if size(found) = 0 {
+                    what = "trait";
+                    if kind = 0 { what = "type"; };
+                    return Own { roles: [], providers: [], msg: catStrings(catStrings(catStrings(catStrings(catStrings(catStrings("Type error: the package binds ", &b.role), " to "), &shown), ", which is no "), &what), " of the module") };
+                };
+                if size(found) > 1 { return Own { roles: [], providers: [], msg: catStrings(catStrings(catStrings(catStrings("Type error: the package binds ", &b.role), " to "), &shown), ", which names more than one declaration") }; };
+                roles = push(roles, clone(b.role));
+                providers = push(providers, clone(get(&found, 0)));
+            };
+        };
+    };
+    return Own { roles: roles, providers: providers, msg: "" };
+};
+
+fn answerLibraries(snap: &Snap, libs: &LibParse, table: &AstProgram, wire: &Wire) -> Int ~ {
     if !libs.ok { "librariesFailed ".print(); printQuoted(catStrings("the lib package does not parse: ", libs.msg)); "\n".print(); return 0; };
+    marker = libraryMarker(snap, libs);
+    if !marker.ok { "librariesFailed ".print(); printQuoted(&marker.msg); "\n".print(); return 0; };
     t = Ifaces { programs: HashMap::new(), ids: HashMap::new() };
     pkg = libPackage(libs);
     done = [];
     for i in 0..size(libs.names) {
         if i = libs.regular && !libs.nativeOk { "nativesFailed ".print(); printQuoted(&libs.nativeMsg); "\n".print(); return 0; };
         name = clone(get(&libs.names, i));
-        answer = compileLibrary(libs, &pkg, table, &t, &done, i, wire);
+        answer = compileLibrary(libs, &pkg, table, &t, &done, i, wire, &marker);
         if answer.status < 0 { return malformed(); };
         deps = libDepsOf(libs, &name);
         depKeys = [];
@@ -746,7 +749,7 @@ fn answerLibraries(libs: &LibParse, table: &AstProgram, wire: &Wire) -> Int ~ {
         printAnswerBody(&answer);
         if answer.status != 0 { "end\n".print(); return 0; };
         if i < libs.regular {
-            t = Ifaces { programs: t.programs.insert(libKey(&name), clone(answer.iface)), ids: t.ids.insert(libKey(&name), ModId { pkg: libPackageName(libs), modu: clone(name), has: true }) };
+            t = Ifaces { programs: t.programs.insert(libKey(&name), clone(answer.iface)), ids: t.ids.insert(libKey(&name), ModId { pkg: "std", modu: clone(name), has: true }) };
             done = push(done, name);
         };
     };

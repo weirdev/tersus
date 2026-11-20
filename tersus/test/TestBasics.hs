@@ -14,7 +14,7 @@ import TestParserFragments
 import Data.List (isInfixOf)
 import ElaboratorTool (noVerdict)
 import MirEval (fromMirValue)
-import Pipeline (parseWithEquality, runStatements, validateStatements)
+import Pipeline (parseWithEquality, parseWithEqualityParts, runParts, validateParts)
 import StdLib
 import Types
 import Syntax
@@ -182,7 +182,7 @@ testParse =
 -- Evaluate tests
 evalExprHelper :: Expression -> Value -> TestResult
 evalExprHelper expr expected =
-    case runStatements [Return expr] of
+    case libraryParts [Return expr] `bindResult` runParts of
         Ok (Just val) -> testAssertEq (fromMirValue val) expected
         Ok Nothing -> Just "No value returned"
         Error e -> Just $ "Expression failed with error: " ++ e
@@ -200,7 +200,7 @@ parseEvalReturningStmtHelper stmtStr expected =
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
             Right (Block stmts) ->
-                case runStatements stmts of
+                case libraryParts stmts `bindResult` runParts of
                     Ok (Just val) -> testAssertEq (fromMirValue val) expected
                     Ok Nothing -> Just "No value returned"
                     Error e -> Just $ "Evaluation failed with error: " ++ e
@@ -213,9 +213,9 @@ dualReturningStmtHelper stmtStr expected =
     case parseStatement stmtStr of
         Left err -> Just $ "Parse failed: " ++ show err
         Right (Block stmts) ->
-            case validateStatements stmts of
+            case libraryParts stmts `bindResult` validateParts of
                 Error e -> Just $ "Validation failed with error: " ++ e
-                Ok _ -> case runStatements stmts of
+                Ok _ -> case libraryParts stmts `bindResult` runParts of
                     Ok (Just val) -> testAssertEq (fromMirValue val) expected
                     Ok Nothing -> Just "No value returned"
                     Error e -> Just $ "Evaluation failed with error: " ++ e
@@ -311,7 +311,7 @@ parseEvalFailStmtHelper stmtStr expectedError =
         Right (Block stmts) ->
             testAssertErrorContains
                 expectedError
-                (runStatements stmts)
+                (libraryParts stmts `bindResult` runParts)
         Right _ -> Just "Not a block statement"
 
 testParseEvalFirstEmptyFail :: TestResult
@@ -349,10 +349,10 @@ argPassingSource =
 
 testArgPassingByValue :: TestResult
 testArgPassingByValue =
-    case parseWithEquality argPassingSource of
+    case parseWithEqualityParts argPassingSource of
         Left err -> Just $ "Parse failed: " ++ err
-        Right stmts ->
-            case (validateStatements stmts, runStatements stmts) of
+        Right parts ->
+            case (validateParts parts, runParts parts) of
                 (Error e, _) -> Just $ "Validation failed with error: " ++ e
                 (_, Error e) -> Just $ "Evaluation failed with error: " ++ e
                 (Ok _, Ok ret) -> testAssertEq (fmap fromMirValue ret) (Just (VInt 3))
@@ -629,9 +629,9 @@ testValidateWhile =
     -- (the validator could not prove exactly this obligation: not a parse, type, tool or internal failure, nor a part
     -- it does not model, nor another obligation)
     proofRefused obligation source =
-        case parseWithEquality source of
+        case parseWithEqualityParts source of
             Left err -> Just ("Parse failed: " ++ err)
-            Right stmts -> case validateStatements stmts of
+            Right parts -> case validateParts parts of
                 Ok _ -> Just "Validation passed when it should have failed"
                 Error e
                     | noVerdict e || any (`isInfixOf` e) ["does not model yet", "internal compiler error", "Internal error"] -> Just ("No verdict: " ++ e)

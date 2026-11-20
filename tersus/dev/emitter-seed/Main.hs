@@ -4,7 +4,7 @@ import System.Directory (canonicalizePath, doesFileExist)
 import System.Environment (getArgs, lookupEnv)
 
 import Bootstrap (cachedEmitter, cachedSeed, emitWith)
-import MirData (writeProgram)
+import MirData (writeOwnedProgram)
 import MirHousekeeping (emitterEntry, emitterOwnedProgram, ownedToolWith)
 import Utils
 
@@ -25,7 +25,7 @@ main = do
                     owned <- ownedToolWith stageOne emitterEntry
                     case owned of
                         Error e -> fail ("stage 1 owning the emitter: " ++ e)
-                        Ok program -> emitWith stageOne (writeProgram program) >>= written output
+                        Ok program -> emitOwned stageOne program >>= written output
         ["emit", output] -> do
             zero <- cachedSeed
             one <- cachedEmitter
@@ -40,8 +40,8 @@ main = do
                             | a /= b -> fail "stage 0 and stage 1 own the emitter differently"
                             | b /= c -> fail "the owned emitter of the pipeline is not stage 1's"
                             | otherwise -> do
-                                ir0 <- emitWith stageZero (writeProgram a)
-                                ir1 <- emitWith stageOne (writeProgram b)
+                                ir0 <- emitOwned stageZero a
+                                ir1 <- emitOwned stageOne b
                                 case (ir0, ir1) of
                                     (Error e, _) -> fail ("stage 0 emitting the emitter: " ++ e)
                                     (_, Error e) -> fail ("stage 1 emitting the emitter: " ++ e)
@@ -53,6 +53,11 @@ main = do
                         (_, _, Error e) -> fail ("the owned emitter: " ++ e)
         _ -> fail "usage: emitter-seed advance <output.ll> | emitter-seed emit <output.ll>"
   where
+    -- (the owned emitter is given with its checked ownership facts, as Bootstrap.stageOne gives it: without them it has no drop
+    -- for an instance of a checked type)
+    emitOwned stage program = case writeOwnedProgram program of
+        Error e -> pure (Error e)
+        Ok text -> emitWith stage text
     -- (the output is written only once everything succeeded, and never over the seed the run was built from)
     written _ (Error e) = fail e
     written output (Ok text) = do

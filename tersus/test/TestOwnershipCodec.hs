@@ -23,8 +23,8 @@ import Syntax
 import Types
 import TestHarness
 import ElaboratorTool (Loader, nativeElaborator, nativeLoader, runElaboratorText, runLoader, sourceElaboratorExecutable)
-import LibPackage (LibPackage (..), compileLibPackageWith)
-import Compile (lowerStatementsWith, parseSource, sourceRequest)
+import LibPackage (LibPackage (..), compileLibPackageWith, libCatalog)
+import Compile (lowerPartsWith, lowerStatementsWith, parseSource, parseSourceParts, sourceRequest)
 import PackageData (ModuleId (..), Snapshot (..), resolverFromFiles)
 import qualified PackageCompile as Package
 import qualified Mir as M
@@ -169,7 +169,8 @@ nativeDefiningSmoke = do
                         ineligible = Map.lookup "vendor$api$api$Vessel<Missing>" (facts uncalled)
                      in testAssertTrue (not (null applicable)) <>
                         testAssertTrue (maybe False (hasSelectedBody uncalled) (selected uncalled)) <>
-                        testAssertEq (linkedCallee uncalled <$> selected uncalled) (Just False) <>
+                        -- (the checked Clone fact of a kept owner names a copy the link makes, whether or not the program calls it)
+                        testAssertEq (linkedCallee uncalled <$> selected uncalled) (Just True) <>
                         testAssertEq (selected called) (selected uncalled) <>
                         testAssertEq (linkedCallee called <$> selected called) (Just True) <>
                         (case Package.lowerCompiledPackage called `bindResult` validateCompiled of Error e -> Just ("the called copy does not validate: " ++ e); Ok _ -> Nothing) <>
@@ -178,7 +179,7 @@ nativeDefiningSmoke = do
 
 definingFiles :: String -> String -> [(FilePath, String)]
 definingFiles api call =
-    [ ("vendor/package.tersus", "noPrelude = true;")
+    [ ("vendor/package.tersus", "noPrelude = true;\nClone = api::Clone;")
     , ("vendor/api/api.tersus", "trait Clone { fn clone(self: &Self) -> Self; }; struct Cell { value: Int }; impl Clone for Cell { fn clone(self: &Self) -> Self { return Cell { value: self.value }; }; }; struct Vessel<T> { value: T }; impl<T: Clone> Clone for Vessel<T> { fn clone(self: &Self) -> Self { return Vessel<T> { value: clone(self.value) }; }; }; " ++ api)
     , ("vendor/main.tersus", "import vendor::api; struct Missing { value: Int }; fn keep(x: &api::Vessel<Missing>) -> Int { return 0; }; x = api::Vessel<api::Cell> { value: api::Cell { value: 1 } }; " ++ call ++ "return 0;")
     ]
@@ -267,22 +268,32 @@ nativeRefusalReason = withSourceElaborator $ \exe -> do
 
 -- (the same protocol records in a load request, where they follow its kind)
 nativeLoadRefusals :: IO TestResult
-nativeLoadRefusals = withSourceElaborator $ \exe -> do
-    let load = (sourceRequest LoadProgram False False [] "struct Cell { n: Int }; return 0;"){lrProtocols = Just Map.empty}
+nativeLoadRefusals = withSourceElaborator $ \exe -> case compileLibPackageWith (checkedLoader exe) of
+  Error e -> pure (Just ("the compiler libraries did not compile: " ++ e))
+  Ok pkg -> do
+    -- (a program is read with the compiler libraries, from which the elaborator selects std's core for its List and Box)
+    let source = "struct Cell { n: Int }; return 0;"
+        load = (sourceRequest LoadProgram False False (libCatalog pkg) source){lrProtocols = Just Map.empty}
     valid <- runLoader exe load
     let positive = case valid of
             Ok (LoadedProgram response@Accepted{}) -> testAssertTrue (acceptedOwnership response /= Nothing)
             other -> Just ("valid version 2 load did not return checked facts: " ++ show other)
+    -- (std's interfaces carry checked transport, which a version 1 request cannot read: it is refused before elaborating)
     legacyAnswer <- runLoader exe load{lrProtocols = Nothing}
-    let unchecked = case legacyAnswer of
+    let refusedLegacy = case legacyAnswer of
+            Ok (LoadedProgram (NotModelled what)) -> testAssertTrue ("version 1 cannot consume checked ownership transport" `isInfixOf` what)
+            other -> Just ("legacy load with std's checked libraries was not refused: " ++ show other)
+    -- (a version 1 request with no libraries is read as it was: elaborated, without checked facts)
+    plainAnswer <- runLoader exe (sourceRequest LoadProgram True False [] source){lrProtocols = Nothing}
+    let unchecked = case plainAnswer of
             Ok (LoadedProgram response@Accepted{}) -> testAssertEq (acceptedOwnership response) Nothing
-            other -> Just ("legacy load did not elaborate: " ++ show other)
+            other -> Just ("legacy load without libraries did not elaborate: " ++ show other)
     results <- case writeLoadRequest load of
         Error e -> pure [Just e]
         Ok text -> forM badLoadRows $ \(name, protocols) -> do
             native <- runWithInputFull exe (unlines (concatMap (\line -> if line == "protocols 0" then ("protocols " ++ show (length protocols)) : protocols else [line]) (lines text)))
             pure $ fmap ((name ++ ": ") ++) (testAssertEq native (ExitSuccess, "1\n", "not an elaboration request\n"))
-    pure (positive <> unchecked <> firstFailure results)
+    pure (positive <> refusedLegacy <> unchecked <> firstFailure results)
   where
     badLoadRows =
         [ ("out-of-order role records", ["protocol \"Copy\" 1 \"p\"", "protocol \"Clone\" 1 \"p\""])
@@ -332,6 +343,10 @@ checkedAnswer exe rq = nativeElaborator exe rq{rqProtocols = Just Map.empty}
 checkedLoader :: FilePath -> Loader
 checkedLoader exe rq = nativeLoader exe rq{lrProtocols = Just Map.empty}
 
+-- (version 1 of the load requests: no protocols, and no checked transport in the answer)
+legacyLoader :: FilePath -> Loader
+legacyLoader exe rq = nativeLoader exe rq{lrProtocols = Nothing}
+
 mainTransport :: Package.CompiledPackage -> Maybe OwnershipTransport
 mainTransport pkg = case [Package.compiledOwnership m | m <- Package.compiledModules pkg, Package.compiledModuleId m == Package.compiledEntryModule pkg] of
     [transport] -> transport
@@ -375,10 +390,13 @@ nativePrivateSmoke = withSourceElaborator $ \exe -> pure $
                     Just pair@(_, callee) -> case (consumerLinked compiled callee id, consumerLinked compiled callee (withoutBounded compiled callee)) of
                         (Error e, _) -> Just ("a consumer call of the private callee did not link: " ++ e)
                         (Ok program, missing) ->
-                            testAssertTrue (not (linkedCallee compiled pair)) <>
+                            -- (the kept Vessel<Int>'s checked Clone fact names the copy, which the link makes)
+                            testAssertTrue (linkedCallee compiled pair) <>
                             testAssertTrue (Map.member callee (M.progFunctions program)) <>
                             (case missing of
                                 Error e | callee `isInfixOf` e && "which is not a function with bounds of the program" `isInfixOf` e -> Nothing
+                                -- (a frame of the copy, without the function with bounds it is a copy of, is refused as the link reads it)
+                                Error e | takeWhile (/= '[') callee `isInfixOf` e && "that is no copy of a function with bounds nor a frame of the function" `isInfixOf` e -> Nothing
                                 Error e -> Just ("the copy without its generic body was refused for another reason: " ++ e)
                                 Ok _ -> Just "the copy was made without its checked generic body")
                 selectedOf transport = transport >>= Map.lookup "vendor$hidden$hidden$Vessel<Int>" . transportOwnership >>= ownershipClone
@@ -440,8 +458,8 @@ nativeSizedSmoke = withSourceElaborator $ \exe -> pure $
 
 sizedFiles :: [(FilePath, String)]
 sizedFiles =
-    [ ("sized/package.tersus", "")
-    , ("sized/main.tersus", "trait Clone { fn clone(self: &Self) -> Self; }; trait Feed<E> { fn feed(self: &Self) -> E; }; struct Two { }; struct Three { }; impl Clone for Two { fn clone(self: &Self) -> Self { return Two { }; }; }; impl Clone for Three { fn clone(self: &Self) -> Self { return Three { }; }; }; impl Feed<Array<Int, 2>> for Two { fn feed(self: &Self) -> Array<Int, 2> { return #[1, 2]; }; }; impl Feed<Array<Int, 3>> for Three { fn feed(self: &Self) -> Array<Int, 3> { return #[1, 2, 3]; }; }; struct Holder<T, n> { value: T, cells: Array<Int, n> }; impl<T: Clone + Feed<Array<Int, n>>, n> Clone for Holder<T, n> { fn clone(self: &Self) -> Self { return Holder<T, n> { value: clone(self.value), cells: self.cells }; }; }; a = Holder<Two, 2> { value: Two { }, cells: #[1, 2] }; b = Holder<Three, 3> { value: Three { }, cells: #[1, 2, 3] }; c = clone(a); d = clone(b); return 0;")
+    [ ("sized/package.tersus", "noPrelude = true;\nClone = main::Clone;")
+    , ("sized/main.tersus", "trait Clone { fn clone(self: &Self) -> Self; }; trait Feed<E> { fn feed(self: &Self) -> E; }; struct Two { }; struct Three { }; impl Clone for Two { fn clone(self: &Self) -> Self { return Two { }; }; }; impl Clone for Three { fn clone(self: &Self) -> Self { return Three { }; }; }; impl Feed<Array<Int, 2>> for Two { fn feed(self: &Self) -> Array<Int, 2> { return array(2, 1); }; }; impl Feed<Array<Int, 3>> for Three { fn feed(self: &Self) -> Array<Int, 3> { return array(3, 1); }; }; struct Holder<T, n> { value: T, cells: Array<Int, n> }; impl<T: Clone + Feed<Array<Int, n>>, n> Clone for Holder<T, n> { fn clone(self: &Self) -> Self { return Holder<T, n> { value: clone(self.value), cells: self.cells }; }; }; a = Holder<Two, 2> { value: Two { }, cells: array(2, 1) }; b = Holder<Three, 3> { value: Three { }, cells: array(3, 1) }; c = clone(a); d = clone(b); return 0;")
     ]
 
 -- The provider clones its own Vessel<Int> (with its own Clone role) in a function main calls through api
@@ -455,7 +473,7 @@ providerCallFiles =
 
 privateFiles :: String -> [(FilePath, String)]
 privateFiles main =
-    [ ("vendor/package.tersus", "noPrelude = true;")
+    [ ("vendor/package.tersus", "noPrelude = true;\nClone = hidden::Clone;")
     , ("vendor/hidden/hidden.tersus", "trait Clone { fn clone(self: &Self) -> Self; }; struct Vessel<T> { value: T }; impl<T: Clone> Clone for Vessel<T> { fn clone(self: &Self) -> Self { return Vessel<T> { value: clone(self.value) }; }; }; fn vessel(n: Int) -> Vessel<Int> { return Vessel<Int> { value: n }; };")
     , ("vendor/api/api.tersus", "import vendor::hidden; fn make(n: Int) -> hidden::Vessel<Int> { return hidden::vessel(n); };")
     , ("vendor/main.tersus", "import vendor::api { make }; " ++ main)
@@ -469,7 +487,7 @@ nativeAmbiguitySmoke = withSourceElaborator $ \exe -> pure $
         testAssertErrorContains "vendor$two$two$Clone" result
   where
     providerFiles =
-        [ ("vendor/package.tersus", "noPrelude = true;")
+        [ ("vendor/package.tersus", "noPrelude = true;\nClone = one::Clone;\nClone = two::Clone;")
         , ("vendor/one/one.tersus", "trait Clone { fn clone(self: &Self) -> Self; };")
         , ("vendor/two/two.tersus", "trait Clone { fn clone(self: &Self) -> Self; };")
         , ("vendor/main.tersus", "import vendor::one; import vendor::two; return 0;")
@@ -478,7 +496,7 @@ nativeAmbiguitySmoke = withSourceElaborator $ \exe -> pure $
 nativeStorageRoles :: IO TestResult
 nativeStorageRoles = withSourceElaborator $ \exe -> pure $
     let imported = firstFailure
-            [ case compileFixture "unrelated/main.tersus" files (if version == 1 then nativeLoader exe else checkedLoader exe) of
+            [ case compileFixture "unrelated/main.tersus" files (if version == 1 then legacyLoader exe else checkedLoader exe) of
                 Error e -> Just e
                 Ok compiled -> if version == 1 then testAssertEq (mainTransport compiled) Nothing else
                     let protocols = transportProtocols <$> mainTransport compiled
@@ -497,16 +515,16 @@ nativeStorageRoles = withSourceElaborator $ \exe -> pure $
         testAssertErrorContains "unrelated$other$other$List" conflict
   where
     files =
-        [ ("unrelated/package.tersus", "noPrelude = true;")
+        [ ("unrelated/package.tersus", "noPrelude = true;\nList = model::List;\nBox = model::Box;")
         , ("unrelated/model/model.tersus", "struct List<T> { value: T }; struct Box<T> { value: T };")
         , ("unrelated/main.tersus", "import unrelated::model as names; x = names::List<Int> { value: 1 }; y = names::Box<Int> { value: 2 }; return 0;")
         ]
     ownFiles =
-        [ ("unrelated/package.tersus", "noPrelude = true;")
+        [ ("unrelated/package.tersus", "noPrelude = true;\nList = main::List;\nBox = main::Box;")
         , ("unrelated/main.tersus", "struct List<T> { value: T }; struct Box<T> { value: T }; x = List<Int> { value: 1 }; y = Box<Int> { value: 2 }; return 0;")
         ]
     conflictFiles =
-        [ ("unrelated/package.tersus", "noPrelude = true;")
+        [ ("unrelated/package.tersus", "noPrelude = true;\nList = model::List;\nList = other::List;")
         , ("unrelated/model/model.tersus", "struct List<T> { value: T };")
         , ("unrelated/other/other.tersus", "struct List<T> { value: T };")
         , ("unrelated/main.tersus", "import unrelated::model; import unrelated::other; return 0;")
@@ -518,19 +536,13 @@ nativeCloneDrop kind version = withSourceElaborator $ \exe -> pure $
         body = cloneDropFiles (cloneBody "self.n") "a = Owned::new(3); b = clone(a); return a.n + b.n;"
         invalid = cloneDropFiles (cloneBody "self.n + 1") "return 0;"
         markerTrait files = [(path, unlines [if take 12 line == "trait Clone " then "trait Clone { };" else line | line <- lines text]) | (path, text) <- files]
-        emptyMarker (ImplDef (Just "Clone") args "Owned" ty bounds _) = ImplDef (Just "Clone") args "Owned" ty bounds []
-        emptyMarker statement = statement
-        loader = if version == 1 then nativeLoader exe else checkedLoader exe
-        libraries = compileLibPackageWith loader
+        loader = if version == 1 then legacyLoader exe else checkedLoader exe
+        -- (the fixture's package is built without std's libraries: it binds Clone and Drop itself)
+        libraries = emptyLibraries
         packaged files = mapResult (const ()) (compileFixtureWith libraries files)
         compileFixtureWith libs files = Package.compileModulesUsing loader libs (Snapshot (resolverFromFiles files) "owned/main.tersus" False)
-        -- (no source spells a marker impl without the function the parser writes for it, so the program's statements
-        -- are given as a module request with that function removed)
-        answer rq = (if version == 1 then nativeElaborator exe else checkedAnswer exe) rq{rqStatements = map (map emptyMarker) (rqStatements rq)}
-        program files = case lookup "owned/main.tersus" files of
-            Nothing -> Error "the fixture has no main file"
-            Just text -> mapResult (const ()) (parseSource text `bindResult` lowerStatementsWith answer)
-        compile files = if kind == "empty-marker" then program files else packaged files
+        -- (the roles are the package's, bound by its marker: a marker trait with no function is the package's Clone too)
+        compile files = packaged files
         control = if kind == "empty-marker" then markerTrait (cloneDropFiles "" "return 0;") else cloneDropFiles "" "return 0;"
         setup = case compile control of Error e -> Just ("complete Clone/Drop control did not type check: " ++ e); Ok _ -> Nothing
         validated files = compileFixtureWith libraries files `bindResult` Package.lowerCompiledPackage `bindResult` validateCompiled
@@ -552,9 +564,13 @@ nativeCloneDrop kind version = withSourceElaborator $ \exe -> pure $
 
 cloneDropFiles :: String -> String -> [(FilePath, String)]
 cloneDropFiles cloneImpl main =
-    [ ("owned/package.tersus", "")
+    -- (a build has one provider of a role: a package that binds Clone and Drop itself is built without std's core, which binds
+    -- them, and with a List of its own for the ghost type of filled())
+    [ ("owned/package.tersus", "noPrelude = true;\nList = storage::List;\nClone = main::Clone;\nDrop = main::Drop;")
+    , ("owned/storage/storage.tersus", "struct List<T> { addr: Addr<T>, len: Int, cap: Int, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap; affirm count(blk) = len; affirm len >= 0; affirm len <= cap; affirm forall j in 0..len: filled(blk, j) = true; affirm forall j in len..cap: filled(blk, j) = false; }];")
     , ("owned/main.tersus", unlines
-        [ "trait Clone { fn clone(self: &Self) -> Self; };"
+        [ "import owned::storage { List };"
+        , "trait Clone { fn clone(self: &Self) -> Self; };"
         , "trait Drop { fn drop(self: Self) -> Int; };"
         , "struct Owned { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }];"
         , "impl Owned { fn new(n: Int) -> Self [{ }] [{ affirm return.n = n; }] { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; };"

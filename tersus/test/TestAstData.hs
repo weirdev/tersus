@@ -40,7 +40,7 @@ import Syntax
 import TestHarness
 import TestNative (clangAvailable, runExecutableBytes)
 import Compile (elaborateStatements)
-import Mir (Lowered)
+import Mir (Lowered (..), Program (..))
 import MirData (readLowered, writeLowered)
 import ElaboratorTool (noVerdict)
 import Types
@@ -81,7 +81,7 @@ corpusUnits = do
         ]
 
 libraryAnswers :: [(String, ([String], [Statement]))]
-libraryAnswers = case bootstrapLoader (LoadRequest LoadLibraries False (Mod.resolverFromFiles []) Nothing Mod.librarySources []) of
+libraryAnswers = case bootstrapLoader Mod.libraryRequest of
     LoadedLibraries answers _ -> [(name, (imports, stmts)) | LibraryAnswer name imports stmts _ <- answers]
     _ -> []
 
@@ -118,9 +118,10 @@ roundTrip ss =
                 | text /= dataParsed back -> Just "reserialization changed"
                 | otherwise -> Nothing
 
--- A unit the elaborator lowered, as `tersus-mir 3` (MirData), reads back as the same unit and writes the same text
+-- A unit the elaborator lowered, as `tersus-mir 3` (MirData), reads back as the same unit and writes the same text (its
+-- protocols and ownership facts are the response's checked transport, which Lowering.withFacts puts on the unit read)
 loweredRoundTrip :: Lowered -> TestResult
-loweredRoundTrip unit = case writeLowered unit of
+loweredRoundTrip unit0 = case writeLowered unit0 of
     Error err -> Just err
     Ok text -> case readLowered text of
         Error err -> Just err
@@ -128,6 +129,8 @@ loweredRoundTrip unit = case writeLowered unit of
             | back /= unit || show back /= show unit -> Just "the lowered unit or its builtin metadata changed"
             | writeLowered back /= Ok text -> Just "the lowered unit's reserialization changed"
             | otherwise -> Nothing
+  where
+    unit = unit0{lowProgram = (lowProgram unit0){progProtocols = Map.empty, progOwnership = Nothing}}
 
 knownParserRejection :: String -> String -> Bool
 knownParserRejection path message =
@@ -279,10 +282,10 @@ rules = [Refl (head proofs), Eval "x", EvalAll, CheckGtZero (head proofs), Check
 
 types :: [Type]
 types =
-    [ TInt, TByte, TBool, TList TBool, TArrayOf TInt (SizeConst 3), TBox (TArrayOf TByte SizeAny)
-    , TFn [TRef TInt, TMutRef TByte] TBool, TNamed "Packet" [ArgType (TList (TParam "T")), ArgSize (SizeParam "n")]
+    [ TInt, TByte, TBool, SyntaxList TBool, TArrayOf TInt (SizeConst 3), SyntaxBox (TArrayOf TByte SizeAny)
+    , TFn [TRef TInt, TMutRef TByte] TBool, TNamed "Packet" [ArgType (SyntaxList (TParam "T")), ArgSize (SizeParam "n")]
     , TVariant "E::V", TVar 9, TForall ["n"] ["T"] (TNamed "Pair" [ArgType (TParam "T"), ArgSize (SizeVar 7)])
-    , TParam "T", TAddr TByte, TBlock TInt, TUninit (TList TInt), TRef TBool, TMutRef TInt
+    , TParam "T", TAddr TByte, TBlock TInt, TUninit (SyntaxList TInt), TRef TBool, TMutRef TInt
     ] ++ [TWord s b | (s, b) <- [(True, 8), (True, 16), (True, 32), (False, 16), (False, 32)]]
 
 signature :: Signature
@@ -308,7 +311,7 @@ fixtures :: [Statement]
 fixtures =
     [ Assign "x" (Val (VInt 1)), AssignDeref (Var "p") (Val (VInt 2)), Let "y" (Var "x"), Return (F (Var "f") [Var "x"])
     , Return (IfExpr (Val (VBool True)) (BlockExpr [Let "branch" (Val (VInt 3))] (Var "branch")) (Val (VInt 4)))
-    , Let "typed" (Ascribed (Val (VList [])) (TList TInt))
+    , Let "typed" (Ascribed (Val (VList [])) (SyntaxList TInt))
     , StructDef "Packet" ["T", "n"] [("field", t) | t <- types] validations
     , EnumDef "E" [("E::V", [("field", TInt)]), ("E::Empty", [])]
     , AxiomDef "axiom" ["x"] validations validations, ProofDef "proof" ["x"] validations validations validations

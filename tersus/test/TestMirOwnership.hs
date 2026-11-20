@@ -9,7 +9,7 @@ import System.Exit (ExitCode (..))
 
 import Compile (lowerSource)
 import Mir
-import MirData (forNative, readProgram, writeProgramWithGhosts)
+import MirData (forNative, readProgram, writeOwnedProgramWithGhosts, writeProgramWithGhosts)
 import MirEval (MirValue (..), RunEnv (..), Outcome (..), runProgram, runProgramEnv)
 import TestOwnership (runOwned, usesArrays)
 import MirMono (monomorphize, monomorphizeForValidation)
@@ -21,9 +21,10 @@ import Native (runWithInputFull)
 import Syntax (Termination (..))
 import qualified Syntax as S
 import TestHarness
-import TestNative (nativeExamples, nativeMirCase, unvalidatedPrograms, validatedPrograms)
+import TestNative (nativeExamples, nativeMirCase, ownRoleEntry, ownRolePrograms, unvalidatedPrograms, validatedPrograms)
 import Pipeline (compileSource)
-import Types (Arg (..), Size (..), Type (..), pattern TBox, pattern TList, instanceName)
+import Types (Arg (..), Size (..), Type (..), instanceName)
+import TestStorage (pattern TList, pattern TBox, stdProtocols)
 import Utils
 
 restoreRoundTrip :: Program -> Result Program String
@@ -68,7 +69,7 @@ testOwnershipMetadata = TestList "testOwnershipMetadata"
 testMirOwnership :: Test
 testMirOwnership = TestList "testMirOwnership"
     [ TestList "examples own before list lowering" [TestCase path (do { text <- readFile path; compiled <- exampleProgram path; pure (ownedBeforeLowering text compiled) }) | path <- nativeExamples]
-    , TestList "source corpus owns before list lowering" [testCase name (ownedBeforeLowering source (lowerSource True source)) | (name, source) <- validatedPrograms ++ unvalidatedPrograms]
+    , TestList "source corpus owns before list lowering" ([testCase name (ownedBeforeLowering source (lowerSource True source)) | (name, source) <- validatedPrograms ++ unvalidatedPrograms] ++ [TestCase name (ownedBeforeLowering (concatMap snd files) <$> validatedFromFiles ownRoleEntry files) | (name, files) <- ownRolePrograms])
     , testCase "nested sequence writes retain each intermediate element type" nestedSequenceWrite
     , testCase "enum field writes retain unwritten sibling fields" enumFieldWrite
     , testCase "pre-mono expansion of a program with no reference write leaves it whole" (testAssertEq (expandRefWrites metadataFixture) (Ok metadataFixture))
@@ -159,14 +160,14 @@ testMirOwnership = TestList "testMirOwnership"
 
 testOwnershipInterpreted :: Test
 testOwnershipInterpreted = TestList "testOwnershipInterpreted"
-    ([testCase label (sameAsNative program) | (label, program) <- smallOwnershipFixtures] ++
-     [ testCase "a reference write releases the value it replaces" (model storedOwnerFixture)
-     , testCase "a view of a replaced referent is a copy of its own" (model mutableViewFixture)
-     , testCase "a field write through a reference releases the field it replaces" (model storedFieldFixture)
-     , testCase "a view of a place written through a reborrow is a copy of its own" (firstFailure [model reborrowedWriteFixture, notPeeked (Local 4) reborrowedWriteFixture])
-     , testCase "a view of a place written through a reference is a copy of its own" (firstFailure [model writtenSourceFixture, notPeeked (Local 2) writtenSourceFixture])
-     , testCase "a view lent to a callee that writes its source is a copy of its own" (firstFailure [model calleeWriteFixture, notPeeked (Local 2) calleeWriteFixture])
-     , testCase "a borrowed view outlives a replacement of its source as a copy" (firstFailure [model borrowedViewFixture, notPeeked (Local 2) borrowedViewFixture])
+    ([testCase label (sameAsNative (stored program)) | (label, program) <- smallOwnershipFixtures] ++
+     [ testCase "a reference write releases the value it replaces" (model (stored storedOwnerFixture))
+     , testCase "a view of a replaced referent is a copy of its own" (model (stored mutableViewFixture))
+     , testCase "a field write through a reference releases the field it replaces" (model (stored storedFieldFixture))
+     , testCase "a view of a place written through a reborrow is a copy of its own" (firstFailure [model (stored reborrowedWriteFixture), notPeeked (Local 4) (stored reborrowedWriteFixture)])
+     , testCase "a view of a place written through a reference is a copy of its own" (firstFailure [model (stored writtenSourceFixture), notPeeked (Local 2) (stored writtenSourceFixture)])
+     , testCase "a view lent to a callee that writes its source is a copy of its own" (firstFailure [model (stored calleeWriteFixture), notPeeked (Local 2) (stored calleeWriteFixture)])
+     , testCase "a borrowed view outlives a replacement of its source as a copy" (firstFailure [model (stored borrowedViewFixture), notPeeked (Local 2) (stored borrowedViewFixture)])
      -- Lowered programs name a list and a Box as their structs (`named "List" 1 type T`), and the Tersus passes must see
      -- through those names: to the references a list or a Box holds, and to the element an index of either reaches
      , testCase "a lowered list that holds a reference keeps a view of its referent a copy" (firstFailure [heapModel loweredListReferenceFixture, notPeeked (Local 5) loweredListReferenceFixture])
@@ -174,8 +175,11 @@ testOwnershipInterpreted = TestList "testOwnershipInterpreted"
      , testCase "a write at an index of a lowered list through a reference releases the element" (heapModel loweredIndexWriteFixture)
      ])
   where
+    -- (a list of these programs is std's List, with the checked facts a compiled program has for it)
+    stored = checkedStorage
     -- (the interpreted emitter owns the program as the native tool does, and the owned program runs on the heap model to the executor's answer)
-    sameAsNative program = case (interpretedOwnership program, insertOwnership program) of
+    -- (on the copies monomorphisation makes, as insertOwnership gives the native tool the program)
+    sameAsNative program = case (interpretedOwnership (monomorphize program), insertOwnership program) of
         (Error e, _) -> Just e
         (_, Error e) -> Just ("native: " ++ e)
         (Ok owned, Ok native) -> firstFailure
@@ -200,13 +204,12 @@ interpretedEmitter = mapResult monomorphizeForValidation (toolProgram emitterEnt
 {-# NOINLINE interpretedEmitter #-}
 
 interpretedOwnership :: Program -> Result Program String
-interpretedOwnership program = interpretedEmitter `bindResult` \tool ->
-    runProgramEnv (RunEnv [] input (const Nothing)) tool `bindResult` \outcome ->
+-- (given the program as MirHousekeeping.ownershipPassWith gives the native tool it, with its checked ownership facts)
+interpretedOwnership program = interpretedEmitter `bindResult` \tool -> writeOwnedProgramWithGhosts (ownershipInput program) `bindResult` \owned ->
+    runProgramEnv (RunEnv [] ("pass ownership\n" ++ owned) (const Nothing)) tool `bindResult` \outcome ->
         if outValue outcome /= Nothing || not (null (outStderr outcome))
             then Error ("interpreted ownership failed: " ++ outStderr outcome)
             else readProgram (outStdout outcome) `bindResult` restoreOwnership program
-  where
-    input = "pass ownership\n" ++ writeProgramWithGhosts (ownershipInput program)
 
 smallOwnershipFixtures :: [(String, Program)]
 smallOwnershipFixtures = [("repeated consumes are owned as natively and run", plain), ("partial fields are owned as natively and run", fields), ("conditional drops are owned as natively and run", conditional)]
@@ -354,15 +357,49 @@ nativeFixtures =
     , ("a write at an index of a lowered list through a reference releases the element", withoutListStructs loweredIndexWriteFixture)
     ]
   where
-    withoutListStructs p = p{progTypes = Map.filterWithKey (\name _ -> take 5 name /= "List<" && take 4 name /= "Box<") (progTypes p)}
+    withoutListStructs p = checkedStorage (stdNamed p{progTypes = Map.filterWithKey (\name _ -> take 5 name /= "List<" && take 4 name /= "Box<") (progTypes p)})
     -- (a parameter that is a reference is given by value, as the checker of native MIR wants it: a lent parameter has the
     -- type of what it is lent, which these fixtures write as the reference itself)
-    referencesByValue p = p{progFunctions = Map.map byValue (progFunctions p)}
+    referencesByValue p = checkedStorage p{progFunctions = Map.map byValue (progFunctions p)}
     byValue fn = fn{fnBorrowed = filter (not . reference fn) (fnBorrowed fn), fnMutBorrowed = filter (not . reference fn) (fnMutBorrowed fn)}
     reference fn l = case Map.lookup l (fnLocals fn) of
         Just (LocalDecl (TRef _) _) -> True
         Just (LocalDecl (TMutRef _) _) -> True
         _ -> False
+
+-- Native code is made with the checked std storage, so a fixture given to it is checked too: it is given the protocols, the facts and
+-- the std drops and clones the compiler gives a program of its types
+checkedStorage :: Program -> Program
+checkedStorage p = p
+    { progProtocols = progProtocols companion
+    , progOwnership = progOwnership companion
+    , progFunctions = Map.union (progFunctions p) (progFunctions companion)
+    , progTypes = Map.union (progTypes p) (progTypes companion)
+    }
+
+companion :: Program
+companion = case lowerSource True (concat
+        [ "struct Holder { xs: List<Int>, n: Int }; xs = [[7]]; h = Holder { xs: [7], n: 3 }; "
+        , "ys = [[8]]; rs = [&mut ys]; zs = [[9]]; b = Box::new(&mut zs); "
+        , "return size(xs) + size(h.xs) + size(rs) + size(*Box::unbox(b));"
+        ]) of
+    Ok p -> p
+    Error e -> error ("the checked storage companion does not compile: " ++ e)
+{-# NOINLINE companion #-}
+
+-- A lowered fixture's List and Box written as data names, as std's
+stdNamed :: Program -> Program
+stdNamed p = p{progMain = onFunction (progMain p), progFunctions = Map.map onFunction (progFunctions p)}
+  where
+    onFunction fn = fn{fnLocals = Map.map (\d -> d{localType = named (localType d)}) (fnLocals fn), fnReturns = named <$> fnReturns fn}
+    named ty = case ty of
+        TNamed "List" [ArgType t] -> TList (named t)
+        TNamed "Box" [ArgType t] -> TBox (named t)
+        TNamed n args -> TNamed n [case a of ArgType t -> ArgType (named t); _ -> a | a <- args]
+        TRef t -> TRef (named t)
+        TMutRef t -> TMutRef (named t)
+        TArrayOf t n -> TArrayOf (named t) n
+        _ -> ty
 
 -- One write at an index through a reference, as the ownership tool reads it: with the old `list` tokens, and with a list
 -- named as its struct, as lowering writes it
@@ -559,7 +596,8 @@ mutableNamedReference :: TestResult
 mutableNamedReference = checkNamedReference "update<Int>" TInt (monomorphize (namedReferenceFixture (TParam "T") TInt ["T"]))
 
 mutableReferenceListNormalization :: TestResult
-mutableReferenceListNormalization = case lowerLists (Ok []) (namedReferenceFixture boxed boxed []) of
+-- (the program's storage is std's: a Box of an array is its List in native code)
+mutableReferenceListNormalization = case lowerLists (Ok []) (namedReferenceFixture boxed boxed []){progProtocols = stdProtocols} of
     Error e -> Just e
     Ok output -> checkNamedReference "update" (TList TInt) output
   where
@@ -631,7 +669,7 @@ nestedSequenceWrite = case expandRefWrites input of
       where locals = fnLocals (progMain output)
   where
     list = TList TInt
-    input = wireEmpty{progMain = (progMain wireEmpty)
+    input = checkedStorage wireEmpty{progMain = (progMain wireEmpty)
         { fnReturns = Just (TList (TList list))
         , fnLocals = Map.fromList [(Local 0, LocalDecl (TList (TList list)) Nothing), (Local 1, LocalDecl (TList (TList list)) (Just "rows")), (Local 2, LocalDecl list (Just "replacement"))]
         , fnBlocks = Map.singleton (BlockId 0) (BasicBlock
@@ -676,6 +714,8 @@ metadataFixture = Program
     , progInvariants = Map.singleton "Packet" [S.AssignProofVar "invariant" (S.Val (S.VBool True))]
     , progBounded = Map.empty
     , progInstances = Map.empty
+    , progProtocols = Map.empty
+    , progOwnership = Nothing
     , progFunctions = Map.singleton "symbolic" symbolic
     , progMain = mainFn
     }
@@ -713,7 +753,7 @@ ownershipFixture = metadataFixture
     cloneFn = dropFn{fnName = "<Plain as Clone>::clone", fnReturns = Just (TNamed "Plain" []), fnLocals = Map.insert (Local 0) (LocalDecl (TNamed "Plain" []) Nothing) (fnLocals dropFn), fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (Use (Copy (Local 1)))] Return)}
 
 wireEmpty :: Program
-wireEmpty = Program Map.empty Map.empty (Function "main" [] Nothing Map.empty (Map.singleton (BlockId 0) (BasicBlock [] Return)) [] [] [] [] [] emptySpec) Map.empty Map.empty Map.empty Map.empty
+wireEmpty = Program Map.empty Map.empty (Function "main" [] Nothing Map.empty (Map.singleton (BlockId 0) (BasicBlock [] Return)) [] [] [] [] [] emptySpec) Map.empty Map.empty Map.empty Map.empty Map.empty Nothing
 
 wireMain :: Statement -> Program
 wireMain statement = wireEmpty{progMain = (progMain wireEmpty){fnBlocks = Map.singleton (BlockId 0) (BasicBlock [statement] Return)}}
