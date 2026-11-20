@@ -10,6 +10,7 @@ module PreludeSource
     , stringSource
     , mapSource
     , setSource
+    , threadSource
     , libModules
     , nativeStorageModules
     , libPackageFiles
@@ -72,6 +73,7 @@ libModules =
     , ("string", "the string library", stringSource)
     , ("map", "the map library", mapSource)
     , ("set", "the set library", setSource)
+    , ("thread", "the thread library", threadSource)
     , ("lists", "the native list helpers", listsSource)
     , ("box", "the native Box helpers", boxSource)
     ]
@@ -169,6 +171,15 @@ setSource =
     $( do
         addDependentFile "lib/set.tersus"
         contents <- runIO (readFile "lib/set.tersus")
+        lift contents
+     )
+
+-- The text of lib/thread.tersus: the Thread a program has when it mentions one
+threadSource :: String
+threadSource =
+    $( do
+        addDependentFile "lib/thread.tersus"
+        contents <- runIO (readFile "lib/thread.tersus")
         lift contents
      )
 

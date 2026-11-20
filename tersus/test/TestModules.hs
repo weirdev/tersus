@@ -21,7 +21,7 @@ import System.FilePath (takeDirectory, (</>))
 import qualified Bootstrap
 import qualified AstData
 import qualified PackageCompile
-import PreludeSource (parserPackageFiles, astReaderPackageFiles, toolPackageFiles, validationPackageFiles, typesSource, cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource)
+import PreludeSource (parserPackageFiles, astReaderPackageFiles, toolPackageFiles, validationPackageFiles, typesSource, cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource, threadSource)
 import qualified MirHousekeeping
 import qualified Compile
 import FileParserProtocol
@@ -2573,4 +2573,4 @@ declarationNames = concatMap top
 -- The declarations of every compiler library, read in order by P0
 libraryDecls :: Either String Decls
 libraryDecls = foldl (\acc text -> acc >>= \decls -> fmap snd (Oracle.parseFileWith decls text)) (Right emptyDecls)
-    [typesSource, cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource]
+    [typesSource, cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource, threadSource]

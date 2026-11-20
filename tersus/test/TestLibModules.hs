@@ -10,7 +10,7 @@ import qualified Compile
 import qualified Modules
 import qualified ParserSeed as Parse
 import qualified ParsedFile as Parse
-import PreludeSource (typesSource, eqSource, cloneSource, preludeSource, stringSource, mapSource, setSource, listsSource, boxSource)
+import PreludeSource (typesSource, eqSource, cloneSource, preludeSource, stringSource, mapSource, setSource, threadSource, listsSource, boxSource)
 import qualified Mir as M
 import ValidatorNative (validateCompiled, validateLibrary)
 import Interface (ModuleInterface (..))
@@ -120,10 +120,10 @@ testLibModules =
         ]
   where
     implicitSources = [("types", typesSource), ("clone", cloneSource), ("eq", eqSource),
-        ("prelude", preludeSource), ("string", stringSource), ("map", mapSource), ("set", setSource)]
+        ("prelude", preludeSource), ("string", stringSource), ("map", mapSource), ("set", setSource), ("thread", threadSource)]
     implicitDependencies = [("types", []), ("clone", ["types"]), ("eq", ["types"]),
         ("prelude", ["types", "clone"]), ("string", ["types", "prelude", "eq", "clone"]),
-        ("map", ["types", "prelude", "eq", "clone"]), ("set", ["types", "map", "prelude", "eq", "clone"])]
+        ("map", ["types", "prelude", "eq", "clone"]), ("set", ["types", "map", "prelude", "eq", "clone"]), ("thread", [])]
     checkedSource source = Compile.lowerSource True source `bindResult` \program ->
         validateCompiled program `bindResult` \_ -> Ok program
     checkedPackage source = case Modules.loadFromEntry (Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", source)]) "app/main.tersus" of
@@ -173,7 +173,7 @@ testLibModules =
         Ok _ -> Nothing
     orderIsDependencyFirst = case libPackage of
         Error err -> Just err
-        Ok pkg -> testAssertEq (libOrder pkg) ["types", "clone", "eq", "prelude", "string", "map", "set"]
+        Ok pkg -> testAssertEq (libOrder pkg) ["types", "clone", "eq", "prelude", "string", "map", "set", "thread"]
     allIn keys wanted = all (`elem` keys) wanted
     implsIn iface wanted = all (`Set.member` ifImpls iface) wanted
     both (Just err) _ = Just err

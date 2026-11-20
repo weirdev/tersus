@@ -105,7 +105,7 @@ fn libraryContexts(libs: &List<Lib>, names: &List<String>) -> List<List<String>>
 struct Probe { declared: List<String>, traits: List<String>, mentioned: HashSet<String>, literal: Bool };
 
 fn interesting(word: &String) -> Bool ~ {
-    return word = "String" || word = "HashMap" || word = "HashSet" || word = "Sequence" || word = "Growable" || word = "Clone" || word = "Copy" || word = "Drop" || word = "Deref" || word = "Hash" || word = "hashCombine";
+    return word = "String" || word = "HashMap" || word = "HashSet" || word = "Sequence" || word = "Growable" || word = "Clone" || word = "Copy" || word = "Drop" || word = "Deref" || word = "Hash" || word = "hashCombine" || word = "Thread";
 };
 
 fn nameByte(c: Int) -> Bool ~ {
@@ -304,6 +304,7 @@ fn librariesFor(p: &Probe) -> List<String> ~ {
     if strings { out = push(out, "string"); };
     if maps { out = push(out, "map"); };
     if sets { out = push(out, "set"); };
+    if !declares(&p.declared, "Thread") && HashSet::contains(&p.mentioned, "Thread") { out = push(out, "thread"); };
     return out;
 };
 
@@ -418,7 +419,7 @@ fn interfaceNames(iface: &AstProgram, typeName: &String) -> Bool ~ {
 };
 
 fn mentionImported(p: Probe, ifaces: &List<AstProgram>) -> Probe ~ {
-    for name in push(push(push([], "String"), "HashMap"), "HashSet") {
+    for name in push(push(push(push([], "String"), "HashMap"), "HashSet"), "Thread") {
         for iface in ifaces {
             if interfaceNames(iface, &name) { p = mentionRaw(p, &name); };
         };

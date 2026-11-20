@@ -1,6 +1,6 @@
 # References and borrowing (design plan)
 
-> Source stages 1 to 5 are implemented; stage 6 (concurrency) is still design. Native validation supports the reference layouts described below and refuses unresolved mutation targets or unsupported layouts. Unsized references remain unsupported natively.
+> Source stages 1 to 5 are implemented; stage 6 (concurrency) has begun with threads that share nothing (`lib/thread.tersus`: the closure and the result of a thread hold no reference); transfer and sharing rules beyond that are still design. Native validation supports the reference layouts described below and refuses unresolved mutation targets or unsupported layouts. Unsized references remain unsupported natively.
 > What is in the language is in `LANGUAGE.md` (Lent parameters, References,
 > Updating through a reference); what is below is the rationale, the core
 > rules, and the plan for what is left. This complements `POINTERS.md`,
