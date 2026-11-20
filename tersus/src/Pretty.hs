@@ -223,6 +223,9 @@ renderType (TMutRef t) = "&mut " ++ renderType t
 renderType (TParam name) = name
 renderType (TForall sizes types t) = "<" ++ intercalate ", " (types ++ sizes) ++ ">" ++ renderType t
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
+renderType (TFnContract args ret contract) = "fn(" ++ intercalate ", " (zipWith named (fnParamNames contract ++ repeat "") args) ++ ") -> " ++ renderType ret
+  where
+    named name arg = if null name then renderType arg else name ++ ": " ++ renderType arg
 renderType (TNamed base args) = instanceName base args
 renderType (TVariant name) = name
 renderType (TVar _) = "?"

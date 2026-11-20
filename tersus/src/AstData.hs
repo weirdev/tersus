@@ -1611,6 +1611,15 @@ astTypeP = word >>= \w -> case w of
     "ref" -> TRef <$> astTypeP
     "mutref" -> TMutRef <$> astTypeP
     "fn" -> countP >>= \n -> TFn <$> replicateM n astTypeP <*> astTypeP
+    "fnc" -> do
+        n <- countP
+        args <- replicateM n astTypeP
+        ret <- astTypeP
+        names <- countP >>= \k -> if k == n then replicateM k name else failP "AstData: a contract function type's names do not match its parameters"
+        checkParamNames names
+        requires <- clausesP
+        ensures <- clausesP
+        pure (TFnContract args ret (FnContract names requires ensures))
     "named" -> TNamed <$> name <*> (countP >>= \n -> replicateM n astArgP)
     "variant" -> TVariant <$> name
     "var" -> TVar <$> int
