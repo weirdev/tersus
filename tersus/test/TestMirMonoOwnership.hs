@@ -156,6 +156,14 @@ testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusio
     [ TestCase "borrowed Fn contract, zero-field object and named wrapper" $ checked "fn-contract" 12 (lower fnContract)
     , TestCase "FnMut preserves updates through the borrowed receiver" $ checked "fn-mut" 1202 (lower (closureCounter ++ "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; c = Counter { count: 0 }; r = twice(&mut c); return r * 100 + c.count;"))
     , TestCase "FnOnce consumes the receiver and owning argument" $ checked "fn-once" 5 (lower fnOnce)
+    , TestCase "a Copy capture inferred from its Fn bound preserves fused metadata" $ checked "closure-copy" 15 (lower "fn apply<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; n = 10; return apply(fn(x) => x + n, 5);")
+    , TestCase "a borrowed capture preserves its Fn body through fusion" $ checked "closure-borrow" 12 (lower "fn apply<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; xs = [1, 2]; f = fn(x: Int) -> Int => x + size(xs); return apply(&f, 10);")
+    , TestCase "an FnMut capture retains updates across both calls" $ checked "closure-mut" 1202 (lower "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; count = 0; c = fn() -> Int { count = count + 1; return count; }; return twice(&mut c) * 100 + count;")
+    , TestCase "an FnOnce capture retains ownership of its list" $ checked "closure-once" 2 (lower "fn useOnce<F: FnOnce() -> List<Int>>(f: F) -> Int { ys = f(); return size(ys); }; xs = [1, 2]; f = fn() -> List<Int> => xs; return useOnce(f);")
+    , TestCase "an inferred capturing closure crosses modules through fusion" $ checked "closure-modules" 15
+        (Package.compileModulesWith loader (Mod.Snapshot (Mod.resolverFromFiles
+            [("app/package.tersus", ""), ("app/main.tersus", "import app::apply; n = 10; return apply::apply(fn(x) => x + n, 5);"), ("app/apply.tersus", "fn apply<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")]) "app/main.tersus" False)
+            `bindResult` Package.lowerCompiledPackage)
     , TestCase "unsupported cross-module Fn is refused before native passes" $ do
         let forbidden = error "unsupported cross-module Fn acquired a native pass tool"
             afterLowering run = case package of
