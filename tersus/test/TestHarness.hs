@@ -77,7 +77,7 @@ import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
 import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
 import Control.Exception (IOException, SomeException, bracket, bracket_, bracketOnError, displayException, finally, mask, onException, throwIO, try)
-import Control.Monad (forM, when)
+import Control.Monad (forM, forM_, when)
 import GHC.Clock (getMonotonicTime)
 import GHC.Conc (getNumCapabilities)
 import Data.Char (isHexDigit, isSpace, toLower)
@@ -663,10 +663,9 @@ sharedOnDisk identity stage source compute = do
                                                     _ <- Exception.evaluate (force program)
                                                     after <- cacheBuildScope
                                                     if after /= Just identity then pure (Ok program) else do
-                                                        written <- try (writeEntryAtomically dataDir path (ProgramBinary.encodeEntry entryKey program)) :: IO (Either IOException ())
-                                                        case written of
-                                                            Right () -> pure (Ok program)
-                                                            Left _ -> pure (Ok program)
+                                                        forM_ (ProgramBinary.encodeEntryWithin entryKey program) $ \entry ->
+                                                            try (writeEntryAtomically dataDir path entry) :: IO (Either IOException ())
+                                                        pure (Ok program)
                             locked <- withKernelLock path produce
                             case locked of
                                 Just result -> pure result
