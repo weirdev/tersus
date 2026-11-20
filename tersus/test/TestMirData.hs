@@ -109,7 +109,7 @@ testMirData =
                     []
                     []
                     emptySpec
-            program = Program (Map.fromList [("Callback", StructDecl [("f", contractFnType)])]) Map.empty mainFn Map.empty Map.empty Map.empty Map.empty
+            program = Program (Map.fromList [("Callback", StructDecl [("f", contractFnType)])]) Map.empty mainFn Map.empty Map.empty Map.empty Map.empty Map.empty Nothing
             boxed = TNamed "Holder" [ArgType (TBoxedClosure True (TFn [TBoxedClosure False contractFnType] TInt))]
             boxedProgram = program{progTypes = Map.insert "Holder" (StructDecl [("callback", boxed)]) (progTypes program)}
             boxedText = writeProgramWithGhosts boxedProgram
