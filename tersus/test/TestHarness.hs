@@ -104,6 +104,7 @@ import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import MirData (writeProgram)
 import MirEval (fromMirValue)
 import Native (cacheDirectory, readProcessOutput)
+import Seed (verifySeedFile)
 import TestParserFragments
 import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
@@ -757,10 +758,14 @@ cacheBuildScope = do
         exists <- doesFileExist file
         if exists then pure (Just file) else firstExisting rest
 
+-- (every shared program asks for the scope, so the seeds are checked as Seed checks them: bytes it already hashed to
+-- the pin are compared, not hashed again)
 verifiedSeedIdentity :: FilePath -> String -> IO (Maybe String)
 verifiedSeedIdentity file expected = do
-    digest <- executableDigest file
-    pure (if digest == Just expected then digest else Nothing)
+    verdict <- verifySeedFile "cache scope" expected file
+    pure $ case verdict of
+        Ok () -> Just expected
+        Error _ -> Nothing
 
 {-# NOINLINE buildIdentityCache #-}
 buildIdentityCache :: MVar (Maybe String)
