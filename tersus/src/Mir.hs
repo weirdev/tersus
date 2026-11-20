@@ -28,7 +28,8 @@ module Mir
     , completeInstances
     , completeErasedInstances
     , readersOfInput
-    , callsThroughFunctionBound
+    , worldReadersBy
+    , companionOf
     , functionsNamed
     , slotsOf
     , dropFunction
@@ -47,7 +48,7 @@ module Mir
     , renderRvalue
     ) where
 
-import Data.List (intercalate, isPrefixOf)
+import Data.List (intercalate, isPrefixOf, stripPrefix)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (listToMaybe)
@@ -677,30 +678,50 @@ renderTerminator Unreachable = "unreachable;"
 readsWorldOp :: ListOp -> Bool
 readsWorldOp op = op `elem` [ReadByte, ArgCount, ArgByte, PathByte, FileLoad, FileByte, StoreByte, FileStore, AddrAlloc, AddrResize, BlockAssume]
 
--- A function value or a generic function-trait stub can dispatch to a world reader.
-callsThroughFunctionBound :: Name -> Bool
-callsThroughFunctionBound name = case parseImplCheckName name of
-    Just (trait, "$Self", "call") -> any (`isPrefixOf` trait) ["Fn$", "FnMut$", "FnOnce$"]
-    _ -> False
+-- `Tr for O::g`, the check of the impl function `<O as Tr>::g` against its trait.
+companionOf :: Name -> Maybe Name
+companionOf name = do
+    rest <- stripPrefix "<" name
+    let (owner, afterOwner) = span (/= ' ') rest
+    afterAs <- stripPrefix " as " afterOwner
+    let (trait, afterTrait) = span (/= '>') afterAs
+    function <- stripPrefix ">::" afterTrait
+    if null owner || null trait || null function || '<' `elem` owner then Nothing else Just (trait ++ " for " ++ owner ++ "::" ++ function)
 
--- The functions that may read the world, directly or through a function they mention. Their return
--- values are not determined by their arguments alone.
+-- Results of genuine inline primitives keep their own effect classification.
 readersOfInput :: Program -> Set.Set Name
-readersOfInput program = grow (Set.fromList [name | (name, fn) <- functions, callsThroughFunctionBound name || any reads (Map.elems (fnBlocks fn))])
+readersOfInput = worldReadersBy readsWorldOp . progFunctions
+
+worldReadersBy :: (ListOp -> Bool) -> Map Name Function -> Set.Set Name
+worldReadersBy readsOp fs = grow (Set.fromList [name | (name, fn) <- functions, unknownDispatch name || any reads (Map.elems (fnBlocks fn))])
   where
-    functions = Map.toList (progFunctions program)
+    functions = Map.toList fs
+    implementations = Map.fromListWith Set.union
+        [ ((trait, methodName method), Set.singleton name)
+        | name <- Map.keys fs, check <- name : maybe [] pure (companionOf name)
+        , Just (trait, owner, method) <- [parseImplCheckName check], owner /= "$Self" ]
+    methodName = takeWhile (`notElem` "<[#")
+    dispatch name = case parseImplCheckName name of
+        Just (trait, "$Self", method) -> Just (trait, methodName method)
+        _ -> Nothing
+    targets key = Map.findWithDefault Set.empty key implementations
+    -- Use only the implementations of this linked program; another link's
+    -- generic proof is rebuilt from that program's effect graph.
+    unknownDispatch name = case dispatch name of
+        Just key@(trait, _) -> any (`isPrefixOf` trait) ["Fn$", "FnMut$", "FnOnce$"] || Set.null (targets key)
+        Nothing -> False
+    dependencies name fn = Set.union (functionsNamed fn) (maybe Set.empty targets (dispatch name))
     reads (BasicBlock stmts term) = indirect term || any readsStatement stmts
     indirect (Call (Const (CFn _)) _ _ _) = False
     indirect Call{} = True
     indirect _ = False
     readsStatement s = case s of
-        Assign _ (ListOp op _) -> readsWorldOp op
-        Peek _ (ListOp op _) -> readsWorldOp op
+        Assign _ (ListOp op _) -> readsOp op
+        Peek _ (ListOp op _) -> readsOp op
+        AssignRef _ _ (ListOp op _) -> readsOp op
         _ -> False
-    -- (the functions that a function names, as the callee of a call or anywhere a value is used: the same relation `SelfHostedMir.inputReadersOf` grows its set over)
-    mentions = functionsNamed
     grow known =
-        let more = Set.fromList [name | (name, fn) <- functions, not (Set.member name known), not (Set.null (Set.intersection (mentions fn) known))]
+        let more = Set.fromList [name | (name, fn) <- functions, not (Set.member name known), not (Set.null (Set.intersection (dependencies name fn) known))]
          in if Set.null more then known else grow (Set.union known more)
 
 -- The functions of the program that a function names as values or callees in its statements (not those its contracts could name,
@@ -716,6 +737,7 @@ functionsNamed fn =
     rvaluesOf s = case s of
         Assign _ rv -> [rv]
         Peek _ rv -> [rv]
+        AssignRef _ _ rv -> [rv]
         _ -> []
 
 terminatorFns :: Terminator -> [Name]

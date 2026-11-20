@@ -523,22 +523,9 @@ ensuresOf spec = [clause | clause@(AssignProofVar _ _) <- M.specRequires spec] +
 -- A function that only allocates is not one of them; its calls are new values
 -- all the same, so the allocating operations of `M.readsWorldOp` are left out.
 inputReadersOf :: Map.Map Name M.Function -> Set.Set Name
-inputReadersOf functions = grow seeds
+inputReadersOf = M.worldReadersBy (`elem` inputOps)
   where
     inputOps = [M.ReadByte, M.ArgCount, M.ArgByte, M.PathByte, M.FileLoad, M.FileByte, M.StoreByte, M.FileStore]
-    statementsOf fn = concatMap M.blockStatements (Map.elems (M.fnBlocks fn))
-    reads s = case s of
-        M.Assign _ (M.ListOp op _) -> op `elem` inputOps
-        M.Peek _ (M.ListOp op _) -> op `elem` inputOps
-        _ -> False
-    seeds = Set.fromList [n | (n, fn) <- Map.toList functions, M.callsThroughFunctionBound n || any reads (statementsOf fn) || any isIndirect (Map.elems (M.fnBlocks fn))]
-    isIndirect blk = isJust (indirectCallee (M.blockTerminator blk))
-    -- A direct callee is not the only way to reach one: `h = f; h();` calls f
-    -- through a local, so the closure follows every function a body names, the
-    -- way `M.readersOfInput` does.
-    grow known =
-        let more = Set.fromList [n | (n, fn) <- Map.toList functions, Set.notMember n known, not (Set.null (Set.intersection (M.functionsNamed fn) known))]
-         in if Set.null more then known else grow (Set.union known more)
 
 -- The names a contract defines (define s = size(lst);), each as the term it
 -- stands for, with the names defined before it put in
@@ -1749,7 +1736,7 @@ mayDivergeFn fn = M.fnName fn == "main" || M.specTermination (M.fnSpec fn) == Ju
 -- sequence operations have no contract to check, only safety conditions.
 stripBuiltin :: Name -> Name
 stripBuiltin name
-    | "builtin::" `isPrefixOf` name = drop 9 name
+    | "builtin::" `isPrefixOf` name = takeWhile (/= '#') (drop 9 name)
     | otherwise = name
 
 builtinCall :: Name -> [M.Operand] -> M.Local -> Build -> Maybe ([MirValue], Build)
@@ -2893,6 +2880,48 @@ conversionWitness types functions index (name, target) = do
             pure (witness name locs params (M.fnBlocks callee))
         else pure (witness name locs params (callBlocks (M.Const (M.CFn name))))
 
+-- This summary only restricts termination edges, never the contract of a call.
+-- Count every write, even one on a different path or after the call.
+localTerminationTargets :: Map.Map Name M.Function -> M.Function -> M.Local -> Maybe (Set.Set Name)
+localTerminationTargets functions fn = \local -> do
+    targets <- visit Set.empty Set.empty [local]
+    guard (not (Set.null targets))
+    pure targets
+  where
+    blocks = Map.elems (M.fnBlocks fn)
+    statements = concatMap M.blockStatements blocks
+    terms = map M.blockTerminator blocks
+    definitions = Map.fromListWith (++) (concatMap assigned statements ++ [(d, [Nothing]) | M.Call _ _ d _ <- terms])
+    assigned stmt = case stmt of
+        M.Assign d (M.Use op) -> [(d, [Just op])]
+        M.Assign d _ -> [(d, [Nothing])]
+        M.Peek d _ -> [(d, [Nothing])]
+        _ -> []
+    escaped = Set.fromList (M.fnParams fn ++ concatMap addresses statements ++ concatMap lentForUpdate terms)
+    addresses stmt = case stmt of
+        M.Assign _ rv -> borrowRoot rv
+        M.Peek _ rv -> borrowRoot rv
+        M.AssignRef root _ rv -> root : borrowRoot rv
+        _ -> []
+    borrowRoot (M.Borrow root _ _) = [root]
+    borrowRoot _ = []
+    lentForUpdate (M.Call (M.Const (M.CFn name)) args _ _)
+        | Just callee <- Map.lookup name functions = mapMaybe operandLocal [op | (p, op) <- zip (M.fnParams callee) args, p `elem` M.fnMutBorrowed callee]
+    lentForUpdate (M.Call _ args _ _) = mapMaybe operandLocal args
+    lentForUpdate _ = []
+    visit _ targets [] = Just targets
+    visit seen targets (l : todo)
+        | Set.member l seen = visit seen targets todo
+        | Set.member l escaped = Nothing
+        | otherwise = do
+            writes <- Map.lookup l definitions >>= sequence
+            sources <- traverse source writes
+            let names = [n | Left n <- sources]
+                locals = [p | Right p <- sources]
+            visit (Set.insert l seen) (Set.union (Set.fromList names) targets) (locals ++ todo)
+    source (M.Const (M.CFn name)) = Just (Left name)
+    source op = Right <$> operandLocal op
+
 -- Contracts say nothing about the call chain. Reject cycles that could go
 -- through a pointer; direct cycles still use their ordinary shrinks checks.
 indirectCycle :: Map.Map Name M.Function -> M.Function -> [(Name, Type)] -> Maybe Name
@@ -2902,9 +2931,10 @@ indirectCycle fs main conversions = find inIndirectCycle (Map.keys allFns)
     addressTaken = Map.fromListWith Set.union
         [(shape, Set.singleton name) | (name, _) <- conversions, Just shape <- [Map.lookup name fs >>= functionShape]]
     indirectEdges fn = Set.unions
-        [ Map.findWithDefault Set.empty (args, ret) addressTaken
+        [ fromMaybe (Map.findWithDefault Set.empty (args, ret) addressTaken) (known local)
         | blk <- Map.elems (M.fnBlocks fn), Just local <- [indirectCallee (M.blockTerminator blk)]
         , Just (args, ret, _) <- [localTypeOf fn local >>= fnValueType] ]
+      where known = localTerminationTargets allFns fn
     indirect = Map.map indirectEdges allFns
     edges name fn = callNamesOf fn ++ Set.toList (Map.findWithDefault Set.empty name indirect)
     components = stronglyConnComp [(name, name, edges name fn) | (name, fn) <- Map.toList allFns]

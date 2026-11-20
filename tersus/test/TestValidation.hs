@@ -577,6 +577,9 @@ testCallsUseContracts =
             , -- A function is known as the value it is, where it is named as one and not by a fact in every proof of every function
               -- (which made the time to validate grow with the square of the number of functions; the proofs here are of 80 functions)
               parseValidProgramHelper chainOfFunctions
+            , pipelineValid (ordinaryTraitCallback "")
+            , pipelineRejected (ordinaryTraitCallback "affirm a = b; ") "Could not prove: a = b"
+            , pipelineRejected joinedCallbackCycle "potential recursion through a function value"
             , parseValidateFailProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; g = id; x = g(3); affirm x = 3;" "Could not prove: x = 3"
             ]
 
@@ -634,10 +637,23 @@ chainOfFunctions :: String
 chainOfFunctions =
     "fn f0(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; };"
         ++ concat
-            [ "fn f" ++ show k ++ "(n: Int) -> Int [{ }] [{ affirm return = n; }] { g = f" ++ show (k - 1) ++ "; return g(n); };"
+            [ "fn f" ++ show k ++ "(n: Int) -> Int [{ }] [{ affirm return = n; }] { let g: fn(x: Int) -> Int [{ }] [{ affirm return = x; }] = f" ++ show (k - 1) ++ "; return g(n); };"
             | k <- [1 .. 79 :: Int]
             ]
         ++ "x = f79(3); affirm x = 3;"
+
+ordinaryTraitCallback :: String -> String
+ordinaryTraitCallback affirmation =
+    "trait Next { fn next(self: &Self) -> Int; }; "
+        ++ "struct Reader { callback: fn() -> Int }; "
+        ++ "impl Next for Reader { fn next(self: &Self) -> Int { f = self.callback; return f(); }; }; "
+        ++ "fn twice<T: Next>(r: &T) -> Int { a = Next::next(r); b = Next::next(r); " ++ affirmation ++ "return a; }; "
+        ++ "fn read() -> Int { return readByte(); }; r = Reader { callback: read }; return twice(&r);"
+
+joinedCallbackCycle :: String
+joinedCallbackCycle =
+    "fn leaf() -> Int { return 0; }; fn cycle() -> Int { "
+        ++ "f = if argCount() > 0 { cycle } else { leaf }; return f(); }; return cycle();"
 
 identity :: String
 identity = "fn identity(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; "

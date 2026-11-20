@@ -200,16 +200,6 @@ spreadInstance pack program (spread, (g, lo, hi)) = case Map.lookup g (progInsta
 nameOf :: Map Key Name -> Key -> Name
 nameOf named key@(f, tys, sizes) = Map.findWithDefault (copyName f tys sizes) key named
 
--- `Tr for O::g`, the check of the impl function `<O as Tr>::g` against its trait
-companionOf :: Name -> Maybe Name
-companionOf name = do
-    rest <- stripPrefix "<" name
-    let (owner, afterOwner) = span (/= ' ') rest
-    afterAs <- stripPrefix " as " afterOwner
-    let (trait, afterTrait) = span (/= '>') afterAs
-    function <- stripPrefix ">::" afterTrait
-    if null owner || null trait || null function || '<' `elem` owner then Nothing else Just (trait ++ " for " ++ owner ++ "::" ++ function)
-
 -- The key of a reference whose arguments are all known
 concreteKey :: Program -> Name -> [Arg] -> Maybe Key
 concreteKey _ f args =
