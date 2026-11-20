@@ -15,7 +15,7 @@ module TestPipeline
 
 import TestStorage (pattern TList, pattern TBox)
 import Control.Exception (IOException, bracket, evaluate, finally, try)
-import Data.List (isInfixOf, nub, sort, subsequences)
+import Data.List (isInfixOf, isSuffixOf, nub, sort, subsequences)
 import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
 import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, findExecutable, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.Environment (getExecutablePath, lookupEnv)
@@ -30,7 +30,7 @@ import qualified Data.Map as Map
 import Cli
 import Modules (LoadResult (..))
 import qualified Modules
-import PreludeSource (parserPackageFiles)
+import PreludeSource (parserPackageFiles, stdName)
 import qualified Mir as M
 import MirEval
 import MirHousekeeping (eraseGhosts, toolProgram, validationEntry, verifyProgram)
@@ -465,9 +465,21 @@ withSourceMir source check = case Compile.lowerSource True source of
 withMir :: String -> (M.Program -> TestResult) -> TestResult
 withMir source check = either Just check (lowerSource source)
 
+-- A program that holds a list or a Box, which it has as values of the library's structs: lowered with the libraries the
+-- elaborator selects for it
+lowerLibSource :: String -> Either String M.Program
+lowerLibSource source = case parseWithEqualityParts source of
+    Left err -> Left ("Parse failed: " ++ err)
+    Right parts -> case lowerParts parts of
+        Error e -> Left e
+        Ok program -> Right program
+
+withLibMir :: String -> (M.Program -> TestResult) -> TestResult
+withLibMir source check = either Just check (lowerLibSource source)
+
 -- What the program returns, run on the MIR
 runMir :: String -> Result (Maybe String) String
-runMir source = case lowerSource source of
+runMir source = case lowerLibSource source of
     Left e -> Error e
     Right program -> mapResult (fmap renderMirValue) (runProgram program)
 
@@ -524,11 +536,11 @@ testMirStructure =
           withMir "fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; fn inc(n: Int) -> Int { return n + 1; }; return apply(inc, 1);" $ \p ->
             testAssertTrue ("const fn inc" `isInfixOf` M.renderProgram p)
         , -- The element type of an empty list is the one a later push decides, and every local has a type
-          withMir "x = []; x = push(x, 1); return x;" $ \p ->
-            testAssertEq [M.localType d | d <- Map.elems (M.fnLocals (mainFunction p)), M.localName d == Just "x"] [TList TInt]
+          withLibMir "x = []; x = push(x, 1); return x;" $ \p ->
+            testAssertEq [M.localType d | d <- Map.elems (M.fnLocals (mainFunction p)), M.localName d == Just "x"] [listOf (M.progStorage p) TInt]
         , -- A list that is never used still has a type
-          withMir "x = [];" $ \p ->
-            testAssertEq [M.localType d | d <- Map.elems (M.fnLocals (mainFunction p)), M.localName d == Just "x"] [TList TInt]
+          withLibMir "x = [];" $ \p ->
+            testAssertEq [M.localType d | d <- Map.elems (M.fnLocals (mainFunction p)), M.localName d == Just "x"] [listOf (M.progStorage p) TInt]
         , -- Types come out right for structs and enums
           withMir "struct P { x: Int, y: Bool }; p = P { x: 1, y: true }; q = p.y; r = p.x; return r;" $ \p ->
             testAssertEq [M.localType d | d <- Map.elems (M.fnLocals (mainFunction p)), M.localName d == Just "q"] [TBool]
@@ -575,10 +587,10 @@ testMirStructure =
           withMir "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return n; }; h = f; h = g; return f(1) + h(2);" $ \p ->
             let fn = mainFunction p
              in testAssertEq (length (localsNamed "h" fn), length (localsNamed "f" fn), length (localsNamed "g" fn)) (1, 0, 0)
-        , withMir "fn f(l: &List<Int>) -> Int { return 0; }; { f = size; }; return f([1, 2]);" $ \p ->
+        , withLibMir "fn f(l: &List<Int>) -> Int { return 0; }; { f = size; }; return f([1, 2]);" $ \p ->
             testAssertEq (length (localsNamed "f" (mainFunction p)), runProgram p) (1, Ok (Just (MInt 2)))
         , -- Every program lowers to a well formed MIR
-          withMir "fn f(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ }] { return get(l, i); }; s = 0; for x in [1, 2, 3] { s = s + x; }; l = push([], s); return f(l, 0);" $ \p ->
+          withLibMir "fn f(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ }] { return get(l, i); }; s = 0; for x in [1, 2, 3] { s = s + x; }; l = push([], s); return f(l, 0);" $ \p ->
             testAssertEq (verifyProgram p) (Ok ())
         ]
   where
@@ -611,12 +623,12 @@ testMirTypes =
         "testMirTypes"
         [ -- the type of the local that receives an operation
           broken "x = 1 + 2; return x;" (setLocalType (M.Local 1) TBool) "ill typed"
-        , broken "l = [1]; l = push(l, 2); return size(l);" (setLocalType (M.Local 1) (TList TBool)) "ill typed"
+        , brokenLib "l = [1]; l = push(l, 2); return size(l);" (setLocalType (M.Local 1) (TNamed (stdName "core/types" "List") [ArgType TBool])) "ill typed"
         , broken "struct P { x: Int, y: Bool }; p = P { x: 1, y: true }; q = p.y; return q;" (setLocalType (M.Local 2) TInt) "the field is Bool, not Int"
         , -- operands of the wrong type
           broken "x = 1; if x < 2 { return 1; }; return 2;" (mapTerminators (\t -> case t of M.SwitchBool _ a b -> M.SwitchBool (M.Const (M.CInt 1)) a b; _ -> t)) "the test is not a Bool"
         , broken "x = 1 + 2; return x;" (mapStatements (\st -> case st of M.Assign d (M.BinaryOp op a _) -> M.Assign d (M.BinaryOp op a (M.Const (M.CBool True))); _ -> st)) "ill typed"
-        , broken "l = [1, 2]; return get(l, 0);" (mapStatements (\st -> case st of M.Assign d (M.ListOp M.Get [l, _]) -> M.Assign d (M.ListOp M.Get [l, l]); _ -> st)) "ill typed"
+        , brokenLib "l = [1, 2]; return get(l, 0);" (mapStatements (\st -> case st of M.Assign d (M.ListOp M.Get [l, _]) -> M.Assign d (M.ListOp M.Get [l, l]); _ -> st)) "ill typed"
         , -- calls: the callee, the arity, the arguments, the result
           broken "fn f(n: Int) -> Int { return n; }; return f(1);" (mapTerminators (\t -> case t of M.Call c _ d n -> M.Call c [] d n; _ -> t)) "takes 1 arguments, got 0"
         , broken "fn f(n: Int) -> Int { return n; }; return f(1);" (mapTerminators (\t -> case t of M.Call c _ d n -> M.Call c [M.Const (M.CBool True)] d n; _ -> t)) "argument 1 is not Int"
@@ -635,6 +647,8 @@ testMirTypes =
   where
     broken source change expected =
         withMir source $ \p -> testAssertErrorContains expected (verifyProgram (onEvery change p))
+    brokenLib source change expected =
+        withLibMir source $ \p -> testAssertErrorContains expected (verifyProgram (onEvery change p))
     onEvery f p = p{M.progMain = f (M.progMain p), M.progFunctions = Map.map f (M.progFunctions p)}
     setLocalType l ty fn = fn{M.fnLocals = Map.adjust (\d -> d{M.localType = ty}) l (M.fnLocals fn)}
     mapBlocks f fn = fn{M.fnBlocks = Map.map f (M.fnBlocks fn)}
@@ -695,7 +709,8 @@ testMir =
         , testCaseSeq
             "testMirCli"
             ([ -- `mir` prints the blocks
-              testAssertEq (runSource Mir "x = 1 + 2; return x;") (Ok (unlines ["fn main() -> Int {", "    let _0: Int;", "    let _1: Int; // x", "    bb0: {", "        _1 = Add(const 1, const 2);", "        _0 = _1;", "        return;", "    }", "}"]))
+              -- (std's core, which every program is given for its List and Box, comes first, and main names its drops as ghosts)
+              testAssertEq (runSource Mir "x = 1 + 2; return x;") (Ok (unlines ["struct std$core$types$Box<'T> { addr: Addr<T> }", "", "struct std$core$types$List<'T> { addr: Addr<T>, len: Int, cap: Int }", "", "fn <std$core$types$Box as std$core$ownership$Drop>::drop(_1: std$core$types$Box<'T>) -> Int {", "    // _1 = self", "    let _0: Int;", "    let _2: Addr<T>;", "    let _3: Addr<T>;", "    let _6: Int;", "    bb0: {", "        _2 = (_1 as std$core$types$Box<'T>).addr;", "        _3 = (_1 as std$core$types$Box<'T>).addr;", "        _6 = AddrDropValue(_3, const 0);", "        _0 = AddrFree(_2);", "        return;", "    }", "}", "", "fn <std$core$types$List as std$core$ownership$Drop>::drop(_1: std$core$types$List<'T>) -> Int {", "    // _1 = self", "    let _0: Int;", "    let _2: Addr<T>;", "    let _3: Addr<T>;", "    let _4: Int;", "    let _7: Int;", "    bb0: {", "        _2 = (_1 as std$core$types$List<'T>).addr;", "        _3 = (_1 as std$core$types$List<'T>).addr;", "        _4 = (_1 as std$core$types$List<'T>).len;", "        _7 = AddrDropRange(_3, const 0, _4);", "        _0 = AddrFree(_2);", "        return;", "    }", "}", "", "fn std$core$ownership$Drop for std$core$types$Box::drop(_1: std$core$types$Box<'T>) -> Int {", "    // _1 = self", "    let _0: Int;", "    bb0: {", "        _0 = call <std$core$types$Box as std$core$ownership$Drop>::drop(_1) -> bb1;", "    }", "    bb1: {", "        return;", "    }", "}", "", "fn std$core$ownership$Drop for std$core$types$List::drop(_1: std$core$types$List<'T>) -> Int {", "    // _1 = self", "    let _0: Int;", "    bb0: {", "        _0 = call <std$core$types$List as std$core$ownership$Drop>::drop(_1) -> bb1;", "    }", "    bb1: {", "        return;", "    }", "}", "", "fn main() -> Int {", "    let _0: Int;", "    let _1: Int; // x", "    bb0: {", "        ghost fn <std$core$types$List as std$core$ownership$Drop>::drop;", "        ghost fn std$core$ownership$Drop for std$core$types$List::drop;", "        ghost fn <std$core$types$Box as std$core$ownership$Drop>::drop;", "        ghost fn std$core$ownership$Drop for std$core$types$Box::drop;", "        _1 = Add(const 1, const 2);", "        _0 = _1;", "        return;", "    }", "}"]))
             ]
                 ++ validationFailuresFor ["Mir"])
         ]
@@ -771,7 +786,7 @@ selfHostedQueryFamilies program =
                                 _ -> Just "Context analysis has no equality classes"
                             result -> Just ("Unexpected context analysis: " ++ show result)
                 checkInconsistentPartContext = testAssertEq (runNamedFunction program "entailsGoal" [partContext [(10, 0, 0), (11, 0, -1)] [(10, 11)] [], goal "Different" 0 0]) (Ok (Just (MBool True)))
-                localsValue bindings = MData "HashMap" [("buckets", MList [MList [MData "Entry" [("key", MInt k), ("value", MInt v)] | (k, v) <- bindings]]), ("count", MInt (toInteger (length bindings)))]
+                localsValue bindings = MData (stdName "map" "HashMap") [("buckets", MList [MList [MData (stdName "map" "Entry") [("key", MInt k), ("value", MInt v)] | (k, v) <- bindings]]), ("count", MInt (toInteger (length bindings)))]
                 initialExecution = floored $ MData "ExecutionState" [("context", emptyContext), ("locals", localsValue []), ("templates", MList []), ("floor", MInt (-999))]
                 termRef i = MData "ValueRef::Term" [("term", MInt i)]
                 localRef i = MData "ValueRef::Local" [("local", MInt i)]
@@ -828,11 +843,13 @@ selfHostedQueryFamilies program =
                 dDone = dData "ExecutionEnd::Done" []
                 dBlockAt i steps end = dData "ExecutionBlock" [dInt i, steps, end]
                 dBlock = dBlockAt 0
+                -- (the driver reads the locals of a state by the names localsMap writes them with)
+                wireName name = maybe name id (lookup name [(stdName "map" "HashMap", "HashMap"), (stdName "map" "Entry", "Entry")])
                 toDriver value = case value of
                     MInt n -> dInt n
                     MBool b -> dBool b
                     MList items -> dList (map toDriver items)
-                    MData name fields -> dData name (map (toDriver . snd) fields)
+                    MData name fields -> dData (wireName name) (map (toDriver . snd) fields)
                     other -> other
                 driven blocks entry state = case runNamedFunction program "driverValidate" [blocks, MInt entry, toDriver state] of
                     Ok (Just (MData "ExecutionFlowResult" fields)) -> Right (lookup "status" fields)
@@ -1229,10 +1246,10 @@ selfHostedQueryFamilies program =
                             _ -> []
                         _ -> []
                     _ -> []
-                emptyMap = MData "HashMap" [("buckets", MList [MList []]), ("count", MInt 0)]
+                emptyMap = MData (stdName "map" "HashMap") [("buckets", MList [MList []]), ("count", MInt 0)]
                 checkInferenceProvenance = case indexOf inferredEntryState of
                   Left err -> Just err
-                  Right index -> case runNamedFunction program "inferLoopCandidateGoals" [inferredEntryState, index, MList [MInt 1, MInt 2], MData "HashSet" [("map", emptyMap)], emptyMap] of
+                  Right index -> case runNamedFunction program "inferLoopCandidateGoals" [inferredEntryState, index, MList [MInt 1, MInt 2], MData (stdName "set" "HashSet") [("map", emptyMap)], emptyMap] of
                     Ok (Just (MList goals)) ->
                         let outside = [replayed | replayed <- sort (nub (concatMap replayedTerms goals)), replayed `notElem` inferredEntryTerms]
                          in (if null goals then Just "Inference kept no loop candidate" else Nothing)
@@ -1245,7 +1262,7 @@ selfHostedQueryFamilies program =
                 -- the view would be -1000 too, giving it a second value (x = z + 2 = 3), and the
                 -- contradiction would keep every candidate, x = y (3 = 7) among them.
                 floorEntryState = MData "ExecutionState" [("context", inferContextOf (map constant [(-1000, 0, 1), (10, 0, 3), (11, 0, 1), (12, 0, 7), (13, 0, 2)])), ("locals", localsValue [(1, 10), (2, 11), (3, 12)]), ("templates", MList []), ("floor", MInt (-2000))]
-                readOnly = MData "HashSet" [("map", MData "HashMap" [("buckets", MList [MList [MData "Entry" [("key", MInt 3), ("value", MBool True)]]]), ("count", MInt 1)])]
+                readOnly = MData (stdName "set" "HashSet") [("map", MData (stdName "map" "HashMap") [("buckets", MList [MList [MData (stdName "map" "Entry") [("key", MInt 3), ("value", MBool True)]]]), ("count", MInt 1)])]
                 goalSides goal = case goal of
                     MData "InferGoal" fields -> case (lookup "relation" fields, lookup "left" fields, lookup "right" fields) of
                         (Just (MInt r), Just (MInt l), Just (MInt t)) -> Just (r, l, t)

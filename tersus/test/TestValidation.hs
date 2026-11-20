@@ -22,7 +22,7 @@ import qualified Mir as M
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import TestParserFragments
-import Pipeline (compileSource, validateStatements)
+import Pipeline (compileSource, validateParts)
 import SelfHostedMir (validateByTersus)
 import ValidatorNative (prepareTexts, validateCompiled, validateCompiledUncached, validationCacheHits, validationRefusals)
 import StdLib
@@ -40,7 +40,7 @@ import TestHarness
 -- mismatch rows are merged below into single validate-ok lists.
 validateOkHelper :: [Statement] -> TestResult
 validateOkHelper stmts =
-    case validateStatements stmts of
+    case libraryParts stmts `bindResult` validateParts of
         Ok _ -> Nothing
         Error e -> Just $ "Validation failed with error: " ++ e
 
@@ -51,7 +51,7 @@ validateWEMatchHelper stmts _expected = validateOkHelper stmts
 
 validationFailHelper :: [Statement] -> TestResult
 validationFailHelper stmts =
-    case validateStatements stmts of
+    case libraryParts stmts `bindResult` validateParts of
         Ok _ -> Just "Validation passed when it should have failed"
         Error e | noVerdict e -> Just e
         Error _ -> Nothing

@@ -31,6 +31,8 @@ import TestPipeline (exampleExpectations)
 import Compile (lowerParts, lowerStatements, parseSourceParts)
 import Types
 import Utils
+import qualified Modules
+import qualified PackageCompile as Package
 
 data ParityCase = ParityCase
     { parityName :: String
@@ -96,7 +98,8 @@ sourceContainerCapabilities = TestList "logical container layouts"
         Ok program -> testAssertEq
             [(Map.lookup name (M.progGenerics program), Map.lookup name (M.progInvariants program)) | name <- ["List", "Box"]]
             [(Map.lookup name (M.progGenerics storageProgram), Map.lookup name (M.progInvariants storageProgram)) | name <- ["List", "Box"]])
-    , testCase "exact List layout with a user invariant is retained" (alteredLayout "List" "struct List<T> { addr: Addr<T>, len: Int, cap: Int, ghost blk: Block<T> } invariant [{ affirm len >= 99; }]; return [];")
+    -- (a package's own List is the list syntax makes when its marker binds the role: its layout is std's, its invariant is not)
+    , testCase "exact List layout with a user invariant is retained" (alteredPackageLayout [("app/package.tersus", "noPrelude = true;\nList = main::List;"), ("app/main.tersus", "struct List<T> { addr: Addr<T>, len: Int, cap: Int, ghost blk: Block<T> } invariant [{ affirm len >= 99; }]; return [];")])
     , testCase "exact Box layout with a user invariant is retained" (alteredLayout "Box" "struct Box<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm cap(blk) = 2; }]; b = Box::new(1); return Box::unbox(b);")
     , testCase "physical Box fields remain unsupported" (eligible "b = Box::new(1); return b.addr;" False)
     , testCase "user address fields remain unsupported" (eligible "struct P { addr: Addr<Int> }; p = P { addr: Addr::null() }; return 0;" False)
@@ -115,16 +118,22 @@ sourceContainerCapabilities = TestList "logical container layouts"
     lower source = parseSourceParts True source `bindResult` lowerParts
     eligible source expected = case lower source of
         Error e -> Just e
-        Ok program -> testAssertEq (unsupportedReason program == Nothing) expected
+        Ok program -> if expected then testAssertEq (unsupportedReason program) Nothing else testAssertTrue (unsupportedReason program /= Nothing)
     alteredLayout name source = case lowerSource False source of
         Error e -> Just e
-        Ok program -> case Map.lookup name (M.progInvariants program) of
-            Just clauses | not (null clauses) ->
-                let viewed = sourceContainerView program
-                 in if Map.lookup name (M.progInvariants viewed) == Just clauses && unsupportedReason program /= Nothing
-                        then Nothing
-                        else Just "the bridge discarded or accepted a custom container invariant"
-            _ -> Just "fixture lost its custom invariant"
+        Ok program -> layoutRetained name program
+    alteredPackageLayout files = case Modules.loadFromEntry (Modules.resolverFromFiles files) "app/main.tersus" of
+        Left e -> Just e
+        Right (Modules.PackageResult pkg) -> case Package.compileModules (Modules.packageSnapshot pkg) `bindResult` Package.lowerCompiledPackage of
+            Error e -> Just e
+            Ok program -> layoutRetained (storageList (M.progStorage program)) program
+        Right _ -> Just "the fixture is not a package"
+    layoutRetained name program = case Map.lookup name (M.progInvariants program) of
+        Just clauses | not (null clauses) ->
+            if Map.lookup name (M.progInvariants (sourceContainerView program)) == Just clauses && unsupportedReason program /= Nothing
+                then Nothing
+                else Just "the bridge discarded or accepted a custom container invariant"
+        _ -> Just "fixture lost its custom invariant"
 
 readerEvery :: Int
 readerEvery = 7
@@ -332,7 +341,8 @@ readerCase parityCase = do
                     let text = writeProgram owned
                         haskellRoundTrip = case readProgram text of
                             Error e -> Just ("the Haskell MIR reader refuses its own data: " ++ e)
-                            Ok back -> if back == forNative owned then Nothing else Just "the Haskell MIR reader reads back another program"
+                            -- (the data has the storage record of the program, and none of its other roles or checked facts)
+                            Ok back -> if back == storageOnly (forNative owned) then Nothing else Just "the Haskell MIR reader reads back another program"
                     case haskellRoundTrip of
                         Just message -> pure (Just (parityName parityCase ++ ": " ++ message))
                         Nothing -> do
@@ -353,8 +363,28 @@ readerCase parityCase = do
                                         Just _ -> pure ()
                                     pure (fmap (\message -> parityName parityCase ++ ": " ++ message) outcome)
 
+storageOnly :: M.Program -> M.Program
+storageOnly program = program{M.progProtocols = Map.filterWithKey (\role _ -> role `elem` ["List", "Box"]) (M.progProtocols program), M.progOwnership = Nothing}
+
+-- (without the functions the checked facts of std's List and Box name, their drops and clones: the storage the logical
+-- containers stand for)
 unsupportedReason :: M.Program -> Maybe String
-unsupportedReason = unsupportedSourceReason . sourceContainerView
+unsupportedReason program0 = unsupportedSourceReason (sourceContainerView program0{M.progMain = withoutStorage (M.progMain program0), M.progFunctions = Map.map withoutStorage (Map.filterWithKey (\name _ -> not (excluded name)) (M.progFunctions program0))})
+  where
+    -- (and the ghost definitions of those functions, where the program names them)
+    withoutStorage fn = fn{M.fnBlocks = Map.map (\(M.BasicBlock stmts end) -> M.BasicBlock [st | st <- stmts, not (excludedDefinition st)] end) (M.fnBlocks fn)}
+    excludedDefinition st = case st of
+        M.Ghost _ (M.GhostFunction name _ _) -> excluded name
+        _ -> False
+    -- (a function with type parameters is checked as the copies its calls make, as SelfHostedMir.encode checks it: std's
+    -- impls for its containers, which every program is given under std's canonical names, are such templates; the program's
+    -- own stay, with what they declare)
+    excluded name = storageDrop name || ("std$" `isInfixOf` name && maybe False (not . null . M.fnTypeParams) (Map.lookup name (M.progFunctions program0)))
+    storage = M.progStorage program0
+    storageDrops = Set.fromList [takeWhile (/= '[') f | (owner, facts) <- maybe [] Map.toList (M.progOwnership program0), takeWhile (/= '<') owner `elem` [storageList storage, storageBox storage], Just (_, f) <- [ownershipDrop facts, ownershipClone facts]]
+    -- (and the checks of their impls, named for the impl)
+    storageDrop name = Set.member (takeWhile (/= '[') name) storageDrops
+        || any (\t -> (" for " ++ t ++ "::") `isInfixOf` name) [storageList storage, storageBox storage]
 
 unsupportedSourceReason :: M.Program -> Maybe String
 unsupportedSourceReason program

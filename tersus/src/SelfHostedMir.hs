@@ -20,6 +20,7 @@ import MirEval (MirValue (..), runNamedFunction)
 import LibPackage (LibPackage (..), libPackage)
 import Compile (lowerSource)
 import MirHousekeeping (eraseGhosts, verifyProgram, toolProgram, validationEntry)
+import PreludeSource (stdName)
 import MirMono (monomorphizeForValidation)
 import StdLib (builtinFunct, eqVarProof, stdLibRuleCtx)
 import StdLibDefs (stdLibValCtx)
@@ -4103,6 +4104,20 @@ sourceContainerView program = program
         , Map.lookup name (M.progInvariants program) == Just invariant
         ]
 
+-- The data for the native validator names the HashMap of an entry state's locals as its driver reads it (localsMap); the
+-- interpreted validator holds a value of std's HashMap itself
+checkerNames :: MirValue -> MirValue
+checkerNames (MData "ExecutionState" fields) = MData "ExecutionState" [(f, if f == "locals" then checkerLocals v else v) | (f, v) <- fields]
+  where
+    checkerLocals (MData "HashMap" [("buckets", MList buckets), count]) =
+        MData (stdName "map" "HashMap") [("buckets", MList (map checkerBucket buckets)), count]
+    checkerLocals other = other
+    checkerBucket (MList entries) = MList (map checkerEntry entries)
+    checkerBucket other = other
+    checkerEntry (MData "Entry" entry) = MData (stdName "map" "Entry") entry
+    checkerEntry other = other
+checkerNames other = other
+
 -- The first argument is the validated lib/validation/validation.tersus program. The
 -- verdict says whether every obligation was proved, which one was not, or
 -- what part of the MIR is outside this bridge's current subset (including
@@ -4113,7 +4128,7 @@ validateMirSubset checker program = verifyProgram program `bindResult` \_ -> cas
     Right functions -> checkFunctions functions
   where
     checkFunctions [] = Ok Proved
-    checkFunctions ((name, (blocks, initial, entry)) : rest) = runNamedFunction checker "validateExecution" [blocks, MInt entry, initial] `bindResult` \result -> case result of
+    checkFunctions ((name, (blocks, initial, entry)) : rest) = runNamedFunction checker "validateExecution" [blocks, MInt entry, checkerNames initial] `bindResult` \result -> case result of
         Just (MData "ExecutionFlowResult" fields) -> case (lookup "status" fields, lookup "block" fields, lookup "step" fields) of
             (Just (MInt 0), _, _) -> checkFunctions rest
             (Just (MInt 1), Just (MInt b), Just (MInt i)) -> Ok (Unproved (name ++ ", block " ++ show b ++ ", step " ++ show i))
