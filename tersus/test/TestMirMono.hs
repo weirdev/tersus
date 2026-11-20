@@ -35,10 +35,13 @@ monoDifference expected actual
     | writeLowered (unitOf expected) /= writeLowered (unitOf actual) = Just "native mono reserializes differently"
     | otherwise = Nothing
 
+-- (master's oracle specializes data without checked records: the program is compared as that data writes it)
 compareWire :: Program -> IO TestResult
-compareWire original = case writeLowered (unitOf original) of
+compareWire checked = case writeLowered (unitOf original) of
     Error e -> pure (Just e)
     Ok input -> compareInput original input
+  where
+    original = checked{progProtocols = Map.empty, progOwnership = Nothing}
 
 compareInput :: Program -> String -> IO TestResult
 compareInput original input = do
