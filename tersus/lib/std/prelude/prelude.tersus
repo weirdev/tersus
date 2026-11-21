@@ -92,4 +92,3 @@ impl Hash for Byte {
 impl Hash for Bool {
     fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }] { if self { return 1231; }; return 1237; };
 };
-
