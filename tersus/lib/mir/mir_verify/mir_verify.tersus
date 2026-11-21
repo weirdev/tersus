@@ -1606,8 +1606,8 @@ fn substSizes(p: &Program, t: &Type, names: &List<String>, sizes: &List<Size>) -
         Type::TBoxedClosure { mutable: mutable, signature: signature } => { },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             na = [];
-            for a in args { na = push(na, substSizes(a, names, sizes)); };
-            r = Type::TFnContract { args: na, ret: Box::new(substSizes(Box::unbox(ret), names, sizes)), contract: clone(contract) };
+            for a in args { na = push(na, substSizes(p, a, names, sizes)); };
+            r = Type::TFnContract { args: na, ret: Box::new(substSizes(p, Box::unbox(ret), names, sizes)), contract: clone(contract) };
         },
         Type::TForall { sizes: sizes2, types: types, body: body } => {
             r = Type::TForall { sizes: clone(sizes2), types: clone(types), body: Box::new(substSizes(p, Box::unbox(body), names, sizes)) };
