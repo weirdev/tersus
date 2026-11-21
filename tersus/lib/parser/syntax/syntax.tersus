@@ -6952,6 +6952,19 @@ fn closureValue(st: St, names: &List<String>, types: &List<Type>, ret: Type, ins
     return valExpr( resultPartsvfState, resultPartsvfValue);
 };
 
+// A closure may say it may not end (`~`), and nothing else: it has no name to call itself by, so `shrinks` would say nothing
+fn closureTermination(sourceText: &Input, st: St) -> Res<Int> ~ {
+    s = skipWs(sourceText, st);
+    if byteAt(sourceText, s, s.pos) = 126 {
+        s = St { pos: s.pos + 1, ..s };
+        s = skipWs(sourceText, s);
+        t = emit( s, AstNode::Termination { value: AstTermination::MayDiverge }); Res { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk } = t;
+        if !resultPartstOk { return Res<Int> { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk }; };
+        return emit( resultPartstState, AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: resultPartstValue } });
+    };
+    return emit( s, AstNode::OptTermination { value: AstOptTermination::NoTermination });
+};
+
 fn closureExpr(sourceText: &Input, st: St, isMove: Bool) -> Res<Int> ~ {
     k = eatKeyword(sourceText, st, "fn"); Res { st: resultPartskState, v: resultPartskValue, ok: resultPartskOk } = k;
     s = skipWs(sourceText, resultPartskState);
@@ -6974,7 +6987,7 @@ fn closureExpr(sourceText: &Input, st: St, isMove: Bool) -> Res<Int> ~ {
     outs = optContract(sourceText, s); Res { st: resultPartsoutsState, v: resultPartsoutsValue, ok: resultPartsoutsOk } = outs;
     if !resultPartsoutsOk { return Res<Int> { st: resultPartsoutsState, v: 0, ok: false }; };
     s = resultPartsoutsState;
-    term = emit( s, AstNode::OptTermination { value: AstOptTermination::NoTermination }); Res { st: resultPartstermState, v: resultPartstermValue, ok: resultPartstermOk } = term;
+    term = closureTermination(sourceText, s); Res { st: resultPartstermState, v: resultPartstermValue, ok: resultPartstermOk } = term;
     if !resultPartstermOk { return Res<Int> { st: resultPartstermState, v: resultPartstermValue, ok: resultPartstermOk }; };
     s = resultPartstermState;
     if peekIs(sourceText, s, "=>") {

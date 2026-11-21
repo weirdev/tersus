@@ -84,7 +84,7 @@ makeCopiesWith library program
     | Map.null (progBounded program) && Map.null (progInstances program) = Ok program
     | otherwise = case run of
         Left e -> Error e
-        Right (rootsDone, mainDone, made, used) -> Ok (finish program named used rootsDone mainDone made)
+        Right (rootsDone, mainDone, made, used) -> Ok (divergingCopies (finish program named used rootsDone mainDone made))
   where
     generics = progBounded program
     lifted = Set.fromList (concatMap boundedLifted (Map.elems generics))
@@ -980,6 +980,23 @@ expression cx e = case e of
 -- stub (`Tr for $Self::g`, which the elaborator writes for each function of each trait), and a reference to a copy for
 -- types that are not known is a reference to the generic callee. Environments name the functions there are, and the
 -- tables are empty.
+-- A body with bounds is validated once, and a call through a bound promises to end there; a copy is not validated again, and
+-- in it the call is the impl's function, which may be `~`. Such a copy may not end either, so it is marked `~`, and so is every
+-- copy that calls one, and the validator refuses a caller that has to end.
+divergingCopies :: Program -> Program
+divergingCopies program = program{progFunctions = Map.map mark functions}
+  where
+    functions = progFunctions program
+    diverges f = specTermination (fnSpec f) == Just MayDiverge
+    callees f = [n | BasicBlock _ (Call (Const (CFn n)) _ _ _) <- Map.elems (fnBlocks f)]
+    diverging = grow (Map.keysSet (Map.filter diverges functions))
+    grow known =
+        let more = Map.keysSet (Map.filter (\f -> isCopyName (fnName f) && fnName f `Set.notMember` known && any (`Set.member` known) (callees f)) functions)
+         in if Set.null more then known else grow (Set.union known more)
+    mark f
+        | isCopyName (fnName f) && not (diverges f) && fnName f `Set.member` diverging = f{fnSpec = (fnSpec f){specTermination = Just MayDiverge}}
+        | otherwise = f
+
 finish :: Program -> Map Key Name -> Set.Set Name -> [Function] -> Function -> [Made] -> Program
 finish program named used roots main' made =
     completeInstances
