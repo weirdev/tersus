@@ -1405,7 +1405,7 @@ fn makeClosureImplForType(st: St, b: &BoundInfo, t: Int) -> St ~ {
 
 
 // The derived Clone of a closure struct: a clone function that clones each captured field
-fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<ClosureCap>, term: Int) -> St ~ {
+fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<ClosureCap>) -> St ~ {
     cloneTraitName = protocolName(&st, "Clone");
     if HashSet::contains(&st.impls, pairKey(&cloneTraitName, structName)) { return St { ok: true, ..st }; };
     traitFnsList = HashMap::lookup(&st.traitFns, &cloneTraitName, []);
@@ -1458,7 +1458,9 @@ fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<
     cloneFs = FnSig { params: push([], "self"), ptys: push([], st.ty), rty: structTy, sizes: sizeParams, types: typeParams, writes: [], froms: [] };
     st = emitSignature(st, &cloneFs);
     sigNode = st.nid;
-    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: sigNode, term: term, stmts: bodyNode } });
+    // (a clone of a closure that may not end ends: it copies the captures and does not run the body)
+    st = emit(st, AstNode::OptTermination { value: AstOptTermination::NoTermination });
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: sigNode, term: st.nid, stmts: bodyNode } });
     fnBody = st.nid;
     st = emitNames(st, &cloneFs.params);
     fnParams = st.nid;
@@ -1708,7 +1710,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
             for c in caps { st = implementsMarker(st, "Clone", c.field, 0); if !st.ok { canClone = false; }; };
         };
         if canClone && HashSet::contains(&st.traits, "Clone") {
-            st = makeClosureCloneImpl(st, &structName, structTy, &caps, rec.term);
+            st = makeClosureCloneImpl(st, &structName, structTy, &caps);
             if st.status != 0 { return st; };
             if st.ok {
                 canCopy = true;

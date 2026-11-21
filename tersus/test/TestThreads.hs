@@ -22,6 +22,7 @@ testThreads =
             , testCase "a named function with no parameters is a closure" (pipelineRuns "fn seven() -> Int { return 7; }; t = Thread::spawn(seven); return t.join();" (VInt 7))
             , testCase "a closure calls a function of the program" (pipelineRuns "fn work(n: Int) -> Int { return n * 2; }; k = 21; t = Thread::spawn(move fn() -> Int => work(k)); return t.join();" (VInt 42))
             , testCase "a sum split across four threads" (pipelineRuns fourWaySum (VInt 499500))
+            , testCase "recursion splits a sum across threads" (pipelineRuns recursiveSum (VInt 4950))
             , testCase "a program that declares its own Thread does not get the library" (pipelineRuns "struct Thread { n: Int }; t = Thread { n: 4 }; return t.n;" (VInt 4))
             ]
         , TestList
@@ -34,7 +35,8 @@ testThreads =
             , testCase "a thread that is not joined is refused" (pipelineRejected "t = Thread::spawn(fn() -> Int => 1); return 0;" "linear type")
             , testCase "a thread is joined once" (pipelineRejected "t = Thread::spawn(fn() -> Int => 1); a = t.join(); b = t.join(); return a + b;" "t was moved")
             , testCase "a closure that borrows is refused" (pipelineRejected "xs = [1, 2]; t = Thread::spawn(fn() -> Int => size(xs)); return t.join();" "Thread::spawn is given a closure that borrows xs: a thread cannot hold a reference")
-            , testCase "a closure that starts the function it is in again is refused" (pipelineRejected "fn fan(n: Int) -> Int [{ }] [{ }] ~ { if n <= 0 { return 0; }; t = Thread::spawn(move fn() -> Int => fan(n - 1)); return t.join() + 1; }; return fan(2);" "may diverge")
+            , testCase "a closure that starts the function it is in again has to be ~" (pipelineRejected "fn fan(n: Int) -> Int [{ }] [{ }] ~ { if n <= 0 { return 0; }; t = Thread::spawn(move fn() -> Int => fan(n - 1)); return t.join() + 1; }; return fan(2);" "may diverge")
+            , testCase "a ~ closure starts the function it is in again" (pipelineValid recursiveSum)
             ]
         , TestList
             "native"
@@ -43,10 +45,24 @@ testThreads =
             , sameNatively "a string result" "s = \"thread\"; t = Thread::spawn(move fn() -> String { own = s; return own.concat(\"s\"); }); r = t.join(); return size(r.bytes);"
             , sameNatively "a thread starts a thread" innerThread
             , sameNatively "a sum split across four threads" fourWaySum
+            , sameNatively "recursion splits a sum across threads" recursiveSum
             ]
         ]
   where
     innerThread = "fn inner() -> Int { t = Thread::spawn(fn() -> Int => 5); return t.join() + 1; }; t = Thread::spawn(fn() -> Int => inner()); return t.join();"
+    recursiveSum =
+        "fn sumRange(lo: Int, hi: Int, depth: Int) -> Int [{ }] [{ }] ~ {\n\
+        \    if depth <= 0 {\n\
+        \        s = 0; i = lo;\n\
+        \        while i < hi [{ affirm i >= lo; }] shrinks hi - i { s = s + i; i = i + 1; };\n\
+        \        return s;\n\
+        \    };\n\
+        \    mid = lo + (hi - lo) / 2;\n\
+        \    left = Thread::spawn(move fn() -> Int ~ => sumRange(lo, mid, depth - 1));\n\
+        \    right = sumRange(mid, hi, depth - 1);\n\
+        \    return left.join() + right;\n\
+        \};\n\
+        \return sumRange(0, 100, 3);"
     fourWaySum =
         "fn sumRange(lo: Int, hi: Int) -> Int [{ }] [{ }] {\n\
         \    s = 0; i = lo;\n\
