@@ -1,0 +1,4 @@
+struct StepBy { n: Int } invariant [{ affirm n > 0; }];
+fn applyStep(s: &StepBy, x: Int) -> Int [{ }] [{ affirm return > x; }] { return x + s.n; };
+s = StepBy { n: 3 };
+return applyStep(&s, 10);

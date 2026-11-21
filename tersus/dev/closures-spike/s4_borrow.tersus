@@ -1,0 +1,11 @@
+trait Fn1<A, R> {
+    fn call(self: &Self, a: A) -> R [{ }] [{ }];
+};
+struct SumWith { xs: &List<Int> };
+impl Fn1<Int, Int> for SumWith {
+    fn call(self: &Self, a: Int) -> Int [{ }] [{ }] { return a + size(self.xs); };
+};
+fn applyAt<F: Fn1<Int, Int>>(f: &F, x: Int) -> Int [{ }] [{ }] { return f.call(x); };
+ys = push(push([], 5), 6);
+f = SumWith { xs: &ys };
+return applyAt(&f, 10) * 10 + size(ys);

@@ -1,0 +1,13 @@
+trait Fn1<A, R> {
+    fn call(self: &Self, a: A) -> R [{ }] [{ }];
+};
+struct First<T> { item: T };
+impl<T> Fn1<T, T> for First<T> {
+    fn call(self: &Self, a: T) -> T [{ }] [{ }] { return a + self.item; };
+};
+fn applyAt<T, F: Fn1<T, T>>(f: &F, x: T) -> T [{ }] [{ }] { return f.call(x); };
+fn useIt() -> Int [{ }] [{ }] {
+    f = First<Int> { item: 7 };
+    return applyAt(&f, 1);
+};
+return useIt();
