@@ -219,9 +219,11 @@ arithmetic (`+`, `-`, `*`), `Bool` equality, and `size` of sequences. They may
 name only the formal arguments and, in the output, `return`. Indirect calls
 with update parameters, reference-bearing inputs other than a shared loan of
 reference-free data, reference results, or permissions are not supported.
-Diverging functions cannot be converted to pointers; potential cycles through
-indirect calls are refused. Contracted function types cannot be used as
-nominal generic type arguments.
+Diverging functions cannot be converted to pointers. Potential cycles through
+indirect calls are refused even if a known target has `shrinks`: the pointer
+type does not carry a decreases clause. Use a direct call for recursion that
+relies on `shrinks`. Contracted function types cannot be used as nominal
+generic type arguments.
 
 ```tersus
 fn scale(values: List<Int>, factor: Int) -> List<Int> {

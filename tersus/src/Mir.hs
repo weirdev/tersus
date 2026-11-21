@@ -29,6 +29,7 @@ module Mir
     , completeErasedInstances
     , readersOfInput
     , worldReadersBy
+    , intrinsicDispatchKey
     , companionOf
     , functionsNamed
     , slotsOf
@@ -692,6 +693,10 @@ companionOf name = do
 readersOfInput :: Program -> Set.Set Name
 readersOfInput = worldReadersBy readsWorldOp . progFunctions
 
+-- The copy pass records an intrinsic dispatch implementation in the stub's proof environment.
+intrinsicDispatchKey :: Name
+intrinsicDispatchKey = "$intrinsicDispatch"
+
 worldReadersBy :: (ListOp -> Bool) -> Map Name Function -> Set.Set Name
 worldReadersBy readsOp fs = grow (Set.fromList [name | (name, fn) <- functions, unknownDispatch name || any reads (Map.elems (fnBlocks fn))])
   where
@@ -704,13 +709,17 @@ worldReadersBy readsOp fs = grow (Set.fromList [name | (name, fn) <- functions, 
     dispatch name = case parseImplCheckName name of
         Just (trait, "$Self", method) -> Just (trait, methodName method)
         _ -> Nothing
-    targets key = Map.findWithDefault Set.empty key implementations
+    targets name key = Map.findWithDefault Set.empty key implementations `Set.union` intrinsic
+      where
+        intrinsic = case Map.lookup name fs >>= Map.lookup intrinsicDispatchKey . specEnv . fnSpec of
+            Just (Const (CFn helper)) | Map.member helper fs -> Set.singleton helper
+            _ -> Set.empty
     -- Use only the implementations of this linked program; another link's
     -- generic proof is rebuilt from that program's effect graph.
     unknownDispatch name = case dispatch name of
-        Just key@(trait, _) -> any (`isPrefixOf` trait) ["Fn$", "FnMut$", "FnOnce$"] || Set.null (targets key)
+        Just key@(trait, _) -> any (`isPrefixOf` trait) ["Fn$", "FnMut$", "FnOnce$"] || Set.null (targets name key)
         Nothing -> False
-    dependencies name fn = Set.union (functionsNamed fn) (maybe Set.empty targets (dispatch name))
+    dependencies name fn = Set.union (functionsNamed fn) (maybe Set.empty (targets name) (dispatch name))
     reads (BasicBlock stmts term) = indirect term || any readsStatement stmts
     indirect (Call (Const (CFn _)) _ _ _) = False
     indirect Call{} = True

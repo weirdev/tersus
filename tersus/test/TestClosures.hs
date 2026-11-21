@@ -7,6 +7,7 @@ import qualified MirEval
 import Pipeline (compileSource)
 import Syntax
 import TestHarness
+import TestNative (nativeMirCase)
 import Utils (Result (..), bindResult, mapResult)
 
 -- Phase 1 of the closures plan: Fn/FnMut/FnOnce bounds, minted traits, function objects.
@@ -161,14 +162,18 @@ testClosures =
                         programFromFiles
                             "pkgs/app/main.tersus"
                             [ ("pkgs/app/package.tersus", "")
-                            , ("pkgs/app/main.tersus", "import ints::heads as ints; import bools::heads as bools; if bools::headBool() { return ints::headInt() + bools::headInt(); }; return 0;")
+                            , ("pkgs/app/main.tersus", "import ints::intheads as ints; import bools::boolheads as bools; if bools::headBool() { return ints::headInt() + bools::headInt(); }; return 0;")
                             , ("pkgs/ints/package.tersus", "")
-                            , ("pkgs/ints/heads.tersus", "fn headInt() -> Int { let f: fn(xs: &List<Int>) -> Int [{ affirm size(xs) > 0; }] = first; return f([20]); };")
+                            , ("pkgs/ints/intheads.tersus", "fn headInt() -> Int { let f: fn(xs: &List<Int>) -> Int [{ affirm size(xs) > 0; }] = first; return f([20]); };")
                             , ("pkgs/bools/package.tersus", "")
-                            , ("pkgs/bools/heads.tersus", "fn headBool() -> Bool { let f: fn(xs: &List<Bool>) -> Bool [{ affirm size(xs) > 0; }] = first; return f([true]); }; fn headInt() -> Int { let f: fn(xs: &List<Int>) -> Int [{ affirm size(xs) > 0; }] = first; return f([22]); };")
+                            , ("pkgs/bools/boolheads.tersus", "fn headBool() -> Bool { let f: fn(xs: &List<Bool>) -> Bool [{ affirm size(xs) > 0; }] = first; return f([true]); }; fn headInt() -> Int { let f: fn(xs: &List<Int>) -> Int [{ affirm size(xs) > 0; }] = first; return f([22]); };")
                             ]
                     let wrappers = mapResult (length . filter ("builtin::first#" `isPrefixOf`) . Map.keys . Mir.progFunctions) program
-                    pure (testAssertEq (wrappers, program `bindResult` MirEval.runProgram) (Ok 3, Ok (Just (MirEval.MInt 42))))
+                    case testAssertEq (wrappers, program `bindResult` MirEval.runProgram) (Ok 3, Ok (Just (MirEval.MInt 42))) of
+                        Just failure -> pure (Just failure)
+                        Nothing -> case program of
+                            Ok mir -> nativeMirCase "builtin values across packages" mir "42\n"
+                            Error e -> pure (Just e)
                 , testCase "a plain function value meets FnMut and FnOnce"
                     (checked "fn inc(x: Int) -> Int { return x + 1; }; fn mutate<F: FnMut(Int) -> Int>(f: &mut F) -> Int { return f(19); }; fn once<F: FnOnce(Int) -> Int>(f: F) -> Int { return f(21); }; p = inc; return mutate(p) + once(p);" 42)
                 , testCase "termination cannot be justified by hiding recursion through a callback"

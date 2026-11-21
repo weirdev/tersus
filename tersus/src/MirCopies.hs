@@ -84,7 +84,7 @@ makeCopiesWith library program
     | Map.null (progBounded program) && Map.null (progInstances program) = Ok program
     | otherwise = case run of
         Left e -> Error e
-        Right (rootsDone, mainDone, made, used) -> Ok (divergingCopies (finish program named used rootsDone mainDone made))
+        Right (rootsDone, mainDone, made, used) -> Ok (divergingCopies (finish program named used intrinsicStubs rootsDone mainDone made))
   where
     generics = progBounded program
     lifted = Set.fromList (concatMap boundedLifted (Map.elems generics))
@@ -96,8 +96,14 @@ makeCopiesWith library program
     -- references are. The library's justification of the builtins a copy runs for a Box of an array of a size is one where a
     -- copy has such a Box.)
     always = Set.fromList [f | f <- Map.keys generics, not (isStubName f), Set.notMember f library]
-    -- (a copy with a Box of an array of a size may run the builtins for it, resolveBound)
-    sizedBoxedUsed made = Set.fromList [f | any (any (sizedBoxed . localType) . Map.elems . fnLocals) [copy | (_, copy, _) <- made], f <- sizedBoxedJustification, Map.member f generics]
+    -- A sized Box's Sequence calls can inline, leaving no named impl in the linked effect graph.
+    intrinsicStubs = Map.fromList
+        [ (stubName trait method, helper)
+        | (callee, marker) <- Map.toList (progInstances program), marker == (libraryBuiltin, [])
+        , Just (_, trait, method) <- [boundCallParts callee]
+        , Just helper <- [lookup method sizedBoxedJustification]
+        , Set.member helper library ]
+    sizedBoxedUsed made = Set.fromList [f | any (any (sizedBoxed . localType) . Map.elems . fnLocals) [copy | (_, copy, _) <- made], (_, f) <- sizedBoxedJustification, Map.member f generics]
     sizedBoxed t = case t of
         TBox (TArrayOf _ size) -> size /= SizeAny
         TRef inner -> sizedBoxed inner
@@ -987,8 +993,8 @@ divergingCopies program = program{progFunctions = Map.map mark functions}
         | isCopyName (fnName f) && not (diverges f) && fnName f `Set.member` diverging = f{fnSpec = (fnSpec f){specTermination = Just MayDiverge}}
         | otherwise = f
 
-finish :: Program -> Map Key Name -> Set.Set Name -> [Function] -> Function -> [Made] -> Program
-finish program named used roots main' made =
+finish :: Program -> Map Key Name -> Set.Set Name -> Map Name Name -> [Function] -> Function -> [Made] -> Program
+finish program named used intrinsicStubs roots main' made =
     completeInstances
         program
             { progTypes = Map.filterWithKey (\name _ -> not (derived name)) (progTypes program)
@@ -1073,13 +1079,17 @@ finish program named used roots main' made =
         | otherwise = n
     -- (a generic body's proofs name the functions there are, as a copy's do: a name an environment gives a copy or a bound
     -- is the function it stands for, and the environment keeps the functions there are, the stubs and generic bodies included)
-    completeGeneric fn = mapEnvs (\e -> Map.union (Map.filterWithKey (\k o -> not (instanceKey k) && case o of Const (CFn n) -> n `Set.member` names; _ -> True) e) copyEnv) (proofsNamed instanceKey fn)
+    completeGeneric fn = markIntrinsic (mapEnvs (\e -> Map.union (Map.filterWithKey (\k o -> not (instanceKey k) && case o of Const (CFn n) -> n `Set.member` names; _ -> True) e) copyEnv) (proofsNamed instanceKey fn))
+    markIntrinsic fn
+        | Just helper <- Map.lookup (fnName fn) intrinsicStubs, Set.member helper kept =
+            fn{fnSpec = (fnSpec fn){specEnv = Map.insert intrinsicDispatchKey (Const (CFn helper)) (specEnv (fnSpec fn))}}
+        | otherwise = fn
     instanceKey k = Map.member k (progInstances program) || isJust (boundCallParts k)
 
 -- The prelude's functions whose bodies are the builtins a copy runs for the library's Sequence on a Box of an array of a
 -- size (resolveBound), with Sequence's contracts
-sizedBoxedJustification :: [Name]
-sizedBoxedJustification = ["sizedBoxedSize", "sizedBoxedGet", "sizedBoxedSet"]
+sizedBoxedJustification :: [(Name, Name)]
+sizedBoxedJustification = [("size", "sizedBoxedSize"), ("get", "sizedBoxedGet"), ("set", "sizedBoxedSet")]
 
 -- The marks of a function the validator checks generically and of a copy it does not check (no name a program writes has `$`)
 genericKey, coveredKey :: Name
