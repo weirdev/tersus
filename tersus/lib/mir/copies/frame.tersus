@@ -1,0 +1,123 @@
+import data::codec::codec { Token };
+import mir::full::full { FullFunction, FullProgram, FullRecord };
+import mir::full::records { keyOrder };
+import mir::full::tokens { normalizeType, numberAt, sliceTokens, textAt, typeEnd, wordIs };
+import mir::instances::complete { completeInstancesWith };
+import mir::instances::names { InstanceNameClasses, instanceNameAt };
+import mir::pack::numbers { decimalAdd, decimalCmp, decimalMul };
+import mir::copies::keys { renderCopyType, sameCopyType };
+
+struct FrameTypes {
+    records: List<FullRecord>, byName: HashMap<String, Int>, variantOwner: HashMap<String, Int>
+};
+struct FrameFields { end: Int, words: String };
+
+fn arraySizeAt(row: &List<Token>, at: Int) -> Int ~ {
+    if wordIs(row, at, "array") { return typeEnd(row, at + 1); };
+    return -1;
+};
+fn boxedArraySizeAt(row: &List<Token>, at: Int) -> Int ~ {
+    if wordIs(row, at, "box") { return arraySizeAt(row, at + 1); };
+    if wordIs(row, at, "named") && textAt(row, at + 1) = "Box" && numberAt(row, at + 2) = 1 && wordIs(row, at + 3, "type") {
+        return arraySizeAt(row, at + 4);
+    };
+    return -1;
+};
+fn frameFieldsEnd(row: &List<Token>, at: Int) -> Int ~ {
+    p = at + 1;
+    for i in 0..numberAt(row, at) { p = typeEnd(row, p + 1); };
+    return p;
+};
+fn emptyFrameIndex() -> HashMap<String, Int> ~ { return HashMap::new(); };
+fn frameTypes(records: List<FullRecord>) -> FrameTypes ~ {
+    names = []; byName = emptyFrameIndex(); owners = emptyFrameIndex();
+    for r in &records { names = push(names, clone(r.name)); };
+    for i in keyOrder(&names, false) {
+        r = get(&records, i); row = &r.tokens;
+        byName = HashMap::insert(byName, clone(r.name), i);
+        if wordIs(row, 0, "enum") {
+            p = 3;
+            for j in 0..numberAt(row, 2) {
+                n = textAt(row, p);
+                if HashMap::lookup(&owners, &n, -1) < 0 { owners = HashMap::insert(owners, n, i); };
+                p = frameFieldsEnd(row, p + 1);
+            };
+        };
+    };
+    return FrameTypes { records: records, byName: byName, variantOwner: owners };
+};
+fn frameFields(classes: &InstanceNameClasses, types: &FrameTypes, row: &List<Token>, at: Int) -> FrameFields ~ {
+    p = at + 1; total = "0";
+    for i in 0..numberAt(row, at) {
+        total = decimalAdd(&total, frameTypeWords(classes, types, row, p + 1));
+        p = typeEnd(row, p + 1);
+    };
+    return FrameFields { end: p, words: total };
+};
+fn declaredFrameWords(classes: &InstanceNameClasses, types: &FrameTypes, id: Int) -> String ~ {
+    if id < 0 || id >= size(types.records) { return "1"; };
+    record = get(&types.records, id); row = &record.tokens;
+    if wordIs(row, 0, "struct") { return frameFields(classes, types, row, 2).words; };
+    if !wordIs(row, 0, "enum") { return "1"; };
+    p = 3; widest = "0";
+    for i in 0..numberAt(row, 2) {
+        fields = frameFields(classes, types, row, p + 1);
+        if decimalCmp(&fields.words, &widest) > 0 { widest = fields.words; };
+        p = fields.end;
+    };
+    return decimalAdd("1", &widest);
+};
+fn frameTypeWords(classes: &InstanceNameClasses, types: &FrameTypes, row: &List<Token>, at: Int) -> String ~ {
+    boxed = boxedArraySizeAt(row, at);
+    if boxed >= 0 && wordIs(row, boxed, "any") { return "2"; };
+    array = arraySizeAt(row, at);
+    if array >= 0 && wordIs(row, array, "c") {
+        return decimalMul(textAt(row, array + 1), frameTypeWords(classes, types, row, at + 1));
+    };
+    if wordIs(row, at, "named") {
+        return declaredFrameWords(classes, types, HashMap::lookup(&types.byName, instanceNameAt(classes, row, at), -1));
+    };
+    if wordIs(row, at, "list") || wordIs(row, at, "box") {
+        canonical = normalizeType(sliceTokens(row, at, typeEnd(row, at)));
+        return declaredFrameWords(classes, types, HashMap::lookup(&types.byName, instanceNameAt(classes, &canonical, 0), -1));
+    };
+    if wordIs(row, at, "variant") {
+        v = textAt(row, at + 1); i = HashMap::lookup(&types.byName, &v, -1);
+        if i >= 0 {
+            record = get(&types.records, i);
+            if wordIs(&record.tokens, 0, "struct") { return declaredFrameWords(classes, types, i); };
+        };
+        return declaredFrameWords(classes, types, HashMap::lookup(&types.variantOwner, &v, -1));
+    };
+    return "1";
+};
+fn frameLocalType(row: &List<Token>) -> List<Token> ~ {
+    at = 3; if wordIs(row, 2, "some") { at = 4; };
+    return sliceTokens(row, at, size(row));
+};
+fn frameCandidates(generic: &FullFunction, copy: &FullFunction) -> List<List<Token>> ~ {
+    original = HashMap::new();
+    for l in &generic.locals { original = HashMap::insert(original, clone(l.name), frameLocalType(&l.tokens)); };
+    names = []; for l in &copy.locals { names = push(names, clone(l.name)); };
+    out = [];
+    for i in keyOrder(&names, true) {
+        local = get(&copy.locals, i); ty = frameLocalType(&local.tokens); at = arraySizeAt(&ty, 0);
+        if at >= 0 && wordIs(&ty, at, "c") && HashMap::contains(&original, &local.name) {
+            if !sameCopyType(HashMap::lookupRef(&original, &local.name), &ty) { out = push(out, normalizeType(&ty)); };
+        };
+    };
+    return out;
+};
+fn frameRefusal(classes: &InstanceNameClasses, program: &FullProgram, genericName: &String, copyName: &String, generic: &FullFunction, copy: &FullFunction) -> String ~ {
+    candidates = frameCandidates(generic, copy);
+    if size(candidates) = 0 { return ""; };
+    completed = completeInstancesWith(FullProgram { functions: push([], clone(copy)), ..clone(program) }, classes);
+    types = frameTypes(completed.types);
+    for ty in &candidates {
+        words = frameTypeWords(classes, &types, ty, 0);
+        if decimalCmp(&words, "8192") > 0 {
+            return "Type error: ".concat(genericName).concat(" cannot be made as ").concat(copyName).concat(" for this call: ").concat(renderCopyType(classes, ty)).concat(" takes ").concat(words).concat(" words, more than the 8192 that an array held in a frame can have");
+        };
+    };
+    return "";
+};

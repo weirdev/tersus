@@ -737,16 +737,15 @@ cacheBuildScope = do
     backend <- lookupEnv "TERSUS_PARSER"
     path <- lookupEnv "PATH"
     overrides <- mapM seedIdentity
-        [("TERSUS_PARSER_SEED_FILE", parserSeedSha256), ("TERSUS_SEED_FILE", seedSha256), ("TERSUS_FRONTEND_SEED_FILE", frontendSeedSha256)]
+        [("TERSUS_PARSER_SEED_FILE", "parser.ll", parserSeedSha256), ("TERSUS_SEED_FILE", "emitter.ll", seedSha256),
+         ("TERSUS_FRONTEND_SEED_FILE", "frontend.ll", frontendSeedSha256)]
     pure $ (\b seeds -> show (b, backend, path, seeds)) <$> build <*> sequence overrides
   where
-    seedIdentity (variable, expected) = do
+    seedIdentity (variable, basename, expected) = do
         override <- lookupEnv variable
         selected <- case override of
             Just file -> pure (Just file)
-            Nothing -> firstExisting (if variable == "TERSUS_PARSER_SEED_FILE"
-                then ["bootstrap/parser.ll", "tersus/bootstrap/parser.ll"]
-                else ["bootstrap/emitter.ll", "tersus/bootstrap/emitter.ll"])
+            Nothing -> firstExisting ["bootstrap" </> basename, "tersus" </> "bootstrap" </> basename]
         case selected of
             Nothing -> pure (Just (variable, Nothing))
             Just file -> do

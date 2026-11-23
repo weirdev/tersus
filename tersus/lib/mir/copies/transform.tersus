@@ -1,0 +1,718 @@
+import data::codec::codec { Token };
+import data::ast::ast { AstNode };
+import mir::full::full { FullBlock, FullFunction, FullProgram, FullRecord };
+import mir::full::environments { resolveEnv };
+import mir::full::records { EnvEntry, envEnd, keyOrder, mergeEntries, orderEntries, payloadSlots, replaceEnv };
+import mir::full::tokens { appendTokens, constantEnd, integerAt, intToken, intsEnd, name, namesEnd, numberAt, operandEnd, sliceTokens, stepsEnd, textAt, typeEnd, word, wordIs };
+import mir::pack::body { RowKind, constInt, operandLocal, rowSites, rvalueSites, targets };
+import mir::instances::names { InstanceNameClasses };
+import mir::instances::complete { tupleArity };
+import mir::copies::keys { CopyCx, CopyNeed, CopiedFunction, Maybe, CopyBinding, CopyInstance, boundCallParts, concreteKey, copyLookup, instanceAt, mentionsParam, nameOf };
+import mir::copies::types { renamesOf, substituteArg, substituteType, typeNameIn };
+import mir::copies::calls { CopyCall, CopyTarget, boxedArray, cloneTarget, functionIndex, isReference, ownerOfType, target, unref, unsizedBoxed };
+import mir::copies::proofs { rewriteCopyPayload };
+
+struct CopyWalk {
+    needs: List<CopyNeed>, error: String,
+    nextLocal: Int, nextBlock: Int, locals: List<FullRecord>
+};
+struct WrittenBlock { block: FullBlock, inlined: Bool };
+impl Clone for WrittenBlock { };
+
+fn bindingAt(bindings: &List<CopyBinding>, key: &String) -> Int ~ {
+    i = 0;
+    for b in bindings { if b.name = key { return i; }; i = i + 1; };
+    return 0 - 1;
+};
+fn shadowBindings(bindings: &List<CopyBinding>, header: &List<Token>, countAt: Int) -> List<CopyBinding> ~ {
+    hidden = HashSet::new();
+    for i in 0..numberAt(header, countAt) { hidden = hidden.insert(textAt(header, countAt + 1 + i)); };
+    out = [];
+    for b in bindings { if !HashSet::contains(&hidden, &b.name) { out = push(out, clone(b)); }; };
+    return out;
+};
+fn copyTypeContext(cx: &CopyCx, extra: List<CopyBinding>) -> CopyCx ~ {
+    for b in &cx.types { extra = push(extra, clone(b)); };
+    return CopyCx { types: extra, ..clone(cx) };
+};
+fn extraBlockTypes(cx: &CopyCx, id: Int) -> CopyCx ~ {
+    extra = HashMap::lookup(&cx.blockTypes, id, []);
+    if size(extra) = 0 { return clone(cx); };
+    return copyTypeContext(cx, extra);
+};
+fn localStart(row: &List<Token>) -> Int ~ {
+    if wordIs(row, 2, "some") { return 4; };
+    return 3;
+};
+fn localTypeOf(fun: &FullFunction, id: Int) -> List<Token> ~ {
+    for d in &fun.locals {
+        if integerAt(&d.tokens, 1).value = id { return sliceTokens(&d.tokens, localStart(&d.tokens), size(d.tokens)); };
+    };
+    return [];
+};
+fn functionConstants(cx: &CopyCx, header: &List<Token>, sizesAt: Int) -> HashMap<Int,String> ~ {
+    params = numberAt(header, 3); sizes = numberAt(header, sizesAt);
+    first = params - sizes;
+    if first < 0 { first = 0; };
+    out = HashMap::new();
+    for i in 0..sizes {
+        if first + i < params {
+            parameter = textAt(header, sizesAt + 1 + i);
+            at = bindingAt(&cx.sizes, &parameter);
+            if at >= 0 && at < size(cx.sizes) {
+                b = get(&cx.sizes, at);
+                out = out.insert(integerAt(header, 4 + first + i).value, textAt(&b.tokens, 1));
+            };
+        };
+    };
+    return out;
+};
+fn typeParamsOfCopy(header: &List<Token>, countAt: Int, cx: &CopyCx) -> List<Token> ~ {
+    values = [];
+    for i in 0..numberAt(header, countAt) {
+        parameter = textAt(header, countAt + 1 + i);
+        if bindingAt(&cx.types, &parameter) < 0 { values = push(values, name(parameter)); };
+    };
+    return appendTokens(push([], intToken(size(values))), &values);
+};
+fn copiedHeader(fun: &FullFunction, cx: &CopyCx, returns: Int, sizesAt: Int, typesAt: Int, finalize: Bool) -> List<Token> ~ {
+    header = &fun.header;
+    out = sliceTokens(header, 0, returns + 2);
+    if finalize && cx.copy != "" && size(out) > 1 {
+        old = textAt(header, 1);
+        renamed = HashMap::lookup(&cx.lifted, &old, clone(cx.copy));
+        out = set(out, 1, name(renamed));
+    };
+    if wordIs(header, returns + 1, "some") {
+        ty = sliceTokens(header, returns + 2, sizesAt - 1);
+        out = appendTokens(out, substituteType(&ty, &cx.sizes, &cx.types));
+    };
+    if !finalize || cx.copy = "" { return appendTokens(out, sliceTokens(header, sizesAt - 1, size(header))); };
+    out = appendTokens(out, sliceTokens(header, sizesAt - 1, typesAt));
+    out = appendTokens(out, typeParamsOfCopy(header, typesAt, cx));
+    return appendTokens(out, sliceTokens(header, namesEnd(header, typesAt), size(header)));
+};
+fn namedUnary(ty: &List<Token>, at: Int, base: &String) -> Bool ~ {
+    return wordIs(ty, at, "named") && textAt(ty, at + 1) = base && numberAt(ty, at + 2) = 1 && wordIs(ty, at + 3, "type");
+};
+fn opaqueType(cx: &CopyCx, ty: &List<Token>, at: Int) -> Bool ~ {
+    if wordIs(ty, at, "param") {
+        original = sliceTokens(ty, at, at + 2);
+        return substituteType(&original, &cx.sizes, &cx.types) != original;
+    };
+    if wordIs(ty, at, "ref") || wordIs(ty, at, "mutref") || wordIs(ty, at, "box") { return opaqueType(cx, ty, at + 1); };
+    if namedUnary(ty, at, "Box") { return opaqueType(cx, ty, at + 4); };
+    return false;
+};
+fn emptyCopyArgs() -> List<List<Token>> ~ { return []; };
+fn copyOperand(id: Int) -> List<Token> ~ { return push(push([], word("copy")), intToken(id)); };
+fn functionOperand(n: String) -> List<Token> ~ { return push(push(push([], word("const")), word("fn")), name(n)); };
+fn operandWith(constants: &HashMap<Int,String>, value: &List<Token>) -> List<Token> ~ {
+    id = operandLocal(value, 0);
+    if id.ok {
+        decimal = HashMap::lookup(constants, id.value, "");
+        if decimal != "" { return constInt(decimal); };
+    };
+    return clone(value);
+};
+fn freshCopyLocal(st: &mut CopyWalk, ty: &List<Token>) -> Int ~ {
+    id = (*st).nextLocal;
+    (*st).nextLocal = id + 1;
+    row = appendTokens(push(push(push([], word("local")), intToken(id)), word("none")), ty);
+    (*st).locals = push(clone((*st).locals), FullRecord { name: String::fromInt(id), tokens: row });
+    return id;
+};
+fn freshCopyBlock(st: &mut CopyWalk) -> Int ~ {
+    id = (*st).nextBlock;
+    (*st).nextBlock = id + 1;
+    return id;
+};
+fn appendRows(rows: List<List<Token>>, more: &List<List<Token>>) -> List<List<Token>> ~ {
+    for row in more { rows = push(rows, clone(row)); };
+    return rows;
+};
+fn failedCopy(fun: FullFunction, arena: List<AstNode>, st: CopyWalk) -> CopiedFunction ~ {
+    return CopiedFunction { fun: fun, needs: [], arena: arena, error: st.error };
+};
+fn transformFunction(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, fun: FullFunction, arena: List<AstNode>) -> CopiedFunction ~ {
+    returns = intsEnd(&fun.header, 3);
+    end = returns + 2;
+    if wordIs(&fun.header, returns + 1, "some") { end = typeEnd(&fun.header, end); };
+    sizesAt = end + 1;
+    typesAt = namesEnd(&fun.header, sizesAt) + 1;
+    originalName = textAt(&fun.header, 1);
+    own = clone(cx);
+    if HashMap::contains(&cx.lifted, &originalName) {
+        own = CopyCx { types: shadowBindings(&cx.types, &fun.header, typesAt), sizes: shadowBindings(&cx.sizes, &fun.header, sizesAt), blockTypes: HashMap::new(), localTypes: HashMap::new(), ..own };
+    };
+    constants = functionConstants(&own, &fun.header, sizesAt);
+    locals = []; maxLocal = 0; maxBlock = 0; opaque = [];
+    for d in &fun.locals {
+        id = integerAt(&d.tokens, 1).value;
+        if id > maxLocal { maxLocal = id; };
+        start = localStart(&d.tokens);
+        ty = sliceTokens(&d.tokens, start, size(d.tokens));
+        if own.copy != "" && opaqueType(&own, &ty, 0) {
+            opaque = push(opaque, EnvEntry { name: "$opaque ".concat(String::fromInt(id)), value: copyOperand(id) });
+        };
+        extra = HashMap::lookup(&own.localTypes, id, []);
+        if size(extra) > 0 {
+            for b in &own.types { extra = push(extra, clone(b)); };
+            ty = substituteType(&ty, &own.sizes, &extra);
+        } else { ty = substituteType(&ty, &own.sizes, &own.types); };
+        row = appendTokens(sliceTokens(&d.tokens, 0, start), &ty);
+        locals = push(locals, FullRecord { tokens: row, ..clone(d) });
+    };
+    for b in &fun.blocks { if b.id > maxBlock { maxBlock = b.id; }; };
+    st = CopyWalk { needs: [], error: "", nextLocal: maxLocal + 1, nextBlock: maxBlock + 1, locals: [] };
+    body = FullFunction { header: copiedHeader(&fun, &own, returns, sizesAt, typesAt, false), locals: locals, ..clone(fun) };
+    blocks = []; renames = renamesOf(classes, &own, &fun);
+    keys = []; for b in &fun.blocks { keys = push(keys, String::fromInt(b.id)); };
+    for i in keyOrder(&keys, true) {
+        if i >= 0 && i < size(fun.blocks) {
+            b = get(&fun.blocks, i);
+            bc = extraBlockTypes(&own, b.id);
+            br = clone(renames);
+            if size(HashMap::lookup(&own.blockTypes, b.id, [])) > 0 { br = renamesOf(classes, &bc, &fun); };
+            result = transformBlock(classes, program, &bc, &br, &constants, &fun, &body, b, blocks, arena, &mut st);
+            blocks = result.blocks; arena = result.arena;
+            if st.error != "" { return failedCopy(fun, arena, st); };
+        };
+    };
+    payloads = transformPayloads(classes, program, &own, clone(fun.spec), arena, &mut st);
+    spec = payloads.row; arena = payloads.arena;
+    if st.error != "" { return failedCopy(fun, arena, st); };
+    loops = []; keys = []; for l in &fun.loops { keys = push(keys, clone(l.name)); };
+    for i in keyOrder(&keys, true) {
+        if i >= 0 && i < size(fun.loops) {
+            loop = get(&fun.loops, i);
+            lc = extraBlockTypes(&own, integerAt(&loop.tokens, 1).value);
+            payloads = transformPayloads(classes, program, &lc, clone(loop.tokens), arena, &mut st);
+            arena = payloads.arena;
+            if st.error != "" { return failedCopy(fun, arena, st); };
+            row = transformEnv(classes, program, &lc, &constants, &payloads.row, []);
+            loops = push(loops, FullRecord { tokens: row, ..clone(loop) });
+        };
+    };
+    opaque = orderEntries(opaque);
+    env = transformEnv(classes, program, &own, &constants, &fun.env, &opaque);
+    locals = body.locals;
+    for d in &st.locals { locals = push(locals, clone(d)); };
+    header = copiedHeader(&fun, &own, returns, sizesAt, typesAt, true);
+    out = FullFunction { header: header, blocks: mergeInlined(&fun.loops, blocks), spec: spec, env: env, locals: locals, loops: loops };
+    return CopiedFunction { fun: out, needs: st.needs, arena: arena, error: "" };
+};
+struct ProofRow { row: List<Token>, arena: List<AstNode> };
+fn transformPayloads(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, row: List<Token>, arena: List<AstNode>, st: &mut CopyWalk) -> ProofRow ~ {
+    slots = payloadSlots(&row);
+    for at in &slots {
+        id = integerAt(&row, at);
+        if id.ok && at >= 0 && at < size(row) {
+            result = rewriteCopyPayload(classes, program, cx, id.value, arena);
+            arena = result.arena;
+            if result.error != "" { (*st).error = result.error; return ProofRow { row: row, arena: arena }; };
+            needs = clone((*st).needs);
+            for need in &result.needs { needs = push(needs, clone(need)); };
+            (*st).needs = needs;
+            row = set(row, at, intToken(result.node));
+        };
+    };
+    return ProofRow { row: row, arena: arena };
+};
+fn mergeInlined(loops: &List<FullRecord>, blocks: List<WrittenBlock>) -> List<FullBlock> ~ {
+    kept = HashSet::new();
+    for l in loops {
+        kept = kept.insert(integerAt(&l.tokens, 1).value);
+        kept = kept.insert(integerAt(&l.tokens, 3).value);
+    };
+    keys = []; for b in &blocks { keys = push(keys, String::fromInt(b.block.id)); };
+    order = keyOrder(&keys, true);
+    removed = HashSet::new(); changed = true;
+    while changed ~ {
+        changed = false;
+        incoming = HashMap::new(); index = HashMap::new(); incoming = incoming.insert(0, 1);
+        for i in &order {
+            if i >= 0 && i < size(blocks) && !HashSet::contains(&removed, i) {
+                b = get(&blocks, i);
+                index = index.insert(b.block.id, i);
+                n = size(b.block.lines);
+                if n > 0 {
+                    for dest in targets(get(&b.block.lines, n - 1)) { incoming = incoming.insert(dest, HashMap::lookup(&incoming, dest, 0) + 1); };
+                };
+            };
+        };
+        for i in &order {
+            if !changed && i >= 0 && i < size(blocks) && !HashSet::contains(&removed, i) {
+                b = get(&blocks, i);
+                n = size(b.block.lines);
+                if b.inlined && n > 0 {
+                    term = get(&b.block.lines, n - 1);
+                    dest = integerAt(term, 1).value;
+                    next = HashMap::lookup(&index, dest, 0 - 1);
+                    if wordIs(term, 0, "goto") && dest != b.block.id && !HashSet::contains(&kept, dest) && HashMap::lookup(&incoming, dest, 0) = 1 && next >= 0 && next < size(blocks) {
+                        after = get(&blocks, next);
+                        prefix = []; for j in 0..n - 1 { prefix = push(prefix, clone(get(&b.block.lines, j))); };
+                        combined = WrittenBlock { block: FullBlock { id: b.block.id, lines: appendRows(prefix, &after.block.lines) }, inlined: after.inlined };
+                        blocks = set(blocks, i, combined);
+                        removed = removed.insert(next); changed = true;
+                    };
+                };
+            };
+        };
+    };
+    out = [];
+    for i in &order { if i >= 0 && i < size(blocks) && !HashSet::contains(&removed, i) { out = push(out, clone(get(&blocks, i).block)); }; };
+    return out;
+};
+fn transformEnv(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, constants: &HashMap<Int,String>, row: &List<Token>, opaque: &List<EnvEntry>) -> List<Token> ~ {
+    entries = [];
+    for e in resolveEnv(row, &program.shared) {
+        value = &e.value;
+        if wordIs(value, 0, "const") && wordIs(value, 1, "fn") {
+            n = textAt(value, 2);
+            if HashMap::contains(&cx.lifted, &n) {
+                entries = push(entries, EnvEntry { name: clone(e.name), value: functionOperand(HashMap::lookup(&cx.lifted, &n, "")) });
+            } else {
+                if !boundCallParts(&n).found {
+                    found = instanceAt(program, &n);
+                    if found.found {
+                        args = [];
+                        for arg in &found.value.args { args = push(args, substituteArg(arg, &cx.sizes, &cx.types)); };
+                        inst = CopyInstance { function: clone(found.value.function), args: args };
+                        key = concreteKey(&inst);
+                        if key.found {
+                            entries = push(entries, EnvEntry { name: clone(e.name), value: functionOperand(nameOf(classes, &cx.named, &key.value)) });
+                        };
+                    } else { entries = push(entries, clone(e)); };
+                };
+            };
+        } else { entries = push(entries, EnvEntry { name: clone(e.name), value: operandWith(constants, value) }); };
+    };
+    return replaceEnv(row, mergeEntries(opaque, &entries));
+};
+fn copyContextName(cx: &CopyCx) -> String ~ { return clone(cx.copy); };
+fn liftedCopyName(cx: &CopyCx, n: &String) -> String ~ { return HashMap::lookup(&cx.lifted, n, ""); };
+fn contextType(cx: &CopyCx, n: &String) -> List<Token> ~ { return copyLookup(&cx.types, n); };
+
+struct CopyRowCx { classes: &InstanceNameClasses, fun: &FullFunction, bindings: &CopyCx, renames: &HashMap<String,String>, constants: &HashMap<Int,String> };
+fn collectCall(result: CopyCall, st: &mut CopyWalk) -> CopyTarget ~ {
+    if result.error != "" { (*st).error = result.error; }
+    else { for need in &result.needs { (*st).needs = push(clone((*st).needs), clone(need)); }; };
+    return result.target;
+};
+fn renamedAt(row: List<Token>, at: Int, renames: &HashMap<String,String>) -> List<Token> ~ {
+    if at >= 0 && at < size(row) {
+        n = textAt(&row, at);
+        return set(row, at, name(typeNameIn(renames, &n)));
+    };
+    return row;
+};
+fn transformConstant(program: &FullProgram, cx: &CopyRowCx, row: &List<Token>, at: Int, st: &mut CopyWalk) -> List<Token> ~ {
+    if wordIs(row, at, "fn") {
+        n = textAt(row, at + 1);
+        args = emptyCopyArgs();
+        t = collectCall(target(cx.classes, program, cx.bindings, cx.constants, cx.fun, &n, &args, Maybe<Int> { found: false, value: 0 }), &mut *st);
+        if (*st).error != "" { return []; };
+        if t is CopyTarget::Named { return push(push([], word("fn")), name((t as CopyTarget::Named).name)); };
+        (*st).error = "internal compiler error: ".concat(&n).concat(" is used as a value in ").concat(copyContextName(cx.bindings)).concat(", and it is not a function there");
+        return [];
+    };
+    data = wordIs(row, at, "data");
+    if data || wordIs(row, at, "list") || wordIs(row, at, "array") {
+        countAt = at + 1;
+        out = sliceTokens(row, at, at + 1);
+        if data {
+            n = textAt(row, at + 1);
+            out = push(out, name(typeNameIn(cx.renames, &n)));
+            countAt = countAt + 1;
+        };
+        n = numberAt(row, countAt);
+        out = push(out, intToken(n)); at = countAt + 1;
+        for i in 0..n {
+            if data { out = appendTokens(out, sliceTokens(row, at, at + 1)); at = at + 1; };
+            out = appendTokens(out, transformConstant(program, cx, row, at, &mut *st));
+            if (*st).error != "" { return []; };
+            at = constantEnd(row, at);
+        };
+        return out;
+    };
+    return sliceTokens(row, at, constantEnd(row, at));
+};
+fn transformOperand(program: &FullProgram, cx: &CopyRowCx, value: &List<Token>, st: &mut CopyWalk) -> List<Token> ~ {
+    if wordIs(value, 0, "const") {
+        c = transformConstant(program, cx, value, 1, &mut *st);
+        return appendTokens(push([], word("const")), &c);
+    };
+    return operandWith(cx.constants, value);
+};
+fn renameSteps(row: List<Token>, countAt: Int, renames: &HashMap<String,String>) -> List<Token> ~ {
+    if size(row) = 0 { return row; };
+    at = countAt + 1;
+    for i in 0..numberAt(&row, countAt) {
+        if wordIs(&row, at, "field") { row = renamedAt(row, at + 1, renames); at = at + 3; }
+        else { at = operandEnd(&row, at + 1); };
+    };
+    return row;
+};
+fn rewriteSites(program: &FullProgram, cx: &CopyRowCx, row: List<Token>, st: &mut CopyWalk) -> List<Token> ~ {
+    start = 0; out = [];
+    for site in rowSites(&row, false, true) {
+        if site.kind is RowKind::Operand {
+            end = operandEnd(&row, site.at);
+            out = appendTokens(out, sliceTokens(&row, start, site.at));
+            value = sliceTokens(&row, site.at, end);
+            out = appendTokens(out, transformOperand(program, cx, &value, &mut *st));
+            if (*st).error != "" { return []; };
+            start = end;
+        };
+    };
+    return appendTokens(out, sliceTokens(&row, start, size(row)));
+};
+fn transformGhost(program: &FullProgram, cx: &CopyRowCx, row: List<Token>, arena: List<AstNode>, st: &mut CopyWalk) -> ProofRow ~ {
+    row = transformEnv(cx.classes, program, cx.bindings, cx.constants, &row, []);
+    if wordIs(&row, 1, "function") {
+        at = envEnd(&row, 2);
+        if at >= 0 && at < size(row) {
+            n = textAt(&row, at);
+            lifted = liftedCopyName(cx.bindings, &n);
+            if lifted != "" { row = set(row, at, name(lifted)); };
+        };
+        return ProofRow { row: row, arena: arena };
+    };
+    return transformPayloads(cx.classes, program, cx.bindings, row, arena, &mut *st);
+};
+fn transformStatement(program: &FullProgram, cx: &CopyRowCx, row: List<Token>, st: &mut CopyWalk) -> List<Token> ~ {
+    if wordIs(&row, 0, "drop") { return row; };
+    rv = 2;
+    if wordIs(&row, 0, "assignref") { row = renameSteps(row, 2, cx.renames); rv = stepsEnd(&row, 2); };
+    if wordIs(&row, rv, "makedata") { row = renamedAt(row, rv + 1, cx.renames); };
+    if wordIs(&row, rv, "takefield") { row = renamedAt(row, rv + 2, cx.renames); };
+    if wordIs(&row, rv, "readfield") || wordIs(&row, rv, "isvariant") || wordIs(&row, rv, "asvariant") {
+        at = operandEnd(&row, rv + 1); row = renamedAt(row, at, cx.renames);
+    };
+    if wordIs(&row, rv, "borrow") || wordIs(&row, rv, "borrowmut") { row = renameSteps(row, rv + 2, cx.renames); };
+    return rewriteSites(program, cx, row, &mut *st);
+};
+struct CopyCallRow { callee: List<Token>, args: List<List<Token>>, dest: Int, next: Int };
+fn parseCopyCall(row: &List<Token>) -> CopyCallRow ~ {
+    end = operandEnd(row, 1);
+    at = end + 1; args = [];
+    for i in 0..numberAt(row, end) {
+        after = operandEnd(row, at);
+        args = push(args, sliceTokens(row, at, after)); at = after;
+    };
+    return CopyCallRow { callee: sliceTokens(row, 1, end), args: args, dest: integerAt(row, at).value, next: integerAt(row, at + 1).value };
+};
+fn callRow(callee: &List<Token>, args: &List<List<Token>>, extras: &List<List<Token>>, dest: Int, next: Int) -> List<Token> ~ {
+    row = appendTokens(push([], word("call")), callee);
+    row = push(row, intToken(size(args) + size(extras)));
+    for value in args { row = appendTokens(row, value); };
+    for value in extras { row = appendTokens(row, value); };
+    return push(push(row, intToken(dest)), intToken(next));
+};
+fn assignRow(dest: Int, rv: &List<Token>) -> List<Token> ~ {
+    return appendTokens(push(push([], word("assign")), intToken(dest)), rv);
+};
+fn gotoRow(next: Int) -> List<Token> ~ { return push(push([], word("goto")), intToken(next)); };
+fn transformTerminator(program: &FullProgram, cx: &CopyRowCx, row: &List<Token>, before: List<List<Token>>, st: &mut CopyWalk) -> List<List<Token>> ~ {
+    if !wordIs(row, 0, "call") { return push(before, rewriteSites(program, cx, clone(row), &mut *st)); };
+    materialized = materializeBoundClone(program, cx, parseCopyCall(row), before, &mut *st);
+    call = materialized.call; before = materialized.before;
+    if wordIs(&call.callee, 0, "const") && wordIs(&call.callee, 1, "fn") {
+        n = textAt(&call.callee, 2);
+        args = []; for a in &call.args { args = push(args, operandWith(cx.constants, a)); };
+        t = collectCall(target(cx.classes, program, cx.bindings, cx.constants, cx.fun, &n, &args, Maybe<Int> { found: true, value: call.dest }), &mut *st);
+        if (*st).error != "" { return before; };
+        if t is CopyTarget::Named {
+            named = t as CopyTarget::Named;
+            converted = [];
+            for a in &args {
+                converted = push(converted, transformOperand(program, cx, a, &mut *st));
+                if (*st).error != "" { return before; };
+            };
+            return push(before, callRow(functionOperand(named.name), &converted, &named.extras, call.dest, call.next));
+        };
+        prepared = inlineCall(cx, &t, &args, &mut *st);
+        before = appendRows(before, &prepared.before);
+        return push(push(before, assignRow(call.dest, &prepared.value)), gotoRow(call.next));
+    };
+    callee = transformOperand(program, cx, &call.callee, &mut *st);
+    if (*st).error != "" { return before; };
+    args = [];
+    for a in &call.args {
+        value = operandWith(cx.constants, a);
+        args = push(args, transformOperand(program, cx, &value, &mut *st));
+        if (*st).error != "" { return before; };
+    };
+    return push(before, callRow(&callee, &args, [], call.dest, call.next));
+};
+struct WrittenBody { blocks: List<WrittenBlock>, arena: List<AstNode> };
+fn transformBlock(classes: &InstanceNameClasses, program: &FullProgram, bindings: &CopyCx, renames: &HashMap<String,String>, constants: &HashMap<Int,String>, generic: &FullFunction, fun: &FullFunction, block: &FullBlock, blocks: List<WrittenBlock>, arena: List<AstNode>, st: &mut CopyWalk) -> WrittenBody ~ {
+    cx = CopyRowCx { classes: &*classes, fun: &*fun, bindings: &*bindings, renames: &*renames, constants: &*constants };
+    at = block.id; before = [];
+    n = size(block.lines);
+    if n = 0 { return WrittenBody { blocks: push(blocks, WrittenBlock { block: clone(block), inlined: false }), arena: arena }; };
+    for i in 0..n - 1 {
+        row = get(&block.lines, i);
+        split = false;
+        if bindings.copy != "" && wordIs(row, 0, "assign") && wordIs(row, 2, "clone") {
+            id = operandLocal(row, 3);
+            if id.ok {
+                ty = localTypeOf(generic, id.value);
+                if mentionsParam(&ty) {
+                    dest = integerAt(row, 1).value;
+                    a = operandWith(constants, sliceTokens(row, 3, size(row)));
+                    concrete = substituteType(&ty, &bindings.sizes, &bindings.types);
+                    args = push([], clone(a));
+                    t = collectCall(cloneTarget(classes, program, bindings, constants, fun, &concrete, &args, Maybe<Int> { found: true, value: dest }), &mut *st);
+                    if (*st).error != "" { return WrittenBody { blocks: blocks, arena: arena }; };
+                    if t is CopyTarget::Named {
+                        named = t as CopyTarget::Named;
+                        next = freshCopyBlock(&mut *st);
+                        value = transformOperand(program, &cx, &a, &mut *st);
+                        if (*st).error != "" { return WrittenBody { blocks: blocks, arena: arena }; };
+                        input = cloneInput(&cx, &before, &value, &mut *st);
+                        if size(input.before) > 0 { before = unread(fun, before, &value); };
+                        before = appendRows(before, &input.before);
+                        cloneArgs = push([], input.value);
+                        before = push(before, callRow(functionOperand(named.name), &cloneArgs, &named.extras, dest, next));
+                        blocks = push(blocks, WrittenBlock { block: FullBlock { id: at, lines: before }, inlined: false });
+                        at = next; before = []; split = true;
+                    };
+                };
+            };
+        };
+        if !split {
+            if wordIs(row, 0, "ghost") {
+                result = transformGhost(program, &cx, clone(row), arena, &mut *st);
+                before = push(before, result.row); arena = result.arena;
+            } else { before = push(before, transformStatement(program, &cx, clone(row), &mut *st)); };
+        };
+        if (*st).error != "" { return WrittenBody { blocks: blocks, arena: arena }; };
+    };
+    term = get(&block.lines, n - 1);
+    before = transformTerminator(program, &cx, term, before, &mut *st);
+    inlined = false;
+    if wordIs(term, 0, "call") && size(before) > 0 { inlined = wordIs(get(&before, size(before) - 1), 0, "goto"); };
+    blocks = push(blocks, WrittenBlock { block: FullBlock { id: at, lines: before }, inlined: inlined });
+    return WrittenBody { blocks: blocks, arena: arena };
+};
+
+struct InlineInput { before: List<List<Token>>, value: List<Token> };
+fn plainInput(fun: &FullFunction, arg: &List<Token>, st: &mut CopyWalk) -> InlineInput ~ {
+    id = operandLocal(arg, 0);
+    if id.ok {
+        ty = localTypeOf(fun, id.value);
+        if isReference(&ty) {
+            tmp = freshCopyLocal(&mut *st, unref(&ty));
+            rv = appendTokens(push([], word("deref")), copyOperand(id.value));
+            return InlineInput { before: push([], assignRow(tmp, &rv)), value: copyOperand(tmp) };
+        };
+    };
+    return InlineInput { before: [], value: clone(arg) };
+};
+fn inlineCall(cx: &CopyRowCx, t: &CopyTarget, args: &List<List<Token>>, st: &mut CopyWalk) -> InlineInput ~ {
+    head = [];
+    if t is CopyTarget::InlineCopy && size(args) = 1 { head = push(head, word("clone")); }
+    else {
+        if t is CopyTarget::InlineEq && size(args) = 2 { head = push(push(head, word("binary")), word("eq")); }
+        else {
+            if t is CopyTarget::InlineBuiltin {
+                head = push(push(push(head, word("listop")), word(clone((t as CopyTarget::InlineBuiltin).op))), intToken(size(args)));
+            } else {
+                (*st).error = "internal compiler error: a call through a bound in ".concat(copyContextName(cx.bindings)).concat(" has ").concat(String::fromInt(size(args))).concat(" arguments");
+                return InlineInput { before: [], value: [] };
+            };
+        };
+    };
+    before = [];
+    for a in args {
+        plain = plainInput(cx.fun, a, &mut *st);
+        before = appendRows(before, &plain.before);
+        head = appendTokens(head, &plain.value);
+    };
+    return InlineInput { before: before, value: head };
+};
+struct MaterializedClone { call: CopyCallRow, before: List<List<Token>> };
+fn cloneByValue(program: &FullProgram, ty: &List<Token>) -> Bool ~ {
+    base = unref(ty);
+    if unsizedBoxed(&base).found { return false; };
+    if wordIs(&base, 0, "named") && tupleArity(textAt(&base, 1)) > 0 { return true; };
+    owner = ownerOfType(program, unref(&base));
+    return owner = "" || functionIndex(program, "<".concat(owner).concat(" as Clone>::clone")) < 0;
+};
+fn boxPayload(ty: &List<Token>) -> List<Token> ~ {
+    if namedUnary(ty, 0, "Box") { return sliceTokens(ty, 4, size(ty)); };
+    if wordIs(ty, 0, "box") { return sliceTokens(ty, 1, size(ty)); };
+    return [];
+};
+fn cloneElement(ty: &List<Token>) -> List<Token> ~ {
+    if namedUnary(ty, 0, "List") { return sliceTokens(ty, 4, size(ty)); };
+    if wordIs(ty, 0, "list") || wordIs(ty, 0, "array") { return sliceTokens(ty, 1, typeEnd(ty, 1)); };
+    inner = boxedArray(ty);
+    return sliceTokens(&inner, 1, typeEnd(&inner, 1));
+};
+fn cloneField(program: &FullProgram, owner: &String, field: &String) -> List<Token> ~ {
+    for d in &program.types {
+        if d.name = owner && wordIs(&d.tokens, 0, "struct") {
+            at = 3;
+            for i in 0..numberAt(&d.tokens, 2) {
+                end = typeEnd(&d.tokens, at + 1);
+                if textAt(&d.tokens, at) = field { return sliceTokens(&d.tokens, at + 1, end); };
+                at = end;
+            };
+            return [];
+        };
+    };
+    return [];
+};
+fn placeRead(program: &FullProgram, root: Int, rootTy: &List<Token>, borrow: &List<Token>, st: &mut CopyWalk) -> InlineInput ~ {
+    if isReference(rootTy) { return InlineInput { before: [], value: [] }; };
+    count = numberAt(borrow, 4);
+    value = copyOperand(root); before = [];
+    if count = 0 {
+        inner = boxPayload(rootTy);
+        if size(inner) = 0 { return InlineInput { before: before, value: value }; };
+        tmp = freshCopyLocal(&mut *st, &inner);
+        return InlineInput { before: push([], assignRow(tmp, appendTokens(push([], word("unbox")), &value))), value: copyOperand(tmp) };
+    };
+    ty = clone(rootTy); at = 5;
+    for i in 0..count {
+        rv = []; nextType = [];
+        if wordIs(borrow, at, "index") {
+            nextType = cloneElement(&ty);
+            end = operandEnd(borrow, at + 1);
+            rv = appendTokens(push(push(push([], word("listop")), word("get")), intToken(2)), &value);
+            rv = appendTokens(rv, sliceTokens(borrow, at + 1, end)); at = end;
+        } else {
+            owner = textAt(borrow, at + 1); field = textAt(borrow, at + 2);
+            nextType = cloneField(program, &owner, &field);
+            rv = push(push(appendTokens(push([], word("readfield")), &value), name(owner)), name(field)); at = at + 3;
+        };
+        if size(nextType) = 0 { return InlineInput { before: [], value: [] }; };
+        tmp = freshCopyLocal(&mut *st, &nextType);
+        before = push(before, assignRow(tmp, &rv)); value = copyOperand(tmp); ty = nextType;
+    };
+    return InlineInput { before: before, value: value };
+};
+fn materializeBoundClone(program: &FullProgram, cx: &CopyRowCx, call: CopyCallRow, before: List<List<Token>>, st: &mut CopyWalk) -> MaterializedClone ~ {
+    if wordIs(&call.callee, 0, "const") && wordIs(&call.callee, 1, "fn") && size(call.args) = 1 {
+        arg = get(&call.args, 0);
+        if wordIs(arg, 0, "copy") {
+            bound = boundCallParts(textAt(&call.callee, 2));
+            if bound.found && bound.value.trait = "Clone" && bound.value.method = "clone" {
+                ty = contextType(cx.bindings, &bound.value.param);
+                if size(ty) > 0 {
+                    local = integerAt(arg, 1).value; n = size(before);
+                    for i in 0..n {
+                        at = n - 1 - i;
+                        row = get(&before, at);
+                        if wordIs(row, 0, "assign") && integerAt(row, 1).value = local && (wordIs(row, 2, "borrow") || wordIs(row, 2, "borrowmut")) {
+                            root = integerAt(row, 3).value;
+                            rootTy = localTypeOf(cx.fun, root);
+                            if size(rootTy) > 0 && (cloneByValue(program, &ty) || (numberAt(row, 4) = 0 && size(boxedArray(&rootTy)) > 0)) {
+                                read = placeRead(program, root, &rootTy, row, &mut *st);
+                                if size(read.value) > 0 {
+                                    rows = []; for j in 0..at { rows = push(rows, clone(get(&before, j))); };
+                                    rows = appendRows(rows, &read.before);
+                                    for j in at + 1..n { rows = push(rows, clone(get(&before, j))); };
+                                    return MaterializedClone { call: CopyCallRow { args: push([], read.value), ..call }, before: rows };
+                                };
+                            };
+                            return MaterializedClone { call: call, before: before };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return MaterializedClone { call: call, before: before };
+};
+struct ClonePlace { found: Bool, root: Int, steps: List<List<Token>>, boxed: Bool };
+fn placeOfClone(before: &List<List<Token>>, local: Int) -> ClonePlace ~ {
+    n = size(before);
+    for i in 0..n {
+        row = get(before, n - 1 - i);
+        if (wordIs(row, 0, "assign") || wordIs(row, 0, "peek")) && integerAt(row, 1).value = local {
+            if wordIs(row, 2, "unbox") && wordIs(row, 3, "copy") {
+                place = placeOfClone(before, integerAt(row, 4).value);
+                if place.found && size(place.steps) = 0 && !place.boxed { return ClonePlace { boxed: true, ..place }; };
+            };
+            if wordIs(row, 2, "readfield") && wordIs(row, 3, "copy") {
+                place = placeOfClone(before, integerAt(row, 4).value);
+                if place.found && !place.boxed {
+                    step = appendTokens(push([], word("field")), sliceTokens(row, 5, 7));
+                    return ClonePlace { steps: push(place.steps, step), ..place };
+                };
+            };
+            if wordIs(row, 2, "listop") && wordIs(row, 3, "get") && numberAt(row, 4) = 2 && wordIs(row, 5, "copy") && wordIs(row, 7, "const") {
+                place = placeOfClone(before, integerAt(row, 6).value);
+                if place.found && !place.boxed {
+                    step = appendTokens(push([], word("index")), sliceTokens(row, 7, size(row)));
+                    return ClonePlace { steps: push(place.steps, step), ..place };
+                };
+            };
+            return ClonePlace { found: false, root: local, steps: [], boxed: false };
+        };
+    };
+    return ClonePlace { found: true, root: local, steps: [], boxed: false };
+};
+fn cloneInput(cx: &CopyRowCx, before: &List<List<Token>>, value: &List<Token>, st: &mut CopyWalk) -> InlineInput ~ {
+    if wordIs(value, 0, "copy") {
+        id = integerAt(value, 1).value;
+        place = placeOfClone(before, id);
+        if place.found && (size(place.steps) > 0 || place.boxed) {
+            ty = localTypeOf(cx.fun, id);
+            if size(ty) > 0 && ((!place.boxed && size(place.steps) > 0) || (place.boxed && size(place.steps) = 0 && !wordIs(&ty, 0, "array"))) {
+                tmp = freshCopyLocal(&mut *st, appendTokens(push([], word("ref")), &ty));
+                rv = push(push(push([], word("borrow")), intToken(place.root)), intToken(size(place.steps)));
+                for step in &place.steps { rv = appendTokens(rv, step); };
+                return InlineInput { before: push([], assignRow(tmp, &rv)), value: copyOperand(tmp) };
+            };
+        };
+    };
+    return InlineInput { before: [], value: clone(value) };
+};
+fn localIsTemporary(fun: &FullFunction, id: Int) -> Bool ~ {
+    for d in &fun.locals { if integerAt(&d.tokens, 1).value = id { return wordIs(&d.tokens, 2, "none"); }; };
+    return false;
+};
+fn localUses(fun: &FullFunction, id: Int) -> Int ~ {
+    uses = 0;
+    for b in &fun.blocks {
+        for row in &b.lines {
+            assignment = wordIs(row, 0, "assign") || wordIs(row, 0, "peek");
+            ref = wordIs(row, 0, "assignref");
+            for site in rowSites(row, false, false) {
+                if site.kind is RowKind::Operand {
+                    local = operandLocal(row, site.at);
+                    if local.ok && local.value = id { uses = uses + 1; };
+                };
+                if site.kind is RowKind::Local && ((assignment && site.at != 1) || (ref && site.at = 1)) && integerAt(row, site.at).value = id { uses = uses + 1; };
+            };
+        };
+    };
+    return uses;
+};
+fn unread(fun: &FullFunction, before: List<List<Token>>, value: &List<Token>) -> List<List<Token>> ~ {
+    if !wordIs(value, 0, "copy") { return before; };
+    id = integerAt(value, 1).value;
+    if !localIsTemporary(fun, id) || localUses(fun, id) > 1 { return before; };
+    n = size(before);
+    for i in 0..n {
+        at = n - 1 - i;
+        row = get(&before, at);
+        if (wordIs(row, 0, "assign") || wordIs(row, 0, "peek")) && integerAt(row, 1).value = id {
+            kept = [];
+            for j in 0..n { if j != at { kept = push(kept, clone(get(&before, j))); }; };
+            for site in rvalueSites([], row, 2) {
+                if site.kind is RowKind::Operand {
+                    operand = sliceTokens(row, site.at, operandEnd(row, site.at));
+                    kept = unread(fun, kept, &operand);
+                };
+            };
+            return kept;
+        };
+    };
+    return before;
+};

@@ -1,0 +1,202 @@
+import data::codec::codec { Token };
+import data::reader::reader { nameValue };
+import data::ast::ast { AstExpression, AstNode, AstOptTermination, AstRule, AstStatement, AstTermination, AstValidation, AstValue };
+import mir::full::records { EnvEntry, listItems, nodeAt, payloadSlots, statementAt };
+import mir::full::tokens { integerAt, intToken, textAt, wordIs };
+import mir::full::environments { functionEntry };
+import mir::pack::proofs { PackPayload, PackTerm, addCall, addName, addPayload, addTermList, addValidation, addValidationBlock, keepPayload, proofOf, renameValidationPayload, termItems, termView, unaryRuleTerm, validationAt, withoutAscription };
+
+enum NameMode { Used, Rename };
+fn validationNode(arena: &List<AstNode>, id: Int) -> AstNode ~ { return nodeAt(arena, validationAt(arena, id)); };
+fn valueNode(arena: &List<AstNode>, id: Int) -> AstValue ~ {
+    n = nodeAt(arena, id);
+    if n is AstNode::Value { return (n as AstNode::Value).value; };
+    return AstValue::VBool { b: false };
+};
+fn namesInTerm(out: HashSet<String>, arena: &List<AstNode>, id: Int, mode: &NameMode, expr: Bool) -> HashSet<String> ~ {
+    if expr && mode is NameMode::Used { id = withoutAscription(arena, id); };
+    t = termView(arena, id);
+    if t is PackTerm::Atom { return out.insert(nameValue(arena, (t as PackTerm::Atom).n)); };
+    if t is PackTerm::Call {
+        c = t as PackTerm::Call;
+        out = namesInTerm(out, arena, c.f, mode, expr);
+        for a in termItems(arena, c.xs) { out = namesInTerm(out, arena, a, mode, expr); };
+    };
+    if t is PackTerm::Quantifier {
+        q = t as PackTerm::Quantifier;
+        for g in termItems(arena, q.gs) { out = namesInTerm(out, arena, g, mode, false); };
+        out = namesInTerm(out, arena, q.b, mode, false);
+    };
+    if expr && mode is NameMode::Rename && t is PackTerm::Constant {
+        v = valueNode(arena, (t as PackTerm::Constant).v);
+        if v is AstValue::VFnRef { out = out.insert(nameValue(arena, (v as AstValue::VFnRef).n)); };
+    };
+    return out;
+};
+fn namesInValidation(out: HashSet<String>, arena: &List<AstNode>, id: Int, mode: &NameMode) -> HashSet<String> ~ {
+    n = validationNode(arena, id);
+    if !(n is AstNode::Validation) { return out; };
+    v = (n as AstNode::Validation).value;
+    p = proofOf(&v);
+    if p >= 0 { return namesInTerm(out, arena, p, mode, false); };
+    if v is AstValidation::AssignProofVar { return namesInTerm(out, arena, (v as AstValidation::AssignProofVar).e, mode, true); };
+    if v is AstValidation::Rewrite {
+        n = nodeAt(arena, (v as AstValidation::Rewrite).r);
+        if !(n is AstNode::Rule) { return out; };
+        r = (n as AstNode::Rule).value;
+        if r is AstRule::UserRewrite {
+            for p in termItems(arena, (r as AstRule::UserRewrite).xs) { out = namesInTerm(out, arena, p, mode, false); };
+        } else {
+            p = unaryRuleTerm(&r);
+            if mode is NameMode::Rename && p >= 0 { out = namesInTerm(out, arena, p, mode, false); };
+        };
+    };
+    return out;
+};
+fn measureExpr(t: &AstTermination) -> Int ~ {
+    if t is AstTermination::Counting { return (t as AstTermination::Counting).e; };
+    if t is AstTermination::Shrinks { return (t as AstTermination::Shrinks).e; };
+    if t is AstTermination::Parts { return (t as AstTermination::Parts).e; };
+    return -1;
+};
+fn namesInMeasure(out: HashSet<String>, arena: &List<AstNode>, id: Int) -> HashSet<String> ~ {
+    opt = nodeAt(arena, id);
+    if !(opt is AstNode::OptTermination) { return out; };
+    t = (opt as AstNode::OptTermination).value;
+    if !(t is AstOptTermination::SomeTermination) { return out; };
+    n = nodeAt(arena, (t as AstOptTermination::SomeTermination).t);
+    if !(n is AstNode::Termination) { return out; };
+    m = (n as AstNode::Termination).value;
+    if m is AstTermination::Recursing { return namesInMeasure(out, arena, (m as AstTermination::Recursing).t); };
+    return namesInTerm(out, arena, measureExpr(&m), NameMode::Rename, true);
+};
+fn validationBlockItems(arena: &List<AstNode>, id: Int) -> List<Int> ~ {
+    s = statementAt(arena, id);
+    if s is AstStatement::Block { return listItems(arena, (s as AstStatement::Block).xs); };
+    return [];
+};
+fn payloadNames(row: &List<Token>, arena: &List<AstNode>, mode: &NameMode) -> HashSet<String> ~ {
+    out = HashSet::new();
+    for p in payloadSlots(row) {
+        id = integerAt(row, p);
+        if id.ok {
+            if wordIs(row, 0, "ghost") {
+                if wordIs(row, 1, "validation") { out = namesInValidation(out, arena, id.value, mode); };
+            } else {
+                s = statementAt(arena, id.value);
+                if s is AstStatement::Block {
+                    for v in validationBlockItems(arena, id.value) { out = namesInValidation(out, arena, v, mode); };
+                } else {
+                    if mode is NameMode::Rename && s is AstStatement::While { out = namesInMeasure(out, arena, (s as AstStatement::While).t); };
+                };
+            };
+        };
+    };
+    return out;
+};
+fn proofTargets(row: &List<Token>, arena: &List<AstNode>, es: &List<EnvEntry>, picked: &HashSet<String>) -> HashMap<String,String> ~ {
+    uses = payloadNames(row, arena, NameMode::Rename); out = HashMap::new();
+    for e in es {
+        if functionEntry(e) && HashSet::contains(picked, &e.name) && HashSet::contains(&uses, &e.name) {
+            out = out.insert(clone(e.name), textAt(&e.value, 2));
+        };
+    };
+    return out;
+};
+fn renameExpression(arena: List<AstNode>, id: Int, uses: &HashMap<String,String>) -> PackPayload ~ {
+    t = termView(&arena, id); n = -1; ref = false;
+    if t is PackTerm::Atom { n = (t as PackTerm::Atom).n; };
+    if t is PackTerm::Constant {
+        v = valueNode(&arena, (t as PackTerm::Constant).v);
+        if v is AstValue::VFnRef { n = (v as AstValue::VFnRef).n; ref = true; };
+    };
+    if n >= 0 {
+        old = nameValue(&arena, n); target = HashMap::lookup(uses, &old, clone(old));
+        if target = old { return keepPayload(arena, id); };
+        r = addName(arena, target);
+        if ref {
+            value = addPayload(r.arena, AstNode::Value { value: AstValue::VFnRef { n: r.id } });
+            return addPayload(value.arena, AstNode::Expression { value: AstExpression::Val { v: value.id } });
+        };
+        return addPayload(r.arena, AstNode::Expression { value: AstExpression::Var { n: r.id } });
+    };
+    if t is PackTerm::Call {
+        c = t as PackTerm::Call; r = renameExpression(arena, c.f, uses);
+        f = r.id; arena = r.arena; old = termItems(&arena, c.xs); ids = [];
+        for a in &old {
+            r = renameExpression(arena, a, uses); arena = r.arena; ids = push(ids, r.id);
+        };
+        if old = ids && f = c.f { return keepPayload(arena, id); };
+        r = addTermList(arena, &ids, false);
+        return addCall(r.arena, f, r.id, false);
+    };
+    return keepPayload(arena, id);
+};
+fn emptyStringMap() -> HashMap<String,String> ~ { return HashMap::new(); };
+fn nameValidation(arena: List<AstNode>, id: Int, uses: &HashMap<String,String>) -> PackPayload ~ {
+    n = validationNode(&arena, id);
+    if n is AstNode::Validation {
+        v = (n as AstNode::Validation).value;
+        if v is AstValidation::AssignProofVar {
+            a = v as AstValidation::AssignProofVar; r = renameExpression(arena, a.e, uses);
+            if r.id = a.e { return keepPayload(r.arena, id); };
+            return addValidation(r.arena, AstValidation::AssignProofVar { n: a.n, e: r.id });
+        };
+    };
+    empty = emptyStringMap();
+    return renameValidationPayload(arena, id, &empty, uses);
+};
+fn nameMeasure(arena: List<AstNode>, id: Int, uses: &HashMap<String,String>) -> PackPayload ~ {
+    opt = nodeAt(&arena, id);
+    if !(opt is AstNode::OptTermination) { return keepPayload(arena, id); };
+    o = (opt as AstNode::OptTermination).value;
+    if !(o is AstOptTermination::SomeTermination) { return keepPayload(arena, id); };
+    termId = (o as AstOptTermination::SomeTermination).t;
+    n = nodeAt(&arena, termId);
+    if !(n is AstNode::Termination) { return keepPayload(arena, id); };
+    t = (n as AstNode::Termination).value; updated = clone(t);
+    if t is AstTermination::Recursing {
+        inner = (t as AstTermination::Recursing).t;
+        r = nameMeasure(arena, inner, uses); arena = r.arena;
+        if r.id = inner { return keepPayload(arena, id); };
+        updated = AstTermination::Recursing { t: r.id };
+    } else {
+        e = measureExpr(&t);
+        if e < 0 { return keepPayload(arena, id); };
+        r = renameExpression(arena, e, uses); arena = r.arena;
+        if r.id = e { return keepPayload(arena, id); };
+        updated = AstTermination::Parts { e: r.id };
+        if t is AstTermination::Counting { updated = AstTermination::Counting { e: r.id }; };
+        if t is AstTermination::Shrinks { updated = AstTermination::Shrinks { e: r.id }; };
+    };
+    r = addPayload(arena, AstNode::Termination { value: updated });
+    return addPayload(r.arena, AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: r.id } });
+};
+fn nameStatement(arena: List<AstNode>, id: Int, uses: &HashMap<String,String>) -> PackPayload ~ {
+    s = statementAt(&arena, id);
+    if s is AstStatement::ValidationStatement { return nameValidation(arena, id, uses); };
+    if s is AstStatement::Block {
+        old = validationBlockItems(&arena, id); ids = [];
+        for v in &old { r = nameValidation(arena, v, uses); ids = push(ids, r.id); arena = r.arena; };
+        if ids = old { return keepPayload(arena, id); };
+        return addValidationBlock(arena, &ids);
+    };
+    if s is AstStatement::While {
+        w = s as AstStatement::While; r = nameMeasure(arena, w.t, uses);
+        if r.id = w.t { return keepPayload(r.arena, id); };
+        return addPayload(r.arena, AstNode::Statement { value: AstStatement::While { e: w.e, vs: w.vs, t: r.id, xs: w.xs } });
+    };
+    return keepPayload(arena, id);
+};
+struct NamedPayload { arena: List<AstNode>, row: List<Token> };
+fn namedPayload(arena: List<AstNode>, row: List<Token>, uses: &HashMap<String,String>) -> NamedPayload ~ {
+    if HashMap::size(uses) > 0 {
+        for p in payloadSlots(&row) {
+            id = integerAt(&row, p);
+            if id.ok {
+                r = nameStatement(arena, id.value, uses); row = set(row, p, intToken(r.id)); arena = r.arena;
+            };
+        };
+    };
+    return NamedPayload { arena: arena, row: row };
+};

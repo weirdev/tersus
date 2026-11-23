@@ -6,14 +6,14 @@ import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 
 import Mir
-import MirCopies (opaqueKey, makeCopies)
+import MirCopiesOracle (opaqueKey, makeCopies)
 import Syntax (Proof (..), ValidationStatement (..), Value (..))
 import TestHarness
 import Types (Arg (..), BuiltinFunct (..), Rel (..), Size (..), Type (..), pattern TBox, pattern TList)
 import StdLib (builtinFunct)
 import Utils
 
--- The copy step (MirCopies) on MIR written by hand: the copies a program names are made from the functions with bounds,
+-- The legacy copy step on MIR written by hand: the copies a program names are made from the functions with bounds,
 -- with their types and bounded sizes put in, their references named for the copies, and their calls through a bound made
 -- what a copy calls for the type.
 testMirCopies :: Test

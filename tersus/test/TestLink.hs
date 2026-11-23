@@ -19,7 +19,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import DataCodec (quote)
 import qualified Mir as M
-import MirCopies (makeCopies, makeCopiesWith, genericKey, coveredKey)
+import MirCopiesOracle (makeCopies, makeCopiesWith, genericKey, coveredKey)
 import qualified Link as ProductionLink
 import qualified Compile
 import qualified MirLists
@@ -82,27 +82,11 @@ nativeLinkTool = modifyMVar nativeToolBox $ \cached -> case cached of
         pure (Just result, result)
 
 {-# NOINLINE actualEmitterBox #-}
-actualEmitterBox :: MVar (Maybe (Result FilePath String))
+actualEmitterBox :: MVar (Maybe FilePath)
 actualEmitterBox = unsafePerformIO (newMVar Nothing)
 
 actualEmitterTool :: IO (Result FilePath String)
-actualEmitterTool = modifyMVar actualEmitterBox $ \cached -> case cached of
-    Just tool -> pure (cached, tool)
-    Nothing -> do
-        seed <- cachedSeed
-        result <- case seed of
-            Error e -> pure (Error e)
-            Ok emitter -> do
-                owned <- Housekeeping.ownedToolWith emitter Housekeeping.emitterEntry
-                case owned of
-                    Error e -> pure (Error e)
-                    Ok program -> do
-                        let input = MirData.writeProgram program
-                            key = Housekeeping.ownedContentKey seedHash input []
-                        Native.cachedProgram "emitter" key "the actual Full pass entry" $ \output -> do
-                            ir <- Native.runWithInput emitter input
-                            case ir of Error e -> pure (Error e); Ok text -> Native.buildExecutable output text
-        pure (Just result, result)
+actualEmitterTool = memoizedTestExecutable actualEmitterBox Housekeeping.cachedSourceEmitter
 
 actualEntryRefusal :: String -> TestResult -> IO TestResult
 actualEntryRefusal input control = do

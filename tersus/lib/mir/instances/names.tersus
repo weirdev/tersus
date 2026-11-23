@@ -1,0 +1,128 @@
+import data::codec::codec { Token, fnClausesAt, isBareLowerName, isUpperName, utf8Point };
+import mir::full::tokens { fnReturnEnd, numberAt, sizeEnd, textAt, typeEnd, wordIs };
+import mir::mono::tokens { monoForallBody, monoSizeName, monoTypeName };
+
+struct InstanceNameRange { lo: Int, hi: Int, mask: Int };
+struct InstanceNameClasses { ranges: List<InstanceNameRange>, pinned: Bool };
+
+fn nameClassAt(classes: &InstanceNameClasses, cp: Int) -> Int ~ {
+    if cp < 128 {
+        if cp >= 65 && cp <= 90 { return 5; };
+        if cp >= 97 && cp <= 122 { return 6; };
+        if cp >= 48 && cp <= 57 { return 4; };
+        return 0;
+    };
+    lo = 0; hi = size(classes.ranges);
+    while lo < hi [{ affirm lo >= 0; affirm hi <= size(classes.ranges); }] ~ {
+        mid = lo + (hi - lo) / 2;
+        r = get(classes.ranges, mid);
+        if cp < r.lo { hi = mid; }
+        else { if cp > r.hi { lo = mid + 1; } else { return r.mask; }; };
+    };
+    return 0;
+};
+
+fn instanceTypeParam(classes: &InstanceNameClasses, key: &String) -> Bool ~ {
+    if classes.pinned { return isUpperName(key); };
+    first = utf8Point(key, 0);
+    return first.ok && nameClassAt(classes, first.value) % 2 = 1;
+};
+
+fn instanceBareLower(classes: &InstanceNameClasses, key: &String) -> Bool ~ {
+    if classes.pinned { return isBareLowerName(key); };
+    first = utf8Point(key, 0);
+    if !first.ok || nameClassAt(classes, first.value) / 2 % 2 != 1 { return false; };
+    i = first.next;
+    while i < size(key.bytes) [{ affirm i >= 0; }] ~ {
+        point = utf8Point(key, i);
+        if !point.ok || point.next <= i || nameClassAt(classes, point.value) < 4 { return false; };
+        i = point.next;
+    };
+    return true;
+};
+
+fn instanceNameAt(classes: &InstanceNameClasses, ts: &List<Token>, at: Int) -> String ~ {
+    base = textAt(ts, at + 1); n = numberAt(ts, at + 2);
+    if n <= 0 { return base; };
+    out = base.concat("<"); p = at + 3;
+    for i in 0..n {
+        if i > 0 { out = out.concat(", "); };
+        if wordIs(ts, p, "type") {
+            out = out.concat(renderCopyType(classes, ts, p + 1, true)); p = typeEnd(ts, p + 1);
+        } else {
+            out = out.concat(monoSizeName(ts, p + 1)); p = sizeEnd(ts, p + 1);
+        };
+    };
+    return out.concat(">");
+};
+
+fn renderContractClauses(clauses: &List<List<Token>>) -> String ~ {
+    if size(clauses) = 0 { return ""; };
+    out = " [{"; first = true;
+    for clause in clauses {
+        if !first { out = out.concat("; "); }; first = false;
+        space = false;
+        for token in clause {
+            if space { out = out.concat(" "); }; space = true;
+            if token.quoted { out = out.concat("\"").concat(&token.text).concat("\""); }
+            else { out = out.concat(&token.text); };
+        };
+    };
+    return out.concat("}]");
+};
+
+fn renderCopyType(classes: &InstanceNameClasses, ts: &List<Token>, at: Int, forInstance: Bool) -> String ~ {
+    if at < 0 || at >= size(ts) { return ""; };
+    tag = textAt(ts, at);
+    if tag = "named" {
+        base = textAt(ts, at + 1); n = numberAt(ts, at + 2);
+        if n = 0 && forInstance && instanceBareLower(classes, &base) { return "`".concat(base); };
+        if !forInstance && n = 1 && (base = "List" || base = "Box") && wordIs(ts, at + 3, "type") {
+            return base.concat("<").concat(renderCopyType(classes, ts, at + 4, false)).concat(">");
+        };
+        return instanceNameAt(classes, ts, at);
+    };
+    if tag = "fn" || tag = "fnc" {
+        out = "fn("; n = numberAt(ts, at + 1); p = at + 2;
+        if n < 0 { return ""; };
+        contract = 0 - 1;
+        if tag = "fnc" { contract = fnReturnEnd(ts, p, n); if contract < 0 { return ""; }; };
+        for i in 0..n {
+            if i > 0 { out = out.concat(", "); };
+            if contract >= 0 {
+                param = textAt(ts, contract + 1 + i);
+                if param != "" { out = out.concat(&param).concat(": "); };
+            };
+            out = out.concat(renderCopyType(classes, ts, p, forInstance)); p = typeEnd(ts, p);
+        };
+        out = out.concat(") -> ").concat(renderCopyType(classes, ts, p, forInstance));
+        if contract >= 0 && forInstance {
+            requires = fnClausesAt(ts, contract + 1 + n);
+            if !requires.ok { return out; };
+            ensures = fnClausesAt(ts, requires.pos);
+            if !ensures.ok { return out; };
+            out = out.concat(renderContractClauses(&requires.value)).concat(renderContractClauses(&ensures.value));
+        };
+        return out;
+    };
+    if tag = "forall" {
+        body = renderCopyType(classes, ts, monoForallBody(ts, at), forInstance);
+        if forInstance { return body; };
+        ns = numberAt(ts, at + 1); nt = numberAt(ts, at + 2 + ns);
+        if ns < 0 || nt < 0 { return body; };
+        out = "<";
+        for i in 0..nt { if i > 0 { out = out.concat(", "); }; out = out.concat(textAt(ts, at + 3 + ns + i)); };
+        for i in 0..ns { if nt + i > 0 { out = out.concat(", "); }; out = out.concat(textAt(ts, at + 2 + i)); };
+        return out.concat(">").concat(body);
+    };
+    if tag = "list" || tag = "box" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "array" {
+        inner = renderCopyType(classes, ts, at + 1, forInstance);
+        if tag = "ref" { return "&".concat(inner); };
+        if tag = "mutref" { return "&mut ".concat(inner); };
+        if tag = "array" { return "Array<".concat(inner).concat(", ").concat(monoSizeName(ts, typeEnd(ts, at + 1))).concat(">"); };
+        prefix = "List";
+        if tag = "box" { prefix = "Box"; }; if tag = "addr" { prefix = "Addr"; }; if tag = "block" { prefix = "Block"; }; if tag = "uninit" { prefix = "Uninit"; };
+        return prefix.concat("<").concat(inner).concat(">");
+    };
+    return monoTypeName(ts, at, forInstance);
+};

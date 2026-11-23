@@ -1,118 +1,27 @@
 module TestMirPacks (testMirPacks) where
 
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Data.List (isPrefixOf, partition, sort)
 import Data.Maybe (catMaybes, listToMaybe)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.Exit (ExitCode (..))
-import System.IO.Unsafe (unsafePerformIO)
 
 import DataCodec (quote)
 import ElaboratorTool (bootstrapLoader)
 import LibPackage (libPackage)
 import qualified Mir as M
-import MirData (readLowered, writeLowered, writeProgram)
-import qualified MirHousekeeping as Housekeeping
-import MirPacks (Expanded (..), expandPack)
+import MirData (readLowered, writeLowered)
+import MirPacksOracle (Expanded (..), expandPack)
 import qualified Native
-import PackageCompile (compileModulesUsing, lowerCompiledPackage, packageLinkInputs)
+import PackageCompile (compileModulesUsing, packageLinkInputs)
 import PackageData (Snapshot (..), resolverFromFiles)
-import PreludeSource (toolPackageFiles)
-import Seed (cachedSeed, seedHash)
 import StdLib (builtinFunct)
 import qualified Syntax as S
 import TestHarness
+import TestMirCopiesParity (nativeCopiesProbe)
 import TestVariadic (variadicPrograms)
 import Types (BuiltinFunct (Rel), Rel (Eq, Lt), Type (TBool, TInt, TParam))
 import Utils
-
-probeSource :: String
-probeSource = unlines
-    [ "import data::codec::codec { Token };"
-    , "import data::reader::reader { readRecords, tokenizeMir };"
-    , "import mir::full::full { FullBlock, FullRecord, FullFunction, FullProgram, fullAt, printFull };"
-    , "import mir::full::environments { resolveEnv };"
-    , "import mir::full::records { envEntries, replaceEnv };"
-    , "import mir::full::tokens { integerAt, intToken, name, textAt, tokenLine, word };"
-    , "import mir::link::merge { fnIndex, rowIndex };"
-    , "import mir::pack::body { PackSpread };"
-    , "import mir::pack::expand { expandPack };"
-    , "fn inlineFunction(fun: FullFunction, shared: &List<List<Token>>) -> FullFunction ~ {"
-    , "    loops = []; for l in &fun.loops { loops = push(loops, FullRecord { name: clone(l.name), tokens: replaceEnv(&l.tokens, resolveEnv(&l.tokens, shared)) }); };"
-    , "    blocks = []; for b in &fun.blocks {"
-    , "        rows = []; for r in &b.lines { rows = push(rows, replaceEnv(r, resolveEnv(r, shared))); };"
-    , "        blocks = push(blocks, FullBlock { lines: rows, ..b });"
-    , "    };"
-    , "    return FullFunction { env: replaceEnv(&fun.env, resolveEnv(&fun.env, shared)), loops: loops, blocks: blocks, ..fun };"
-    , "};"
-    , "fn printRecord(row: &List<Token>) -> Int ~ { tokenLine(row).print(); return \"\\n\".print(); };"
-    , "fn printIndexes(tag: &String, indexes: &HashMap<Int, HashMap<String, String>>) -> Int ~ {"
-    , "    for group in indexes.entries() {"
-    , "        prefix = push(push([], word(clone(tag))), intToken(group.key)); printRecord(&prefix);"
-    , "        for binding in group.value.entries() { printRecord(push(push(clone(prefix), name(clone(binding.key))), word(clone(binding.value)))); };"
-    , "    }; return 0;"
-    , "};"
-    , "fn printSpreads(spreads: &HashMap<String, PackSpread>) -> Int ~ {"
-    , "    for e in spreads.entries() {"
-    , "        row = push(push(push([], word(\"spread\")), name(clone(e.key))), name(clone(e.value.callee)));"
-    , "        printRecord(push(push(row, intToken(e.value.lo)), intToken(e.value.hi)));"
-    , "    }; return 0;"
-    , "};"
-    , "fn runPackProbe() -> Int ~ {"
-    , "    r = readRecords(0 - 1); if !r.ok || size(r.value) = 0 { return 2; };"
-    , "    request = tokenizeMir(get(&r.value, 0)); if !request.ok || size(request.value) != 3 { return 2; };"
-    , "    target = textAt(&request.value, 0); pack = textAt(&request.value, 1); count = integerAt(&request.value, 2);"
-    , "    if !count.ok { return 2; };"
-    , "    rows = []; for i in 1..size(r.value) { ts = tokenizeMir(get(&r.value, i)); if !ts.ok { return 2; }; rows = push(rows, ts.value); };"
-    , "    parsed = fullAt(&rows); if !parsed.ok { \"pack probe could not read MIR3\\n\".printError(); return 2; };"
-    , "    p = parsed.value; j = rowIndex(&p.bounded, &target); i = fnIndex(&p.functions, &target);"
-    , "    if i < 0 || j < 0 { \"pack probe could not find the bounded function\\n\".printError(); return 2; };"
-    , "    bounded = clone(get(&p.bounded, j)); fun = inlineFunction(clone(get(&p.functions, i)), &p.shared);"
-    , "    expanded = expandPack(&bounded, &pack, count.value, fun, p.arena);"
-    , "    if size(expanded.error.bytes) != 0 { expanded.error.printError(); \"\\n\".printError(); return 1; };"
-    , "    printIndexes(\"block\", &expanded.blocks); printIndexes(\"local\", &expanded.locals); printSpreads(&expanded.spreads);"
-    , "    ordered = push([], word(\"env-order\")); for e in envEntries(&expanded.fun.env, 1) { ordered = push(ordered, name(clone(e.name))); }; printRecord(&ordered);"
-    , "    out = FullProgram { functions: set(p.functions, i, expanded.fun), arena: expanded.arena, ..p };"
-    , "    printFull(&out); return 0;"
-    , "};"
-    , "status = runPackProbe(); if status != 0 { return status; };"
-    ]
-
-{-# NOINLINE probeCache #-}
-probeCache :: MVar (Maybe (Result FilePath String))
-probeCache = unsafePerformIO (newMVar Nothing)
-
-nativeProbe :: IO (Result FilePath String)
-nativeProbe = modifyMVar probeCache $ \cached -> case cached of
-    Just tool -> pure (cached, tool)
-    Nothing -> do
-        files <- mapM packSource ["expand", "body", "proofs", "numbers"]
-        let entry = "lib/pack_probe/driver.tersus"
-            snapshot = Snapshot (resolverFromFiles (toolPackageFiles ++ files ++ [("lib/pack_probe/package.tersus", ""), (entry, probeSource)])) entry False
-            source = compileModulesUsing bootstrapLoader libPackage snapshot `bindResult` lowerCompiledPackage
-        seed <- cachedSeed
-        tool <- case (seed, source) of
-            (Error e, _) -> pure (Error e)
-            (_, Error e) -> pure (Error e)
-            (Ok emitter, Ok program) -> do
-                owned <- Housekeeping.ownedWith emitter program
-                case owned of
-                    Error e -> pure (Error e)
-                    Ok lowered -> do
-                        let input = writeProgram lowered
-                            key = Housekeeping.ownedContentKey seedHash input []
-                        Native.cachedProgram "pack-test" key "the MIR pack test tool" $ \output -> do
-                            ir <- Native.runWithInput emitter input
-                            case ir of
-                                Error e -> pure (Error e)
-                                Ok llvm -> Native.buildExecutable output llvm
-        pure (Just tool, tool)
-  where
-    packSource base = do
-        let file = base ++ ".tersus"
-        source <- readFile ("dev/mir-packs/" ++ file)
-        pure ("lib/mir/pack/" ++ file, source)
 
 asUnit :: M.Program -> M.Lowered
 asUnit p = M.Lowered p Set.empty Set.empty Set.empty Set.empty Set.empty Set.empty []
@@ -130,11 +39,11 @@ compareExpansionWith count target program refusal check =
             case writeLowered (asUnit program) of
                 Error e -> pure (Just e)
                 Ok payload -> do
-                    tool <- nativeProbe
+                    tool <- nativeCopiesProbe
                     case tool of
                         Error e -> pure (Just e)
                         Ok executable -> do
-                            let request = unwords [quote target, quote packType, show count] ++ "\n" ++ payload
+                            let request = "pack\n" ++ unwords [quote target, quote packType, show count] ++ "\n" ++ payload
                             (status, out, errors) <- Native.runWithInputFull executable request
                             pure $ firstFailure [testAssertEq status ExitSuccess, compareResult (expandPack bounded packType (toInteger count) fun) out (decodeUtf8 errors)]
         _ -> pure (Just ("not a retained variadic template: " ++ target))

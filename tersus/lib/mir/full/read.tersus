@@ -2,16 +2,19 @@ import data::codec::codec { Token, Parsed };
 import data::reader::reader { parseAstLines };
 import data::ast::ast { AstNode, AstStatement, AstValidations };
 import mir::full::full { FullRecord, FullBlock, FullFunction, FullProgram };
-import mir::full::tokens { argsEnd, integerAt, intsEnd, namesEnd, numberAt, operandsEnd, operandEnd, quotedAt, rvalueEnd, stepsEnd, textAt, tokenLine, typeEnd, word, wordIs, normalizeNumbers, normalizeTypes };
+import mir::full::tokens { argsEnd, integerAt, intsEnd, namesEnd, numberAt, operandsEnd, operandEnd, quotedAt, rvalueEnd, stepsEnd, textAt, tokenLine, typeEnd, word, wordIs, normalizeNumbers, normalizeTypeRecord };
 import mir::full::records { EnvEntry, envEnd, envEntries, expandEnv, listItems, mapPayloadLine, payloadMatches, payloadSlots, uniqueEntries, orderEntries, envTokens, keyOrder };
 import mir::full::write { mapProgramPayloads };
 
 fn noFunction() -> FullFunction ~ { return FullFunction { header: [], spec: [], env: [], locals: [], loops: [], blocks: [] }; };
 fn noFull() -> FullProgram ~ { return FullProgram { types: [], generics: [], invariants: [], bounded: [], instances: [], functions: [], entry: noFunction(), trailer: [], arena: [], shared: [] }; };
 fn badFull() -> Parsed<FullProgram> ~ { return Parsed<FullProgram> { value: noFull(), pos: 0, ok: false }; };
-fn recordAt(lines: &List<List<Token>>, i: Int) -> List<Token> ~ {
+fn rawRecordAt(lines: &List<List<Token>>, i: Int) -> List<Token> ~ {
     if i < 0 || i >= size(lines) { return []; };
-    return normalizeNumbers(clone(get(lines, i)));
+    return clone(get(lines, i));
+};
+fn recordAt(lines: &List<List<Token>>, i: Int) -> List<Token> ~ {
+    return normalizeNumbers(rawRecordAt(lines, i));
 };
 fn fieldsEnd(ts: &List<Token>, p: Int) -> Int ~ {
     n = numberAt(ts, p);
@@ -115,19 +118,19 @@ fn lineOk(ts: &List<Token>) -> Bool ~ {
     };
     return false;
 };
-fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry>>) -> Parsed<FullFunction> ~ {
+fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry>>, allowContracts: Bool) -> Parsed<FullFunction> ~ {
     bad = Parsed<FullFunction> { value: noFunction(), pos: 0, ok: false };
     if start < 0 { return bad; };
-    header = normalizeTypes(recordAt(lines, start)); spec = recordAt(lines, start + 1); env = recordAt(lines, start + 2);
+    header = normalizeTypeRecord(rawRecordAt(lines, start), allowContracts); spec = recordAt(lines, start + 1); env = recordAt(lines, start + 2);
     if !headerOk(&header) || !specOk(&spec) || !wordIs(&env, 0, "env") || envEnd(&env, 1) != size(env) { return bad; };
     e = expandEnv(&env, shared); if !e.ok { return bad; };
     fun = FullFunction { header: header, spec: spec, env: e.value, locals: [], loops: [], blocks: [] };
     at = start + 3;
     more = true;
     while more [{ affirm at >= 0; }] ~ {
-        row = recordAt(lines, at);
+        row = rawRecordAt(lines, at);
         if !wordIs(&row, 0, "local") { more = false; } else {
-            row = normalizeTypes(row); if !localOk(&row) { return bad; };
+            row = normalizeTypeRecord(&row, allowContracts); if !localOk(&row) { return bad; };
             fun = FullFunction { locals: push(fun.locals, FullRecord { name: textAt(&row, 1), tokens: row }), ..fun }; at = at + 1;
         };
     };
@@ -251,7 +254,7 @@ fn packLoopInvariants(nodes: List<AstNode>) -> List<AstNode> ~ {
     return nodes;
 };
 
-fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
+fn parseFull(lines: &List<List<Token>>, allowContracts: Bool) -> Parsed<FullProgram> ~ {
     bad = badFull();
     if size(lines) = 0 { return bad; };
     header = clone(get(lines, 0));
@@ -263,22 +266,22 @@ fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
     declaring = true;
     while declaring [{ affirm at >= 1; }] ~ {
         if at >= size(lines) { return bad; };
-        row = recordAt(lines, at);
-        if wordIs(&row, 0, "function") || wordIs(&row, 0, "main") { declaring = false; } else {
-            kind = recordPhase(&row);
+        row = get(lines, at);
+        if wordIs(row, 0, "function") || wordIs(row, 0, "main") { declaring = false; } else {
+            kind = recordPhase(row);
             if kind < phase || kind < 0 { return bad; };
             phase = kind;
             if kind = 5 {
-                if size(row) < 1 { return bad; };
                 env = push([], word("none"));
-                for i in 1..size(row) { env = push(env, clone(get(&row, i))); };
+                for i in 1..size(row) { env = push(env, clone(get(row, i))); };
+                env = normalizeNumbers(env);
                 if envEnd(&env, 0) != size(env) { return bad; };
                 entries = envEntries(&env, 0); if !uniqueEntries(&entries) { return bad; };
                 shared = push(shared, orderEntries(entries));
             } else {
-                row = normalizeTypes(row);
-                if declarationEnd(&row) != size(row) { return bad; };
-                r = FullRecord { name: textAt(&row, 1), tokens: row };
+                normalized = normalizeTypeRecord(row, allowContracts);
+                if declarationEnd(&normalized) != size(normalized) { return bad; };
+                r = FullRecord { name: textAt(&normalized, 1), tokens: normalized };
                 program = addRecord(program, kind, r);
             };
             at = at + 1;
@@ -286,14 +289,14 @@ fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
     };
     readingFunctions = true;
     while readingFunctions ~ {
-        row = recordAt(lines, at);
+        row = rawRecordAt(lines, at);
         if !wordIs(&row, 0, "function") { readingFunctions = false; } else {
-            fun = functionAt(lines, at, &shared); if !fun.ok { return bad; };
+            fun = functionAt(lines, at, &shared, allowContracts); if !fun.ok { return bad; };
             program = FullProgram { functions: push(program.functions, fun.value), ..program }; at = fun.pos;
         };
     };
-    if !wordIs(recordAt(lines, at), 0, "main") { return bad; };
-    fun = functionAt(lines, at, &shared); if !fun.ok { return bad; };
+    if !wordIs(rawRecordAt(lines, at), 0, "main") { return bad; };
+    fun = functionAt(lines, at, &shared, allowContracts); if !fun.ok { return bad; };
     program = FullProgram { entry: fun.value, ..program }; at = fun.pos;
     for i in 0..7 { program = FullProgram { trailer: push(program.trailer, recordAt(lines, at)), ..program }; at = at + 1; };
     if !trailerOk(&program.trailer) { return bad; };
