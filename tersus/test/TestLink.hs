@@ -12,7 +12,7 @@ import ValidatorNative (validateCompiled)
 import Pipeline (oneMarkerEach)
 import System.Exit (ExitCode(..))
 
-import Data.List (isPrefixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.ByteString.Char8 as B
 import AstData (readMirPayloadBytes, writeMirPayloadLines)
 import qualified Data.Map.Strict as Map
