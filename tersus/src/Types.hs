@@ -337,7 +337,7 @@ tupleType parts = TNamed (tupleBase (length parts)) (map ArgType parts)
 -- The parameters and fields of the struct of the tuples of a number of parts, by its name
 tupleGeneric :: Name -> Maybe ([Variable], [(Variable, Type)])
 tupleGeneric base = case stripPrefix "Tuple" base of
-    Just digits | not (null digits), all isDigit digits, take 1 digits /= "0", n <- read digits, n >= (2 :: Int), n <= 16 ->
+    Just digits | not (null digits), all isDigit digits, digits == "0" || take 1 digits /= "0", n <- read digits, n >= (0 :: Int), n <= 32 ->
         let params = ["T" ++ show i | i <- [0 .. n - 1]]
          in Just (params, [(show i, TParam p) | (i, p) <- zip [0 :: Int ..] params])
     _ -> Nothing

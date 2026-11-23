@@ -369,7 +369,7 @@ return sum(Box::new(Tree::Branch { left: leaf, value: 2, right: Box::new(Tree::L
 
 ## Tuples
 
-A tuple is several values as one: `(A, B)` is a type (two parts or more), `(a, b)` a value, and `t.0`, `t.1` its parts. `(x, y) = e;` takes a tuple apart, each part to a name, and each part is moved on its own, so a tuple of values that are not Clone can be taken apart. A function returns several values as a tuple.
+A tuple is several values as one: `(A, B)` is a type, `(a, b)` a value, and `t.0`, `t.1` its parts. `(x, y) = e;` takes a tuple apart, each part to a name, and each part is moved on its own, so a tuple of values that are not Clone can be taken apart. A function returns several values as a tuple. A tuple has from 0 to 32 parts. Parentheses alone only group (`(A)` is `A` and `(a)` is `a`), so a tuple of one part is written with a trailing comma, as its type `(A,)`, its value `(a,)` and its taking apart `(x,) = e;` (`(x) = e;` is refused). `()` is the tuple of no parts, as a type and as a value, and a trailing comma after the last of several parts is allowed (`(a, b,)`).
 
 ```tersus
 fn divide(a: Int, b: Int) -> (Int, Int) [{ affirm b > 0; }] [{ affirm return.0 = a / b; }] {
@@ -380,7 +380,7 @@ fn divide(a: Int, b: Int) -> (Int, Int) [{ affirm b > 0; }] [{ affirm return.0 =
 return q * 10 + r;   // 32
 ```
 
-- **A tuple is a struct of the language**, `Tuple2<A, B>` for two parts and so on, with fields named `0`, `1`, ...: it is compared, cloned, moved and held as a struct is, and is Copy when all of its parts are. The name `Tuple2` cannot be declared by a program, and a tuple is printed as that struct (`Tuple2 { 0: 3, 1: 2 }`).
+- **A tuple is a struct of the language**, `Tuple2<A, B>` for two parts and so on (`Tuple0` and `Tuple1<A>` for none and one, up to `Tuple32`), with fields named `0`, `1`, ...: it is compared, cloned, moved and held as a struct is, and is Copy when all of its parts are. The name `Tuple2` cannot be declared by a program, and a tuple is printed as that struct (`Tuple2 { 0: 3, 1: 2 }`).
 - **A part can be `ghost`** (`(Addr<T>, ghost Block<T>)`): a part that is a permission is erased with it (see Addresses and permissions).
 
 ## Addresses and permissions

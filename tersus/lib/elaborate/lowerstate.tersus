@@ -569,7 +569,7 @@ fn lwHasByte(name: &String, b: Int) -> Bool ~ {
     return false;
 };
 
-// Types.tupleGeneric's test: Tuple and a number from 2 to 16 with no leading zero
+// Types.tupleGeneric's test: Tuple and a number from 0 to 32 with no leading zero
 fn isTupleBase(base: &String) -> Bool ~ {
     n = size(base.bytes);
     if n < 6 || n > 7 { return false; };
@@ -579,10 +579,10 @@ fn isTupleBase(base: &String) -> Bool ~ {
     for i in 5..n {
         d = toInt(get(base.bytes, i)) - 48;
         if d < 0 || d > 9 { return false; };
-        if i = 5 && d = 0 { return false; };
+        if i = 5 && d = 0 && n > 6 { return false; };
         v = v * 10 + d;
     };
-    return v >= 2 && v <= 16;
+    return v <= 32;
 };
 
 // The types of the parts of a tuple type (Types.tupleParts), or none (ok false)
