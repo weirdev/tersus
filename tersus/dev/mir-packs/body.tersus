@@ -1,0 +1,455 @@
+import data::codec::codec { Token, Parsed };
+import data::ast::ast { AstNode };
+import mir::full::full { FullBlock, FullFunction, FullRecord };
+import mir::full::records { envStart, envEnd };
+import mir::full::tokens { appendTokens, decimalText, integerAt, intToken, name, numberAt, operandEnd, operandsEnd, sliceTokens, stepsEnd, textAt, word, wordIs };
+import mir::pack::numbers { decimalAdd, decimalSub, decimalMul, decimalCmp, decimalFits };
+import mir::pack::proofs { proofDefineName, rangeGhosts, sliceGhosts };
+
+enum RowKind { Local, Operand, Block };
+struct RowSite { at: Int, kind: RowKind };
+
+fn operandLocal(row: &List<Token>, at: Int) -> Parsed<Int> ~ {
+    if wordIs(row, at, "copy") || wordIs(row, at, "move") { return integerAt(row, at + 1); };
+    return Parsed<Int> { value: 0, pos: 0, ok: false };
+};
+fn operandIsLocal(row: &List<Token>, at: Int, local: Int) -> Bool ~ {
+    id = operandLocal(row, at);
+    return id.ok && id.value = local;
+};
+fn operandSites(sites: List<RowSite>, row: &List<Token>, start: Int, count: Int, named: Bool) -> List<RowSite> ~ {
+    at = start;
+    for i in 0..count {
+        if named { at = at + 1; };
+        end = operandEnd(row, at);
+        if end < 0 { return sites; };
+        sites = push(sites, RowSite { at: at, kind: RowKind::Operand });
+        at = end;
+    };
+    return sites;
+};
+fn stepSites(sites: List<RowSite>, row: &List<Token>, p: Int) -> List<RowSite> ~ {
+    at = p + 1;
+    for i in 0..numberAt(row, p) {
+        if wordIs(row, at, "field") { at = at + 3; } else {
+            if !wordIs(row, at, "index") { return sites; };
+            end = operandEnd(row, at + 1);
+            if end < 0 { return sites; };
+            sites = push(sites, RowSite { at: at + 1, kind: RowKind::Operand });
+            at = end;
+        };
+    };
+    return sites;
+};
+fn rvalueSites(sites: List<RowSite>, row: &List<Token>, at: Int) -> List<RowSite> ~ {
+    if at < 0 { return sites; };
+    op = textAt(row, at);
+    if op = "borrow" || op = "borrowmut" {
+        return stepSites(push(sites, RowSite { at: at + 1, kind: RowKind::Local }), row, at + 2);
+    };
+    if op = "takefield" { return push(sites, RowSite { at: at + 1, kind: RowKind::Local }); };
+    if op = "binary" { return operandSites(sites, row, at + 2, 2, false); };
+    if op = "listop" { return operandSites(sites, row, at + 3, numberAt(row, at + 2), false); };
+    if op = "makelist" { return operandSites(sites, row, at + 2, numberAt(row, at + 1), false); };
+    if op = "makedata" { return operandSites(sites, row, at + 3, numberAt(row, at + 2), true); };
+    if op = "use" || op = "makebox" || op = "unbox" || op = "unsize" || op = "clone" || op = "deref" || op = "readfield" || op = "isvariant" || op = "asvariant" {
+        return operandSites(sites, row, at + 1, 1, false);
+    };
+    return sites;
+};
+fn callDestinationAt(row: &List<Token>) -> Int ~ {
+    p = operandEnd(row, 1);
+    return operandsEnd(row, p + 1, numberAt(row, p));
+};
+fn rowSites(row: &List<Token>, ghosts: Bool, assignRefIndices: Bool) -> List<RowSite> ~ {
+    sites = [];
+    if wordIs(row, 0, "assign") || wordIs(row, 0, "peek") || wordIs(row, 0, "assignref") || wordIs(row, 0, "drop") {
+        sites = push(sites, RowSite { at: 1, kind: RowKind::Local });
+        if wordIs(row, 0, "drop") { return sites; };
+        if wordIs(row, 0, "assignref") {
+            if assignRefIndices { sites = stepSites(sites, row, 2); };
+            return rvalueSites(sites, row, stepsEnd(row, 2));
+        };
+        return rvalueSites(sites, row, 2);
+    };
+    if wordIs(row, 0, "goto") { return push(sites, RowSite { at: 1, kind: RowKind::Block }); };
+    if wordIs(row, 0, "switch") {
+        at = operandEnd(row, 1);
+        if at < 0 { return sites; };
+        sites = push(sites, RowSite { at: 1, kind: RowKind::Operand });
+        sites = push(sites, RowSite { at: at, kind: RowKind::Block });
+        return push(sites, RowSite { at: at + 1, kind: RowKind::Block });
+    };
+    if wordIs(row, 0, "call") {
+        at = operandEnd(row, 1); last = callDestinationAt(row);
+        if at < 0 || last < 0 { return sites; };
+        sites = push(sites, RowSite { at: 1, kind: RowKind::Operand });
+        sites = operandSites(sites, row, at + 1, numberAt(row, at), false);
+        sites = push(sites, RowSite { at: last, kind: RowKind::Local });
+        return push(sites, RowSite { at: last + 1, kind: RowKind::Block });
+    };
+    if !ghosts { return sites; };
+    at = envStart(row);
+    if at < 0 { return sites; };
+    sites = operandSites(sites, row, at + 2, numberAt(row, at + 1), true);
+    if wordIs(row, 0, "ghost") && wordIs(row, 1, "dissolve") {
+        end = envEnd(row, at);
+        if end >= 0 { sites = push(sites, RowSite { at: end, kind: RowKind::Local }); };
+    };
+    return sites;
+};
+fn targets(row: &List<Token>) -> List<Int> ~ {
+    out = [];
+    for site in rowSites(row, false, false) {
+        if site.kind is RowKind::Block {
+            id = integerAt(row, site.at);
+            if id.ok { out = push(out, id.value); };
+        };
+    };
+    return out;
+};
+fn constInt(text: String) -> List<Token> ~ { return push(push(push([], word("const")), word("int")), word(text)); };
+fn renameRow(row: &List<Token>, locals: &HashMap<Int,Int>, blocks: &HashMap<Int,Int>, index: Int, indexValue: &String) -> List<Token> ~ {
+    out = []; start = 0;
+    for site in rowSites(row, true, true) {
+        at = site.at;
+        if site.kind is RowKind::Operand {
+            id = operandLocal(row, at);
+            if id.ok {
+                if id.value = index && indexValue != "" {
+                    out = appendTokens(out, sliceTokens(row, start, at));
+                    out = appendTokens(out, constInt(clone(indexValue)));
+                    start = at + 2;
+                } else {
+                    new = HashMap::lookup(locals, id.value, id.value);
+                    if new != id.value {
+                        out = push(appendTokens(out, sliceTokens(row, start, at + 1)), intToken(new));
+                        start = at + 2;
+                    };
+                };
+            };
+        } else {
+            id = integerAt(row, at);
+            if id.ok {
+                new = id.value;
+                if site.kind is RowKind::Local { new = HashMap::lookup(locals, id.value, id.value); } else { new = HashMap::lookup(blocks, id.value, id.value); };
+                if new != id.value {
+                    out = push(appendTokens(out, sliceTokens(row, start, at)), intToken(new));
+                    start = at + 1;
+                };
+            };
+        };
+    };
+    return appendTokens(out, sliceTokens(row, start, size(row)));
+};
+fn scanRowLocals(row: &List<Token>, ghosts: Bool, assignRefIndices: Bool) -> List<Int> ~ {
+    out = [];
+    for site in rowSites(row, ghosts, assignRefIndices) {
+        if !(site.kind is RowKind::Block) {
+            id = integerAt(row, site.at);
+            if site.kind is RowKind::Operand { id = operandLocal(row, site.at); };
+            if id.ok { out = push(out, id.value); };
+        };
+    };
+    return out;
+};
+fn rowLocals(row: &List<Token>, ghosts: Bool) -> List<Int> ~ { return scanRowLocals(row, ghosts, true); };
+fn usesPack(fun: &FullFunction, pack: Int) -> Bool ~ {
+    for block in &fun.blocks {
+        for row in &block.lines {
+            for local in scanRowLocals(row, false, false) { if local = pack { return true; }; };
+        };
+    };
+    return false;
+};
+
+fn paramsOf(fun: &FullFunction) -> HashSet<Int> ~ {
+    params = HashSet::new();
+    for i in 0..numberAt(&fun.header, 3) { params = params.insert(integerAt(&fun.header, i + 4).value); };
+    return params;
+};
+fn borrowedLocals(fun: &FullFunction) -> HashSet<Int> ~ {
+    borrowed = HashSet::new();
+    for block in &fun.blocks {
+        for row in &block.lines {
+            if wordIs(row, 0, "assignref") { borrowed = borrowed.insert(integerAt(row, 1).value); };
+            if (wordIs(row, 0, "assign") || wordIs(row, 0, "peek")) && (wordIs(row, 2, "borrow") || wordIs(row, 2, "borrowmut")) {
+                borrowed = borrowed.insert(integerAt(row, 3).value);
+            };
+        };
+    };
+    return borrowed;
+};
+fn assignmentsOf(fun: &FullFunction) -> HashMap<Int,Int> ~ {
+    counts = HashMap::new();
+    for block in &fun.blocks {
+        for row in &block.lines {
+            at = 0 - 1;
+            if wordIs(row, 0, "assign") { at = 1; };
+            if wordIs(row, 0, "call") { at = callDestinationAt(row); };
+            id = integerAt(row, at);
+            if id.ok { counts = HashMap::insert(counts, id.value, HashMap::lookup(&counts, id.value, 0) + 1); };
+        };
+    };
+    return counts;
+};
+fn operandConstant(known: &HashMap<Int,List<Token>>, operand: &List<Token>) -> List<Token> ~ {
+    if wordIs(operand, 0, "const") {
+        if wordIs(operand, 1, "int") { return constInt(decimalText(textAt(operand, 2))); };
+        if wordIs(operand, 1, "bool") { return clone(operand); };
+    };
+    id = operandLocal(operand, 0);
+    if id.ok { return HashMap::lookup(known, id.value, []); };
+    return [];
+};
+fn constantAt(known: &HashMap<Int,List<Token>>, row: &List<Token>, at: Int) -> List<Token> ~ {
+    return operandConstant(known, sliceTokens(row, at, operandEnd(row, at)));
+};
+fn constBool(value: Bool) -> List<Token> ~ {
+    text = "false"; if value { text = "true"; };
+    return push(push(push([], word("const")), word("bool")), word(text));
+};
+fn compareConstants(op: &String, left: &List<Token>, right: &List<Token>) -> List<Token> ~ {
+    if wordIs(left, 1, "bool") && wordIs(right, 1, "bool") {
+        equal = wordIs(left, 2, "true") = wordIs(right, 2, "true");
+        if op = "eq" { return constBool(equal); };
+        if op = "noteq" { return constBool(!equal); };
+    };
+    if !(wordIs(left, 1, "int") && wordIs(right, 1, "int")) { return []; };
+    a = textAt(left, 2); b = textAt(right, 2);
+    if op = "add" { return constInt(decimalAdd(&a, &b)); };
+    if op = "sub" { return constInt(decimalSub(&a, &b)); };
+    if op = "mul" { return constInt(decimalMul(&a, &b)); };
+    cmp = decimalCmp(&a, &b);
+    if op = "eq" { return constBool(cmp = 0); };
+    if op = "noteq" { return constBool(cmp != 0); };
+    if op = "lt" { return constBool(cmp < 0); };
+    if op = "lteq" { return constBool(cmp <= 0); };
+    if op = "gt" { return constBool(cmp > 0); };
+    if op = "gteq" { return constBool(cmp >= 0); };
+    return [];
+};
+fn packLength(row: &List<Token>, pack: Int) -> Bool ~ {
+    return wordIs(row, 2, "listop") && wordIs(row, 3, "length") && numberAt(row, 4) = 1 && operandIsLocal(row, 5, pack);
+};
+fn evaluateAssign(known: &HashMap<Int,List<Token>>, row: &List<Token>, pack: Int, count: Int) -> List<Token> ~ {
+    if wordIs(row, 2, "use") { return constantAt(known, row, 3); };
+    if wordIs(row, 2, "binary") {
+        left = constantAt(known, row, 4); right = constantAt(known, row, operandEnd(row, 4));
+        return compareConstants(textAt(row, 3), &left, &right);
+    };
+    if packLength(row, pack) { return constInt(String::fromInt(count)); };
+    return [];
+};
+fn emptyConstants() -> HashMap<Int, List<Token>> ~ { return HashMap::new(); };
+fn constantsOf(fun: &FullFunction, pack: Int, count: Int) -> HashMap<Int,List<Token>> ~ {
+    params = paramsOf(fun); borrowed = borrowedLocals(fun); counts = assignmentsOf(fun);
+    candidates = [];
+    for block in &fun.blocks {
+        for row in &block.lines {
+            if wordIs(row, 0, "assign") {
+                id = integerAt(row, 1).value;
+                if !HashSet::contains(&params, id) && !HashSet::contains(&borrowed, id) && HashMap::lookup(&counts, id, 0) = 1 {
+                    candidates = push(candidates, clone(row));
+                };
+            };
+        };
+    };
+    known = emptyConstants(); changed = true;
+    while changed ~ {
+        changed = false;
+        for row in &candidates {
+            id = integerAt(row, 1).value;
+            if !HashMap::contains(&known, id) {
+                value = evaluateAssign(&known, row, pack, count);
+                if size(value) > 0 { known = HashMap::insert(known, id, value); changed = true; };
+            };
+        };
+    };
+    return known;
+};
+
+struct PackBinding { block: Int, name: String, index: String };
+impl Clone for PackBinding { };
+struct PackResolved { fun: FullFunction, arena: List<AstNode>, bindings: List<PackBinding>, error: String };
+struct PackSpread { callee: String, lo: Int, hi: Int };
+impl Clone for PackSpread { };
+struct PackForwarded { fun: FullFunction, arena: List<AstNode>, spreads: HashMap<String,PackSpread>, error: String };
+
+struct PackRead { present: Bool, index: String, borrowTail: Int };
+fn fieldIndex(field: &String) -> String ~ {
+    if size(field.bytes) = 0 { return ""; };
+    for b in &field.bytes { if toInt(b) < 48 || toInt(b) > 57 { return ""; }; };
+    return decimalText(field);
+};
+fn indexAt(known: &HashMap<Int,List<Token>>, row: &List<Token>, at: Int) -> String ~ {
+    operand = constantAt(known, row, at);
+    if wordIs(&operand, 1, "int") { return textAt(&operand, 2); };
+    return "";
+};
+fn elementRead(row: &List<Token>, pack: Int, known: &HashMap<Int,List<Token>>) -> PackRead ~ {
+    plain = 0 - 1;
+    if wordIs(row, 2, "readfield") && operandIsLocal(row, 3, pack) && textAt(row, 5) = "$pack" {
+        index = fieldIndex(textAt(row, 6));
+        if index != "" { return PackRead { present: true, index: index, borrowTail: plain }; };
+    };
+    if wordIs(row, 2, "listop") && wordIs(row, 3, "get") && numberAt(row, 4) = 2 && operandIsLocal(row, 5, pack) {
+        return PackRead { present: true, index: indexAt(known, row, 7), borrowTail: plain };
+    };
+    if (wordIs(row, 2, "borrow") || wordIs(row, 2, "borrowmut")) && integerAt(row, 3).value = pack && numberAt(row, 4) > 0 {
+        if wordIs(row, 5, "field") && textAt(row, 6) = "$pack" {
+            index = fieldIndex(textAt(row, 7));
+            if index != "" { return PackRead { present: true, index: index, borrowTail: 8 }; };
+        };
+        if wordIs(row, 5, "index") {
+            return PackRead { present: true, index: indexAt(known, row, 6), borrowTail: operandEnd(row, 6) };
+        };
+    };
+    return PackRead { present: false, index: "", borrowTail: plain };
+};
+fn elementTypesOf(fun: &FullFunction, packType: &String) -> HashMap<Int,String> ~ {
+    types = HashMap::new(); prefix = clone(packType).concat("@");
+    for local in &fun.locals {
+        row = &local.tokens; at = 3;
+        if wordIs(row, 2, "some") { at = 4; };
+        if wordIs(row, at, "ref") || wordIs(row, at, "mutref") { at = at + 1; };
+        if wordIs(row, at, "param") {
+            typeName = textAt(row, at + 1);
+            if typeName.startsWith(&prefix) { types = HashMap::insert(types, integerAt(row, 1).value, typeName); };
+        };
+    };
+    return types;
+};
+struct PackCut { rows: List<List<Token>>, place: String };
+fn cutPlaces(rows: &List<List<Token>>, arena: &List<AstNode>) -> PackCut ~ {
+    kept = []; place = ""; prefix = "$pack read at ";
+    for row in rows {
+        mark = proofDefineName(arena, row);
+        if mark.ok && mark.value.startsWith(&prefix) {
+            place = " at line ".concat(mark.value.slice(size(prefix.bytes), size(mark.value.bytes)));
+        } else { kept = push(kept, clone(row)); };
+    };
+    return PackCut { rows: kept, place: place };
+};
+fn finishCut(rows: List<List<Token>>, ghosts: &List<List<Token>>) -> List<List<Token>> ~ {
+    for row in ghosts { rows = push(rows, clone(row)); };
+    return push(rows, push([], word("return")));
+};
+fn resolveElements(fun: FullFunction, arena: List<AstNode>, pack: Int, packName: &String, packType: &String, elements: &List<Int>) -> PackResolved ~ {
+    count = size(elements); known = constantsOf(&fun, pack, count);
+    borrowed = borrowedLocals(&fun); params = paramsOf(&fun); counts = assignmentsOf(&fun);
+    types = elementTypesOf(&fun, packType); renames = HashMap::new(); bindings = []; blocks = [];
+    for block in &fun.blocks {
+        rows = []; bound = []; at = 0;
+        while at < size(block.lines) ~ {
+            row = get(&block.lines, at); at = at + 1;
+            if !wordIs(row, 0, "assign") { rows = push(rows, clone(row)); } else {
+                dest = integerAt(row, 1).value;
+                read = elementRead(row, pack, &known);
+                if !read.present {
+                    if packLength(row, pack) {
+                        rows = push(rows, appendTokens(push(sliceTokens(row, 0, 2), word("use")), constInt(String::fromInt(count))));
+                    } else { rows = push(rows, clone(row)); };
+                } else {
+                    if read.index = "" {
+                        error = "internal compiler error: an index of the pack of ".concat(textAt(&fun.header, 1)).concat(" is not fixed in a copy");
+                        return PackResolved { fun: fun, arena: arena, bindings: [], error: error };
+                    };
+                    k = decimalFits(&read.index);
+                    if !k.ok || k.value < 0 || k.value >= count {
+                        cut = cutPlaces(&rows, &arena);
+                        ghosts = rangeGhosts(arena, packName, count, &cut.place, &read.index);
+                        arena = ghosts.arena; rows = finishCut(cut.rows, &ghosts.rows);
+                        at = size(block.lines);
+                    } else {
+                        typeName = HashMap::lookup(&types, dest, "");
+                        if typeName != "" { bound = push(bound, PackBinding { block: block.id, name: typeName, index: clone(read.index) }); };
+                        parameter = get(elements, k.value);
+                        if read.borrowTail >= 0 {
+                            head = push(push(sliceTokens(row, 0, 3), intToken(parameter)), intToken(numberAt(row, 4) - 1));
+                            rows = push(rows, appendTokens(head, sliceTokens(row, read.borrowTail, size(row))));
+                        } else {
+                            if dest != 0 && !HashSet::contains(&params, dest) && !HashSet::contains(&borrowed, dest) && HashMap::lookup(&counts, dest, 0) = 1 {
+                                renames = HashMap::insert(renames, dest, parameter);
+                            } else {
+                                op = "use"; if dest != 0 { op = "clone"; };
+                                head = push(push(sliceTokens(row, 0, 2), word(op)), word("copy"));
+                                rows = push(rows, push(head, intToken(parameter)));
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        for i in 0..size(bound) { bindings = push(bindings, clone(get(&bound, size(bound) - 1 - i))); };
+        blocks = push(blocks, FullBlock { id: block.id, lines: rows });
+    };
+    if renames.size() = 0 { return PackResolved { fun: FullFunction { blocks: blocks, ..fun }, arena: arena, bindings: bindings, error: "" }; };
+    noBlocks = HashMap::new(); rewritten = [];
+    for block in &blocks {
+        rows = [];
+        for row in &block.lines { rows = push(rows, renameRow(row, &renames, &noBlocks, 0, "")); };
+        rewritten = push(rewritten, FullBlock { id: block.id, lines: rows });
+    };
+    locals = []; loops = [];
+    for local in &fun.locals {
+        id = integerAt(&local.tokens, 1).value;
+        if !HashMap::contains(&renames, id) { locals = push(locals, clone(local)); };
+    };
+    for loop in &fun.loops {
+        loops = push(loops, FullRecord { name: clone(loop.name), tokens: renameRow(&loop.tokens, &renames, &noBlocks, 0, "") });
+    };
+    env = renameRow(&fun.env, &renames, &noBlocks, 0, "");
+    return PackResolved { fun: FullFunction { blocks: rewritten, locals: locals, loops: loops, env: env, ..fun }, arena: arena, bindings: bindings, error: "" };
+};
+
+fn firstPackArg(row: &List<Token>, countAt: Int, count: Int, pack: Int) -> Int ~ {
+    at = countAt + 1;
+    for i in 0..count {
+        if operandIsLocal(row, at, pack) {
+            if i + 2 < count { return at; };
+            return 0 - 1;
+        };
+        at = operandEnd(row, at);
+    };
+    return 0 - 1;
+};
+fn spreadForwards(fun: FullFunction, arena: List<AstNode>, pack: Int, packName: &String, elements: &List<Int>) -> PackForwarded ~ {
+    count = size(elements); countText = String::fromInt(count);
+    known = constantsOf(&fun, pack, count); spreads = HashMap::new(); blocks = [];
+    for block in &fun.blocks {
+        end = size(block.lines) - 1;
+        if end < 0 { blocks = push(blocks, clone(block)); } else {
+            row = get(&block.lines, end); at = 0 - 1; countAt = 0 - 1; n = 0;
+            if wordIs(row, 0, "call") {
+                countAt = operandEnd(row, 1); n = numberAt(row, countAt);
+                at = firstPackArg(row, countAt, n, pack);
+            };
+            if at < 0 { blocks = push(blocks, clone(block)); } else {
+                loAt = operandEnd(row, at); hiAt = operandEnd(row, loAt);
+                lo = indexAt(&known, row, loAt); hi = indexAt(&known, row, hiAt);
+                if lo = "" || hi = "" || !wordIs(row, 1, "const") || !wordIs(row, 2, "fn") {
+                    error = "internal compiler error: the part of the pack of ".concat(textAt(&fun.header, 1)).concat(" a call forwards is not fixed in a copy");
+                    return PackForwarded { fun: fun, arena: arena, spreads: HashMap::new(), error: error };
+                };
+                rows = [];
+                for i in 0..end { rows = push(rows, clone(get(&block.lines, i))); };
+                if decimalCmp(&lo, "0") < 0 || decimalCmp(&lo, &hi) > 0 || decimalCmp(&hi, &countText) > 0 {
+                    cut = cutPlaces(&rows, &arena);
+                    ghosts = sliceGhosts(arena, packName, count, &cut.place, &lo, &hi);
+                    arena = ghosts.arena; rows = finishCut(cut.rows, &ghosts.rows);
+                } else {
+                    low = decimalFits(&lo).value; high = decimalFits(&hi).value; callee = textAt(row, 3);
+                    spread = clone(callee).concat(" spread ").concat(&lo).concat(" ").concat(&hi);
+                    call = push(push(sliceTokens(row, 0, 3), name(clone(spread))), intToken(n - 3 + high - low));
+                    call = appendTokens(call, sliceTokens(row, countAt + 1, at));
+                    for k in low..high { call = push(push(call, word(textAt(row, at))), intToken(get(elements, k))); };
+                    rows = push(rows, appendTokens(call, sliceTokens(row, operandEnd(row, hiAt), size(row))));
+                    spreads = HashMap::insert(spreads, spread, PackSpread { callee: callee, lo: low, hi: high });
+                };
+                blocks = push(blocks, FullBlock { id: block.id, lines: rows });
+            };
+        };
+    };
+    return PackForwarded { fun: FullFunction { blocks: blocks, ..fun }, arena: arena, spreads: spreads, error: "" };
+};

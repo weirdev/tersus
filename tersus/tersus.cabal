@@ -34,6 +34,10 @@ extra-source-files:
     lib/mir/link/link.tersus
     lib/mir/link/merge.tersus
     lib/mir/link/prune.tersus
+    dev/mir-packs/expand.tersus
+    dev/mir-packs/body.tersus
+    dev/mir-packs/proofs.tersus
+    dev/mir-packs/numbers.tersus
     lib/mir/emit/emit.tersus
     lib/mir/emit/types.tersus
     lib/mir/emit/values.tersus
@@ -369,6 +373,7 @@ test-suite tersus-test
       TestMirMono
       TestMirMonoOwnership
       TestMirOwnership
+      TestMirPacks
       TestMirReader
       TestMirSupport
       TestMirVerify

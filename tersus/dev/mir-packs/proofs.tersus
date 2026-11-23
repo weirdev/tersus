@@ -1,0 +1,944 @@
+import data::ast::ast { AstBody, AstBuiltin, AstExpression, AstExpressions, AstName, AstNames, AstNode, AstOptName, AstOptTermination, AstProof, AstProofs, AstRule, AstStatement, AstStatements, AstTermination, AstValidation, AstValidations, AstValue };
+import data::codec::codec { Parsed, Token };
+import data::reader::reader { nameValue, validDecimal };
+import mir::full::full { FullBlock, FullFunction, FullRecord };
+import mir::full::records { EnvEntry, envStart, envEnd, envEntries, envTokens, keyOrder, listItems, mergeEntries, nodeAt, orderEntries, replaceEnv, statementAt };
+import mir::full::tokens { appendTokens, decimalText, integerAt, intToken, textAt, word, wordIs };
+import mir::pack::numbers { decimalAdd, decimalCmp, decimalMul, decimalSub };
+
+struct PackPayload { arena: List<AstNode>, id: Int };
+struct PackGhosts { arena: List<AstNode>, rows: List<List<Token>> };
+struct PackProofResult { fun: FullFunction, arena: List<AstNode>, error: String };
+
+struct ProofContext {
+    packName: String, packType: String, count: Int, countText: String,
+    names: HashMap<String, String>, defines: HashMap<String, String>, place: String
+};
+impl Clone for ProofContext { };
+
+enum PackTerm {
+    Atom { n: Int }, Bound { n: Int }, Constant { v: Int }, Call { f: Int, xs: Int },
+    Quantifier { n: Int, gs: Int, b: Int }, Other
+};
+
+fn addPayload(arena: List<AstNode>, node: AstNode) -> PackPayload ~ {
+    id = size(arena);
+    return PackPayload { arena: push(arena, node), id: id };
+};
+fn addName(arena: List<AstNode>, text: String) -> PackPayload ~ {
+    end = size(arena);
+    arena = push(arena, AstNode::Name { value: AstName::End });
+    if text = "" { return PackPayload { arena: arena, id: end }; };
+    length = size(text.bytes);
+    if length <= 512 { return addPayload(arena, AstNode::Name { value: AstName::Part { text: text, tail: end } }); };
+    // The AST codec chunks names at 512 characters, not bytes.
+    starts = push([], 0); chars = 0;
+    for i in 0..length {
+        b = toInt(get(text.bytes, i));
+        if b < 128 || b >= 192 {
+            if chars = 512 { starts = push(starts, i); chars = 0; };
+            chars = chars + 1;
+        };
+    };
+    tail = end; stop = length;
+    for i in 0..size(starts) {
+        start = get(&starts, size(starts) - i - 1); next = size(arena);
+        arena = push(arena, AstNode::Name { value: AstName::Part { text: text.slice(start, stop), tail: tail } });
+        tail = next; stop = start;
+    };
+    return keepPayload(arena, tail);
+};
+fn keepPayload(arena: List<AstNode>, id: Int) -> PackPayload ~ { return PackPayload { arena: arena, id: id }; };
+fn addAtom(arena: List<AstNode>, text: String, proof: Bool) -> PackPayload ~ {
+    n = addName(arena, text);
+    if proof { return addPayload(n.arena, AstNode::Proof { value: AstProof::ATerm { n: n.id } }); };
+    return addPayload(n.arena, AstNode::Expression { value: AstExpression::Var { n: n.id } });
+};
+fn addNumber(arena: List<AstNode>, text: String, proof: Bool) -> PackPayload ~ {
+    n = addName(arena, text);
+    v = addPayload(n.arena, AstNode::Value { value: AstValue::VInt { n: n.id } });
+    if proof { return addPayload(v.arena, AstNode::Proof { value: AstProof::CTerm { v: v.id } }); };
+    return addPayload(v.arena, AstNode::Expression { value: AstExpression::Val { v: v.id } });
+};
+fn termView(arena: &List<AstNode>, id: Int) -> PackTerm ~ {
+    node = nodeAt(arena, id);
+    if node is AstNode::Proof {
+        match (node as AstNode::Proof).value {
+            AstProof::ATerm { n: n } => { return PackTerm::Atom { n: n }; },
+            AstProof::BVar { n: n } => { return PackTerm::Bound { n: n }; },
+            AstProof::CTerm { v: v } => { return PackTerm::Constant { v: v }; },
+            AstProof::FApp { f: f, xs: xs } => { return PackTerm::Call { f: f, xs: xs }; },
+            AstProof::Forall { n: n, gs: gs, b: b } => { return PackTerm::Quantifier { n: n, gs: gs, b: b }; },
+        };
+    };
+    if node is AstNode::Expression {
+        match (node as AstNode::Expression).value {
+            AstExpression::Var { n: n } => { return PackTerm::Atom { n: n }; },
+            AstExpression::Val { v: v } => { return PackTerm::Constant { v: v }; },
+            AstExpression::F { f: f, xs: xs } => { return PackTerm::Call { f: f, xs: xs }; },
+            AstExpression::IfExpr { c: c, a: a, b: b } => { },
+            AstExpression::BlockExpr { xs: xs, e: e } => { },
+            AstExpression::Ascribed { e: e, ty: ty } => { },
+        };
+    };
+    return PackTerm::Other;
+};
+fn withoutAscription(arena: &List<AstNode>, id: Int) -> Int ~ {
+    node = nodeAt(arena, id);
+    if node is AstNode::Expression {
+        e = (node as AstNode::Expression).value;
+        if e is AstExpression::Ascribed { return withoutAscription(arena, (e as AstExpression::Ascribed).e); };
+    };
+    return id;
+};
+fn termItems(arena: &List<AstNode>, id: Int) -> List<Int> ~ {
+    out = [];
+    while id >= 0 && id < size(arena) [{ }] ~ {
+        node = nodeAt(arena, id);
+        if node is AstNode::Proofs {
+            xs = (node as AstNode::Proofs).value;
+            if xs is AstProofs::End { return out; };
+            c = xs as AstProofs::Cons;
+            out = push(out, c.head); id = c.tail;
+        } else {
+            if !(node is AstNode::Expressions) { return out; };
+            xs = (node as AstNode::Expressions).value;
+            if xs is AstExpressions::End { return out; };
+            c = xs as AstExpressions::Cons;
+            out = push(out, c.head); id = c.tail;
+        };
+    };
+    return out;
+};
+fn addTermList(arena: List<AstNode>, xs: &List<Int>, proof: Bool) -> PackPayload ~ {
+    tail = size(arena);
+    if proof { arena = push(arena, AstNode::Proofs { value: AstProofs::End }); }
+    else { arena = push(arena, AstNode::Expressions { value: AstExpressions::End }); };
+    for i in 0..size(xs) {
+        head = get(xs, size(xs) - i - 1); next = size(arena);
+        if proof { arena = push(arena, AstNode::Proofs { value: AstProofs::Cons { head: head, tail: tail } }); }
+        else { arena = push(arena, AstNode::Expressions { value: AstExpressions::Cons { head: head, tail: tail } }); };
+        tail = next;
+    };
+    return keepPayload(arena, tail);
+};
+fn addCall(arena: List<AstNode>, f: Int, xs: Int, proof: Bool) -> PackPayload ~ {
+    if proof { return addPayload(arena, AstNode::Proof { value: AstProof::FApp { f: f, xs: xs } }); };
+    return addPayload(arena, AstNode::Expression { value: AstExpression::F { f: f, xs: xs } });
+};
+fn atomNamed(arena: &List<AstNode>, id: Int, text: &String) -> Bool ~ {
+    t = termView(arena, id);
+    return t is PackTerm::Atom && nameValue(arena, (t as PackTerm::Atom).n) = text;
+};
+fn builtinId(arena: &List<AstNode>, id: Int) -> Int ~ {
+    t = termView(arena, id);
+    if !(t is PackTerm::Constant) { return -1; };
+    value = nodeAt(arena, (t as PackTerm::Constant).v);
+    if !(value is AstNode::Value) { return -1; };
+    v = (value as AstNode::Value).value;
+    if !(v is AstValue::VFunct) { return -1; };
+    body = nodeAt(arena, (v as AstValue::VFunct).body);
+    if !(body is AstNode::Body) { return -1; };
+    b = (body as AstNode::Body).value;
+    if !(b is AstBody::BuiltinFunct) { return -1; };
+    return (b as AstBody::BuiltinFunct).b;
+};
+fn primitiveAt(arena: &List<AstNode>, id: Int) -> String ~ {
+    node = nodeAt(arena, builtinId(arena, id));
+    if node is AstNode::Builtin {
+        b = (node as AstNode::Builtin).value;
+        if b is AstBuiltin::Primitive { return (b as AstBuiltin::Primitive).name; };
+    };
+    return "";
+};
+fn isGet(arena: &List<AstNode>, id: Int) -> Bool ~ {
+    return atomNamed(arena, id, "get") || primitiveAt(arena, id) = "Get";
+};
+fn isSize(arena: &List<AstNode>, id: Int) -> Bool ~ {
+    return atomNamed(arena, id, "size") || primitiveAt(arena, id) = "Size";
+};
+fn relationAt(arena: &List<AstNode>, id: Int) -> Int ~ {
+    node = nodeAt(arena, builtinId(arena, id));
+    if node is AstNode::Builtin {
+        b = (node as AstNode::Builtin).value;
+        if b is AstBuiltin::Rel { return (b as AstBuiltin::Rel).r; };
+    };
+    return -1;
+};
+fn fieldIndex(arena: &List<AstNode>, id: Int) -> String ~ {
+    node = nodeAt(arena, builtinId(arena, id));
+    if !(node is AstNode::Builtin) { return ""; };
+    b = (node as AstNode::Builtin).value;
+    if !(b is AstBuiltin::FieldBuiltin) { return ""; };
+    f = b as AstBuiltin::FieldBuiltin;
+    owner = nodeAt(arena, f.owner);
+    if !(owner is AstNode::OptName) { return ""; };
+    opt = (owner as AstNode::OptName).value;
+    if !(opt is AstOptName::SomeName) || nameValue(arena, (opt as AstOptName::SomeName).n) != "$pack" { return ""; };
+    field = nameValue(arena, f.n);
+    if !validDecimal(&field) || field.startsWith("-") { return ""; };
+    return decimalText(&field);
+};
+fn foldProof(x: &ProofContext, arena: &List<AstNode>, id: Int) -> String ~ {
+    t = termView(arena, withoutAscription(arena, id));
+    if t is PackTerm::Constant {
+        node = nodeAt(arena, (t as PackTerm::Constant).v);
+        if node is AstNode::Value {
+            v = (node as AstNode::Value).value;
+            if v is AstValue::VInt { return decimalText(nameValue(arena, (v as AstValue::VInt).n)); };
+        };
+    };
+    if t is PackTerm::Atom { return HashMap::lookup(&x.names, nameValue(arena, (t as PackTerm::Atom).n), ""); };
+    if t is PackTerm::Bound { return HashMap::lookup(&x.names, nameValue(arena, (t as PackTerm::Bound).n), ""); };
+    if t is PackTerm::Call {
+        call = t as PackTerm::Call;
+        f = withoutAscription(arena, call.f);
+        xs = termItems(arena, call.xs);
+        if size(xs) = 1 && isSize(arena, f) && atomNamed(arena, withoutAscription(arena, get(&xs, 0)), &x.packName) { return clone(x.countText); };
+        if size(xs) = 2 {
+            op = primitiveAt(arena, f);
+            if op = "Plus" || op = "Minus" || op = "Times" {
+                a = foldProof(x, arena, get(&xs, 0));
+                b = foldProof(x, arena, get(&xs, 1));
+                if a = "" || b = "" { return ""; };
+                if op = "Plus" { return decimalAdd(&a, &b); };
+                if op = "Minus" { return decimalSub(&a, &b); };
+                return decimalMul(&a, &b);
+            };
+        };
+    };
+    return "";
+};
+fn inRange(x: &ProofContext, k: &String) -> Bool ~ {
+    return decimalCmp(k, "0") >= 0 && decimalCmp(k, &x.countText) < 0;
+};
+fn definedElement(x: &ProofContext, arena: &List<AstNode>, id: Int, proof: Bool) -> String ~ {
+    t = termView(arena, id);
+    if !(t is PackTerm::Call) { return ""; };
+    call = t as PackTerm::Call; xs = termItems(arena, call.xs);
+    if size(xs) < 1 || !atomNamed(arena, get(&xs, 0), &x.packName) { return ""; };
+    if !proof && size(xs) = 1 { return fieldIndex(arena, call.f); };
+    if size(xs) = 2 && isGet(arena, call.f) { return foldProof(x, arena, get(&xs, 1)); };
+    return "";
+};
+fn definedOutOfRange(x: &ProofContext, arena: &List<AstNode>, id: Int) -> String ~ {
+    t = termView(arena, withoutAscription(arena, id));
+    if t is PackTerm::Atom {
+        k = HashMap::lookup(&x.defines, nameValue(arena, (t as PackTerm::Atom).n), "");
+        if k != "" && !inRange(x, &k) { return k; };
+    };
+    if t is PackTerm::Call {
+        call = t as PackTerm::Call;
+        k = definedOutOfRange(x, arena, call.f);
+        if k != "" { return k; };
+        for a in termItems(arena, call.xs) {
+            k = definedOutOfRange(x, arena, a);
+            if k != "" { return k; };
+        };
+    };
+    if t is PackTerm::Quantifier {
+        q = t as PackTerm::Quantifier;
+        k = definedOutOfRange(x, arena, q.b);
+        if k != "" { return k; };
+        for g in termItems(arena, q.gs) {
+            k = definedOutOfRange(x, arena, g);
+            if k != "" { return k; };
+        };
+    };
+    return "";
+};
+
+fn rewriteVariables(arena: List<AstNode>, id: Int, proof: Bool, names: &HashMap<String, String>, substitute: Bool, binder: &String, k: &String) -> PackPayload ~ {
+    t = termView(&arena, id);
+    if t is PackTerm::Atom {
+        old = nameValue(&arena, (t as PackTerm::Atom).n);
+        if substitute && old = binder { return addNumber(arena, clone(k), true); };
+        if !substitute {
+            newName = HashMap::lookup(names, &old, clone(old));
+            if old != newName { return addAtom(arena, newName, proof); };
+        };
+    };
+    if substitute && t is PackTerm::Bound && nameValue(&arena, (t as PackTerm::Bound).n) = binder {
+        return addNumber(arena, clone(k), true);
+    };
+    if t is PackTerm::Call {
+        call = t as PackTerm::Call;
+        f = rewriteVariables(arena, call.f, proof, names, substitute, binder, k);
+        fId = f.id;
+        xs = rewriteVariablesList(f.arena, call.xs, proof, names, substitute, binder, k);
+        if fId = call.f && xs.id = call.xs { return keepPayload(xs.arena, id); };
+        return addCall(xs.arena, fId, xs.id, proof);
+    };
+    if t is PackTerm::Quantifier {
+        q = t as PackTerm::Quantifier;
+        if substitute && nameValue(&arena, q.n) = binder { return keepPayload(arena, id); };
+        gs = rewriteVariablesList(arena, q.gs, true, names, substitute, binder, k);
+        gsId = gs.id;
+        b = rewriteVariables(gs.arena, q.b, true, names, substitute, binder, k);
+        if gsId = q.gs && b.id = q.b { return keepPayload(b.arena, id); };
+        return addPayload(b.arena, AstNode::Proof { value: AstProof::Forall { n: q.n, gs: gsId, b: b.id } });
+    };
+    return keepPayload(arena, id);
+};
+fn rewriteVariablesList(arena: List<AstNode>, id: Int, proof: Bool, names: &HashMap<String, String>, substitute: Bool, binder: &String, k: &String) -> PackPayload ~ {
+    old = termItems(&arena, id);
+    items = [];
+    for a in &old {
+        r = rewriteVariables(arena, a, proof, names, substitute, binder, k);
+        items = push(items, r.id); arena = r.arena;
+    };
+    if old = items { return keepPayload(arena, id); };
+    return addTermList(arena, &items, proof);
+};
+fn validationAt(arena: &List<AstNode>, id: Int) -> Int ~ {
+    s = statementAt(arena, id);
+    if s is AstStatement::ValidationStatement { return (s as AstStatement::ValidationStatement).v; };
+    return -1;
+};
+fn addValidation(arena: List<AstNode>, v: AstValidation) -> PackPayload ~ {
+    r = addPayload(arena, AstNode::Validation { value: v });
+    return addPayload(r.arena, AstNode::Statement { value: AstStatement::ValidationStatement { v: r.id } });
+};
+fn addRule(arena: List<AstNode>, rule: AstRule) -> PackPayload ~ {
+    r = addPayload(arena, AstNode::Rule { value: rule });
+    return addValidation(r.arena, AstValidation::Rewrite { r: r.id });
+};
+fn unaryRuleTerm(rule: &AstRule) -> Int ~ {
+    if rule is AstRule::Refl { return (rule as AstRule::Refl).p; };
+    if rule is AstRule::CheckGtZero { return (rule as AstRule::CheckGtZero).p; };
+    if rule is AstRule::CheckRel { return (rule as AstRule::CheckRel).p; };
+    return -1;
+};
+fn unaryRuleWith(rule: &AstRule, p: Int) -> AstRule ~ {
+    if rule is AstRule::Refl { return AstRule::Refl { p: p }; };
+    if rule is AstRule::CheckGtZero { return AstRule::CheckGtZero { p: p }; };
+    return AstRule::CheckRel { p: p };
+};
+fn proofOf(v: &AstValidation) -> Int ~ {
+    if v is AstValidation::ProofAssert { return (v as AstValidation::ProofAssert).p; };
+    if v is AstValidation::Assume { return (v as AstValidation::Assume).p; };
+    return -1;
+};
+fn proofWith(v: &AstValidation, p: Int) -> AstValidation ~ {
+    if v is AstValidation::ProofAssert { return AstValidation::ProofAssert { p: p }; };
+    return AstValidation::Assume { p: p };
+};
+fn renameValidationPayload(arena: List<AstNode>, id: Int, targets: &HashMap<String, String>, uses: &HashMap<String, String>) -> PackPayload ~ {
+    node = nodeAt(&arena, validationAt(&arena, id));
+    if !(node is AstNode::Validation) { return keepPayload(arena, id); };
+    v = (node as AstNode::Validation).value;
+    p = proofOf(&v);
+    if p >= 0 {
+        r = rewriteVariables(arena, p, true, uses, false, "", "");
+        if r.id = p { return keepPayload(r.arena, id); };
+        return addValidation(r.arena, proofWith(&v, r.id));
+    };
+    if v is AstValidation::AssignProofVar {
+        d = v as AstValidation::AssignProofVar;
+        old = nameValue(&arena, d.n);
+        newName = HashMap::lookup(targets, &old, clone(old));
+        r = rewriteVariables(arena, d.e, false, uses, false, "", "");
+        if old = newName {
+            if d.e = r.id { return keepPayload(r.arena, id); };
+            return addValidation(r.arena, AstValidation::AssignProofVar { n: d.n, e: r.id });
+        };
+        e = r.id; n = addName(r.arena, newName);
+        return addValidation(n.arena, AstValidation::AssignProofVar { n: n.id, e: e });
+    };
+    if v is AstValidation::Rewrite {
+        node = nodeAt(&arena, (v as AstValidation::Rewrite).r);
+        if node is AstNode::Rule {
+            rule = (node as AstNode::Rule).value;
+            p = unaryRuleTerm(&rule);
+            if p >= 0 {
+                r = rewriteVariables(arena, p, true, uses, false, "", "");
+                if r.id = p { return keepPayload(r.arena, id); };
+                return addRule(r.arena, unaryRuleWith(&rule, r.id));
+            };
+            if rule is AstRule::UserRewrite {
+                u = rule as AstRule::UserRewrite;
+                r = rewriteVariablesList(arena, u.xs, true, uses, false, "", "");
+                if r.id = u.xs { return keepPayload(r.arena, id); };
+                return addRule(r.arena, AstRule::UserRewrite { n: u.n, xs: r.id });
+            };
+        };
+    };
+    return keepPayload(arena, id);
+};
+fn addValidationBlock(arena: List<AstNode>, ids: &List<Int>) -> PackPayload ~ {
+    tail = size(arena);
+    arena = push(arena, AstNode::Statements { value: AstStatements::End });
+    for i in 0..size(ids) {
+        head = get(ids, size(ids) - i - 1); next = size(arena);
+        arena = push(arena, AstNode::Statements { value: AstStatements::Cons { head: head, tail: tail } });
+        tail = next;
+    };
+    return addPayload(arena, AstNode::Statement { value: AstStatement::Block { xs: tail } });
+};
+fn renameInvariantPayload(arena: List<AstNode>, id: Int, uses: &HashMap<String, String>) -> PackPayload ~ {
+    stmt = statementAt(&arena, id);
+    if !(stmt is AstStatement::Block) { return keepPayload(arena, id); };
+    old = listItems(&arena, (stmt as AstStatement::Block).xs); ids = [];
+    for v in &old {
+        r = renameValidationPayload(arena, v, uses, uses);
+        ids = push(ids, r.id); arena = r.arena;
+    };
+    if old = ids { return keepPayload(arena, id); };
+    return addValidationBlock(arena, &ids);
+};
+fn renameTerminationPayload(arena: List<AstNode>, id: Int, uses: &HashMap<String, String>) -> PackPayload ~ {
+    stmt = statementAt(&arena, id);
+    if !(stmt is AstStatement::While) { return keepPayload(arena, id); };
+    w = stmt as AstStatement::While;
+    opt = nodeAt(&arena, w.t);
+    if !(opt is AstNode::OptTermination) { return keepPayload(arena, id); };
+    t = (opt as AstNode::OptTermination).value;
+    if !(t is AstOptTermination::SomeTermination) { return keepPayload(arena, id); };
+    node = nodeAt(&arena, (t as AstOptTermination::SomeTermination).t);
+    if !(node is AstNode::Termination) { return keepPayload(arena, id); };
+    term = (node as AstNode::Termination).value; e = -1;
+    match term {
+        AstTermination::Shrinks { e: ex } => { e = ex; },
+        AstTermination::Counting { e: ex } => { e = ex; },
+        AstTermination::Parts { e: ex } => { e = ex; },
+        AstTermination::MayDiverge => { },
+        AstTermination::Recursing { t: t } => { },
+    };
+    if e < 0 { return keepPayload(arena, id); };
+    r = rewriteVariables(arena, e, false, uses, false, "", "");
+    if r.id = e { return keepPayload(r.arena, id); };
+    newTerm = AstTermination::Parts { e: r.id };
+    if term is AstTermination::Shrinks { newTerm = AstTermination::Shrinks { e: r.id }; };
+    if term is AstTermination::Counting { newTerm = AstTermination::Counting { e: r.id }; };
+    r = addPayload(r.arena, AstNode::Termination { value: newTerm });
+    r = addPayload(r.arena, AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: r.id } });
+    return addPayload(r.arena, AstNode::Statement { value: AstStatement::While { e: w.e, vs: w.vs, t: r.id, xs: w.xs } });
+};
+
+fn boundName(x: &ProofContext, old: &String, k: &String) -> String ~ {
+    prefix = "<$param ".concat(&x.packType).concat("@");
+    if !old.startsWith(&prefix) { return ""; };
+    start = size(prefix.bytes); at = start;
+    while at < size(old.bytes) && toInt(get(old.bytes, at)) >= 48 && toInt(get(old.bytes, at)) <= 57 [{ }] ~ {
+        at = at + 1;
+    };
+    if at = start { return ""; };
+    rest = old.slice(at, size(old.bytes));
+    if !rest.startsWith(" as ") { return ""; };
+    return "<$param ".concat(&x.packType).concat("#").concat(k).concat(&rest);
+};
+fn boundCallee(x: &ProofContext, arena: &List<AstNode>, f: Int, xs: &List<Int>, proof: Bool) -> String ~ {
+    t = termView(arena, f);
+    if !(t is PackTerm::Atom) || size(xs) = 0 { return ""; };
+    old = nameValue(arena, (t as PackTerm::Atom).n);
+    argId = get(xs, 0);
+    arg = termView(arena, argId);
+    if proof && arg is PackTerm::Atom {
+        k = HashMap::lookup(&x.defines, nameValue(arena, (arg as PackTerm::Atom).n), "");
+        if k != "" && inRange(x, &k) { return boundName(x, &old, &k); };
+    };
+    k = definedElement(x, arena, argId, proof);
+    if k != "" { return boundName(x, &old, &k); };
+    return "";
+};
+fn notFixed(x: &ProofContext) -> String ~ {
+    return "Type error: get(".concat(&x.packName).concat(", i) in a contract or a validation statement needs an index fixed in each copy (numbers, size(").concat(&x.packName).concat("), the index of a forall over ").concat(&x.packName).concat(", and + - * of those)");
+};
+
+struct PackTerms { arena: List<AstNode>, id: Int, outside: String, error: String };
+
+fn termSuccess(arena: List<AstNode>, id: Int) -> PackTerms ~ {
+    return PackTerms { arena: arena, id: id, outside: "", error: "" };
+};
+fn termOutside(arena: List<AstNode>, k: String) -> PackTerms ~ {
+    return PackTerms { arena: arena, id: -1, outside: k, error: "" };
+};
+fn elementTerm(x: &ProofContext, arena: List<AstNode>, k: String, proof: Bool) -> PackTerms ~ {
+    if k = "" { return PackTerms { arena: arena, id: -1, outside: "", error: notFixed(x) }; };
+    if !inRange(x, &k) { return termOutside(arena, k); };
+    name = clone(x.packName).concat(" ").concat(&k);
+    r = addAtom(arena, name, proof);
+    return termSuccess(r.arena, r.id);
+};
+fn rewriteTerm(x: &ProofContext, arena: List<AstNode>, id: Int, proof: Bool) -> PackTerms ~ {
+    t = termView(&arena, id);
+    if t is PackTerm::Call {
+        c = t as PackTerm::Call;
+        xs = termItems(&arena, c.xs);
+        if size(xs) > 0 && atomNamed(&arena, get(&xs, 0), &x.packName) {
+            if size(xs) = 1 && isSize(&arena, c.f) {
+                r = addNumber(arena, clone(x.countText), proof);
+                return termSuccess(r.arena, r.id);
+            };
+            if size(xs) = 1 && !proof {
+                k = fieldIndex(&arena, c.f);
+                if k != "" { return elementTerm(x, arena, k, false); };
+            };
+            if size(xs) = 2 && isGet(&arena, c.f) {
+                k = foldProof(x, &arena, get(&xs, 1));
+                return elementTerm(x, arena, k, proof);
+            };
+        };
+        renamed = boundCallee(x, &arena, c.f, &xs, proof);
+        f = termSuccess(arena, c.f);
+        if renamed != "" {
+            p = addAtom(f.arena, renamed, proof);
+            f = termSuccess(p.arena, p.id);
+        } else { f = rewriteTerm(x, f.arena, c.f, proof); };
+        if f.error != "" { return f; };
+        fId = f.id; fOutside = f.outside;
+        args = rewriteTerms(x, f.arena, c.xs, proof);
+        if args.error != "" { return args; };
+        if fOutside != "" { return termOutside(args.arena, fOutside); };
+        if args.outside != "" { return args; };
+        if fId = c.f && args.id = c.xs { return termSuccess(args.arena, id); };
+        r = addCall(args.arena, fId, args.id, proof);
+        return termSuccess(r.arena, r.id);
+    };
+    if t is PackTerm::Quantifier {
+        q = t as PackTerm::Quantifier;
+        gs = rewriteTerms(x, arena, q.gs, true);
+        if gs.error != "" { return gs; };
+        gsId = gs.id; gsOutside = gs.outside;
+        b = rewriteTerm(x, gs.arena, q.b, true);
+        if b.error != "" { return b; };
+        if gsOutside != "" { return termOutside(b.arena, gsOutside); };
+        if b.outside != "" { return b; };
+        if gsId = q.gs && b.id = q.b { return termSuccess(b.arena, id); };
+        r = addPayload(b.arena, AstNode::Proof { value: AstProof::Forall { n: q.n, gs: gsId, b: b.id } });
+        return termSuccess(r.arena, r.id);
+    };
+    return termSuccess(arena, id);
+};
+fn rewriteTerms(x: &ProofContext, arena: List<AstNode>, id: Int, proof: Bool) -> PackTerms ~ {
+    old = termItems(&arena, id); items = []; outside = "";
+    // A later Type error takes precedence over an earlier out-of-range index.
+    for a in &old {
+        r = rewriteTerm(x, arena, a, proof);
+        if r.error != "" { return r; };
+        if outside = "" { outside = r.outside; };
+        items = push(items, r.id); arena = r.arena;
+    };
+    if outside != "" { return termOutside(arena, outside); };
+    if old = items { return termSuccess(arena, id); };
+    r = addTermList(arena, &items, proof);
+    return termSuccess(r.arena, r.id);
+};
+fn defineIndex(x: &ProofContext, arena: List<AstNode>, e: Int) -> PackTerms ~ {
+    k = definedElement(x, &arena, e, false);
+    if k != "" { return termOutside(arena, k); };
+    k = definedOutOfRange(x, &arena, e);
+    if k != "" { return termOutside(arena, k); };
+    return rewriteTerm(x, arena, e, false);
+};
+fn isIndex(arena: &List<AstNode>, id: Int, binder: &String) -> Bool ~ {
+    t = termView(arena, id);
+    if t is PackTerm::Bound { return nameValue(arena, (t as PackTerm::Bound).n) = binder; };
+    if t is PackTerm::Atom { return nameValue(arena, (t as PackTerm::Atom).n) = binder; };
+    return false;
+};
+fn mentions(arena: &List<AstNode>, id: Int, binder: &String) -> Bool ~ {
+    if isIndex(arena, id, binder) { return true; };
+    t = termView(arena, id);
+    if t is PackTerm::Call {
+        c = t as PackTerm::Call;
+        if mentions(arena, c.f, binder) { return true; };
+        for a in termItems(arena, c.xs) { if mentions(arena, a, binder) { return true; }; };
+    };
+    return false;
+};
+fn mentionsIndex(x: &ProofContext, arena: &List<AstNode>, id: Int, binder: &String) -> Bool ~ {
+    t = termView(arena, id);
+    if t is PackTerm::Call {
+        c = t as PackTerm::Call;
+        xs = termItems(arena, c.xs);
+        if size(xs) = 2 && atomNamed(arena, get(&xs, 0), &x.packName) && isGet(arena, c.f) {
+            e = get(&xs, 1);
+            return mentions(arena, e, binder) || mentionsIndex(x, arena, e, binder);
+        };
+        if mentionsIndex(x, arena, c.f, binder) { return true; };
+        for a in &xs { if mentionsIndex(x, arena, a, binder) { return true; }; };
+    };
+    if t is PackTerm::Quantifier {
+        q = t as PackTerm::Quantifier;
+        for g in termItems(arena, q.gs) { if mentionsIndex(x, arena, g, binder) { return true; }; };
+        return mentionsIndex(x, arena, q.b, binder);
+    };
+    return false;
+};
+fn guardBound(arena: &List<AstNode>, guards: &List<Int>, binder: &String, rel: Int, indexAt: Int) -> Int ~ {
+    for g in guards {
+        t = termView(arena, g);
+        if t is PackTerm::Call {
+            c = t as PackTerm::Call;
+            if relationAt(arena, c.f) = rel {
+                xs = termItems(arena, c.xs);
+                if size(xs) = 2 && isIndex(arena, get(&xs, indexAt), binder) { return get(&xs, 1 - indexAt); };
+            };
+        };
+    };
+    return -1;
+};
+
+struct PackFact { arena: List<AstNode>, id: Int, entries: List<EnvEntry> };
+struct PackValidation { id: Int, entries: List<EnvEntry> };
+struct PackValidations { arena: List<AstNode>, items: List<PackValidation>, error: String };
+
+fn relCall(arena: List<AstNode>, rel: Int, left: Int, right: Int) -> PackPayload ~ {
+    emptyNames = size(arena);
+    arena = push(arena, AstNode::Names { value: AstNames::End });
+    b = addName(arena, "b"); bName = b.id; bTail = size(b.arena);
+    arena = push(b.arena, AstNode::Names { value: AstNames::Cons { head: bName, tail: emptyNames } });
+    a = addName(arena, "a"); aName = a.id; params = size(a.arena);
+    arena = push(a.arena, AstNode::Names { value: AstNames::Cons { head: aName, tail: bTail } });
+    builtinId = size(arena);
+    arena = push(arena, AstNode::Builtin { value: AstBuiltin::Rel { r: rel } });
+    body = size(arena);
+    arena = push(arena, AstNode::Body { value: AstBody::BuiltinFunct { b: builtinId } });
+    ins = size(arena);
+    arena = push(arena, AstNode::Validations { value: AstValidations::End });
+    outs = size(arena);
+    arena = push(arena, AstNode::Validations { value: AstValidations::End });
+    exports = size(arena);
+    arena = push(arena, AstNode::Proofs { value: AstProofs::End });
+    n = size(arena);
+    arena = push(arena, AstNode::Value { value: AstValue::VFunct { ps: params, ins: ins, outs: outs, body: body, exports: exports } });
+    f = size(arena);
+    arena = push(arena, AstNode::Proof { value: AstProof::CTerm { v: n } });
+    xs = push(push([], left), right);
+    list = addTermList(arena, &xs, true);
+    return addCall(list.arena, f, list.id, true);
+};
+fn intEntry(name: String, text: String) -> EnvEntry ~ {
+    value = push(push(push([], word("const")), word("int")), word(text));
+    return EnvEntry { name: name, value: value };
+};
+fn argumentCountName(count: Int) -> String ~ {
+    text = String::fromInt(count);
+    if count = 1 { return text.concat(" argument"); };
+    return text.concat(" arguments");
+};
+fn rangeFact(arena: List<AstNode>, packName: &String, count: Int, place: &String, index: &String) -> PackFact ~ {
+    k = decimalText(index);
+    indexName = "the index ".concat(&k).concat(" of get(").concat(packName).concat(", ...)").concat(place);
+    countName = argumentCountName(count);
+    entries = push(push([], intEntry(clone(indexName), clone(k))), intEntry(clone(countName), String::fromInt(count)));
+    i = addAtom(arena, indexName, true); iId = i.id;
+    if decimalCmp(&k, "0") < 0 {
+        z = addNumber(i.arena, "0", true);
+        p = relCall(z.arena, 4, z.id, iId);
+        r = addValidation(p.arena, AstValidation::ProofAssert { p: p.id });
+        return PackFact { arena: r.arena, id: r.id, entries: orderEntries(entries) };
+    };
+    n = addAtom(i.arena, countName, true);
+    p = relCall(n.arena, 2, iId, n.id);
+    r = addValidation(p.arena, AstValidation::ProofAssert { p: p.id });
+    return PackFact { arena: r.arena, id: r.id, entries: orderEntries(entries) };
+};
+fn sliceFact(arena: List<AstNode>, packName: &String, count: Int, place: &String, lo: &String, hi: &String) -> PackFact ~ {
+    start = decimalText(lo); end = decimalText(hi);
+    whereText = " of slice(".concat(packName).concat(", ...)").concat(place);
+    startName = "the start ".concat(&start).concat(&whereText);
+    endName = "the end ".concat(&end).concat(&whereText);
+    countName = argumentCountName(count);
+    entries = push([], intEntry(clone(startName), clone(start)));
+    entries = push(entries, intEntry(clone(endName), clone(end)));
+    entries = push(entries, intEntry(clone(countName), String::fromInt(count)));
+    a = keepPayload(arena, -1); left = -1;
+    if decimalCmp(&start, "0") < 0 {
+        a = addNumber(a.arena, "0", true); left = a.id;
+        a = addAtom(a.arena, startName, true);
+    } else {
+        if decimalCmp(&start, &end) > 0 {
+            a = addAtom(a.arena, startName, true); left = a.id;
+            a = addAtom(a.arena, endName, true);
+        } else {
+            a = addAtom(a.arena, endName, true); left = a.id;
+            a = addAtom(a.arena, countName, true);
+        };
+    };
+    p = relCall(a.arena, 4, left, a.id);
+    r = addValidation(p.arena, AstValidation::ProofAssert { p: p.id });
+    return PackFact { arena: r.arena, id: r.id, entries: orderEntries(entries) };
+};
+fn newGhost(id: Int, entries: &List<EnvEntry>) -> List<Token> ~ {
+    out = push(push([], word("ghost")), word("validation"));
+    return push(appendTokens(out, envTokens(entries)), intToken(id));
+};
+fn contradictionGhosts(fact: PackFact) -> PackGhosts ~ {
+    check = newGhost(fact.id, &fact.entries);
+    z = addNumber(fact.arena, "0", true); zero = z.id;
+    o = addNumber(z.arena, "1", true);
+    p = relCall(o.arena, 0, zero, o.id);
+    a = addValidation(p.arena, AstValidation::Assume { p: p.id });
+    return PackGhosts { arena: a.arena, rows: push(push([], check), newGhost(a.id, [])) };
+};
+fn rangeGhosts(arena: List<AstNode>, packName: &String, count: Int, place: &String, index: &String) -> PackGhosts ~ {
+    return contradictionGhosts(rangeFact(arena, packName, count, place, index));
+};
+fn sliceGhosts(arena: List<AstNode>, packName: &String, count: Int, place: &String, lo: &String, hi: &String) -> PackGhosts ~ {
+    return contradictionGhosts(sliceFact(arena, packName, count, place, lo, hi));
+};
+fn unchangedValidation(arena: List<AstNode>, id: Int) -> PackValidations ~ {
+    return PackValidations { arena: arena, items: push([], PackValidation { id: id, entries: [] }), error: "" };
+};
+fn rangeValidation(x: &ProofContext, arena: List<AstNode>, k: &String) -> PackValidations ~ {
+    fact = rangeFact(arena, &x.packName, x.count, &x.place, k);
+    return PackValidations { arena: fact.arena, items: push([], PackValidation { id: fact.id, entries: fact.entries }), error: "" };
+};
+fn finishRewrite(x: &ProofContext, r: PackTerms) -> PackValidations ~ {
+    if r.error != "" { return PackValidations { arena: r.arena, items: [], error: r.error }; };
+    return rangeValidation(x, r.arena, &r.outside);
+};
+fn rewriteProofValidation(x: &ProofContext, arena: List<AstNode>, v: &AstValidation, p: Int, id: Int) -> PackValidations ~ {
+    k = definedOutOfRange(x, &arena, p);
+    if k != "" { return rangeValidation(x, arena, &k); };
+    r = rewriteTerm(x, arena, p, true);
+    if r.error != "" || r.outside != "" { return finishRewrite(x, r); };
+    if r.id = p && id >= 0 { return unchangedValidation(r.arena, id); };
+    w = addValidation(r.arena, proofWith(v, r.id));
+    return unchangedValidation(w.arena, w.id);
+};
+fn rewriteValidation(x: &ProofContext, arena: List<AstNode>, id: Int) -> PackValidations ~ {
+    node = nodeAt(&arena, validationAt(&arena, id));
+    if !(node is AstNode::Validation) { return unchangedValidation(arena, id); };
+    v = (node as AstNode::Validation).value;
+    p = proofOf(&v);
+    if p >= 0 {
+        t = termView(&arena, p);
+        if t is PackTerm::Quantifier {
+            q = t as PackTerm::Quantifier;
+            binder = nameValue(&arena, q.n);
+            if mentionsIndex(x, &arena, q.b, &binder) {
+                guards = termItems(&arena, q.gs);
+                lo = guardBound(&arena, &guards, &binder, 4, 1);
+                if lo < 0 { lo = guardBound(&arena, &guards, &binder, 5, 0); };
+                hi = guardBound(&arena, &guards, &binder, 2, 0);
+                if hi < 0 { hi = guardBound(&arena, &guards, &binder, 3, 1); };
+                k = foldProof(x, &arena, lo); upper = foldProof(x, &arena, hi);
+                if k = "" || upper = "" {
+                    error = "Type error: a forall over the elements of ".concat(&x.packName).concat(" is written forall i in lo..hi with bounds fixed in each copy (numbers, size(").concat(&x.packName).concat("), and + - * of those)");
+                    return PackValidations { arena: arena, items: [], error: error };
+                };
+                items = []; empty = HashMap::new();
+                while decimalCmp(&k, &upper) < 0 [{ }] ~ {
+                    sub = rewriteVariables(arena, q.b, true, &empty, true, &binder, &k);
+                    w = rewriteProofValidation(x, sub.arena, &v, sub.id, -1);
+                    if w.error != "" { return w; };
+                    for item in w.items { items = push(items, PackValidation { id: item.id, entries: clone(item.entries) }); };
+                    arena = w.arena; k = decimalAdd(&k, "1");
+                };
+                return PackValidations { arena: arena, items: items, error: "" };
+            };
+        };
+        return rewriteProofValidation(x, arena, &v, p, id);
+    };
+    if v is AstValidation::AssignProofVar {
+        d = v as AstValidation::AssignProofVar;
+        k = definedOutOfRange(x, &arena, d.e);
+        if k != "" { return rangeValidation(x, arena, &k); };
+        r = rewriteTerm(x, arena, d.e, false);
+        if r.error != "" || r.outside != "" { return finishRewrite(x, r); };
+        if r.id = d.e { return unchangedValidation(r.arena, id); };
+        w = addValidation(r.arena, AstValidation::AssignProofVar { n: d.n, e: r.id });
+        return unchangedValidation(w.arena, w.id);
+    };
+    if v is AstValidation::Rewrite {
+        n = nodeAt(&arena, (v as AstValidation::Rewrite).r);
+        if n is AstNode::Rule {
+            rule = (n as AstNode::Rule).value;
+            p = unaryRuleTerm(&rule);
+            if p >= 0 {
+                k = definedOutOfRange(x, &arena, p);
+                if k != "" { return rangeValidation(x, arena, &k); };
+                r = rewriteTerm(x, arena, p, true);
+                if r.error != "" || r.outside != "" { return finishRewrite(x, r); };
+                if r.id = p { return unchangedValidation(r.arena, id); };
+                w = addRule(r.arena, unaryRuleWith(&rule, r.id));
+                return unchangedValidation(w.arena, w.id);
+            };
+            if rule is AstRule::UserRewrite {
+                u = rule as AstRule::UserRewrite;
+                for a in termItems(&arena, u.xs) {
+                    k = definedOutOfRange(x, &arena, a);
+                    if k != "" { return rangeValidation(x, arena, &k); };
+                };
+                r = rewriteTerms(x, arena, u.xs, true);
+                if r.error != "" || r.outside != "" { return finishRewrite(x, r); };
+                if r.id = u.xs { return unchangedValidation(r.arena, id); };
+                w = addRule(r.arena, AstRule::UserRewrite { n: u.n, xs: r.id });
+                return unchangedValidation(w.arena, w.id);
+            };
+        };
+    };
+    return unchangedValidation(arena, id);
+};
+
+fn ghostValidationAt(row: &List<Token>) -> Int ~ {
+    if !wordIs(row, 0, "ghost") || !wordIs(row, 1, "validation") { return -1; };
+    id = integerAt(row, envEnd(row, 2));
+    if !id.ok { return -1; };
+    return id.value;
+};
+fn assignmentAt(arena: &List<AstNode>, id: Int) -> AstValidation ~ {
+    node = nodeAt(arena, validationAt(arena, id));
+    if node is AstNode::Validation { return (node as AstNode::Validation).value; };
+    return AstValidation::Rewrite { r: -1 };
+};
+fn proofDefineName(arena: &List<AstNode>, row: &List<Token>) -> Parsed<String> ~ {
+    id = ghostValidationAt(row);
+    v = assignmentAt(arena, id);
+    if v is AstValidation::AssignProofVar {
+        return Parsed<String> { value: nameValue(arena, (v as AstValidation::AssignProofVar).n), pos: 0, ok: true };
+    };
+    return Parsed<String> { value: "", pos: 0, ok: false };
+};
+fn replaceProofEnv(row: &List<Token>, added: &List<EnvEntry>, addedWins: Bool) -> List<Token> ~ {
+    if size(added) = 0 { return clone(row); };
+    at = envStart(row);
+    if at < 0 || at >= size(row) { return clone(row); };
+    own = orderEntries(envEntries(row, at));
+    entries = mergeEntries(&own, added);
+    if addedWins { entries = mergeEntries(added, &own); };
+    out = replaceEnv(row, &entries);
+    if at >= size(out) { return out; };
+    return set(out, at, clone(get(row, at)));
+};
+fn constantText(tokens: &List<Token>) -> String ~ {
+    if !wordIs(tokens, 0, "const") || !wordIs(tokens, 1, "int") { return ""; };
+    text = textAt(tokens, 2);
+    if !validDecimal(&text) { return ""; };
+    return decimalText(&text);
+};
+fn namesIn(row: &List<Token>, known: &HashMap<Int, List<Token>>) -> HashMap<String, String> ~ {
+    names = HashMap::new();
+    entries = envEntries(row, envStart(row));
+    for e in &entries {
+        text = constantText(&e.value);
+        if wordIs(&e.value, 0, "copy") {
+            i = integerAt(&e.value, 1);
+            if i.ok { text = constantText(HashMap::lookup(known, &i.value, [])); };
+        };
+        if text != "" { names = names.insert(clone(e.name), text); };
+    };
+    return names;
+};
+struct PackValidationBlock { arena: List<AstNode>, id: Int, entries: List<EnvEntry>, error: String };
+
+fn validationBlock(x: &ProofContext, arena: List<AstNode>, root: Int) -> PackValidationBlock ~ {
+    stmt = statementAt(&arena, root);
+    if !(stmt is AstStatement::Block) { return PackValidationBlock { arena: arena, id: root, entries: [], error: "" }; };
+    old = listItems(&arena, (stmt as AstStatement::Block).xs); ids = []; entries = [];
+    for v in &old {
+        w = rewriteValidation(x, arena, v);
+        if w.error != "" { return PackValidationBlock { arena: w.arena, id: -1, entries: [], error: w.error }; };
+        for i in &w.items {
+            ids = push(ids, i.id);
+            if size(i.entries) > 0 { entries = mergeEntries(&entries, &i.entries); };
+        };
+        arena = w.arena;
+    };
+    if old = ids { return PackValidationBlock { arena: arena, id: root, entries: entries, error: "" }; };
+    r = addValidationBlock(arena, &ids);
+    return PackValidationBlock { arena: r.arena, id: r.id, entries: entries, error: "" };
+};
+
+struct PackDefines { arena: List<AstNode>, defines: HashMap<String, String> };
+
+fn emptyProofNames() -> HashMap<String, String> ~ { return HashMap::new(); };
+fn globalDefines(x: ProofContext, arena: List<AstNode>, blocks: &List<FullBlock>, known: &HashMap<Int, List<Token>>) -> PackDefines ~ {
+    defines = emptyProofNames(); seen = HashSet::new();
+    for b in blocks {
+        for row in &b.lines {
+            v = assignmentAt(&arena, ghostValidationAt(row));
+            if v is AstValidation::AssignProofVar {
+                d = v as AstValidation::AssignProofVar;
+                n = nameValue(&arena, d.n);
+                if !n.startsWith("$pack read at ") {
+                    if HashSet::contains(&seen, &n) { defines = defines.remove(&n); }
+                    else {
+                        x = ProofContext { names: namesIn(row, known), ..x };
+                        r = defineIndex(&x, arena, d.e);
+                        if r.outside != "" { defines = defines.insert(clone(n), r.outside); };
+                        arena = r.arena;
+                        seen = seen.insert(n);
+                    };
+                };
+            };
+        };
+    };
+    return PackDefines { arena: arena, defines: defines };
+};
+
+struct PackProofBlock { arena: List<AstNode>, lines: List<List<Token>>, error: String };
+
+fn walkProofBlock(x: ProofContext, arena: List<AstNode>, lines: &List<List<Token>>, known: &HashMap<Int, List<Token>>) -> PackProofBlock ~ {
+    out = []; place = "";
+    for row in lines {
+        id = ghostValidationAt(row);
+        if id < 0 { out = push(out, clone(row)); }
+        else {
+            n = proofDefineName(&arena, row);
+            if n.ok && n.value.startsWith("$pack read at ") {
+                place = " at line ".concat(n.value.slice(14, size(n.value.bytes)));
+            } else {
+                x = ProofContext { names: namesIn(row, known), place: clone(place), ..x };
+                w = rewriteValidation(&x, arena, id);
+                if w.error != "" { return PackProofBlock { arena: w.arena, lines: [], error: w.error }; };
+                for i in &w.items {
+                    at = envEnd(row, 2);
+                    updated = set(clone(row), at, intToken(i.id));
+                    out = push(out, replaceProofEnv(&updated, &i.entries, true));
+                };
+                arena = w.arena;
+                if n.ok {
+                    v = assignmentAt(&arena, id);
+                    if v is AstValidation::AssignProofVar {
+                        r = defineIndex(&x, arena, (v as AstValidation::AssignProofVar).e);
+                        arena = r.arena;
+                        defines = x.defines;
+                        if r.outside = "" { defines = defines.remove(&n.value); }
+                        else { defines = defines.insert(n.value, r.outside); };
+                        x = ProofContext { defines: defines, ..x };
+                    };
+                };
+            };
+        };
+    };
+    return PackProofBlock { arena: arena, lines: out, error: "" };
+};
+fn packProofs(fun: FullFunction, arena: List<AstNode>, known: &HashMap<Int, List<Token>>, packName: &String, packType: &String, count: Int) -> PackProofResult ~ {
+    x = ProofContext { packName: clone(packName), packType: clone(packType), count: count, countText: String::fromInt(count),
+        names: HashMap::new(), defines: HashMap::new(), place: " in a contract" };
+    requires = validationBlock(&x, arena, integerAt(&fun.spec, 2).value);
+    if requires.error != "" { return PackProofResult { fun: fun, arena: requires.arena, error: requires.error }; };
+    ensures = validationBlock(&x, requires.arena, integerAt(&fun.spec, 4).value);
+    if ensures.error != "" { return PackProofResult { fun: fun, arena: ensures.arena, error: ensures.error }; };
+    additions = mergeEntries(&requires.entries, &ensures.entries);
+    spec = set(set(clone(fun.spec), 2, intToken(requires.id)), 4, intToken(ensures.id));
+    env = replaceProofEnv(&fun.env, &additions, false);
+    x = ProofContext { place: "", ..x };
+    globals = globalDefines(clone(x), ensures.arena, &fun.blocks, known);
+    x = ProofContext { defines: globals.defines, ..x }; arena = globals.arena;
+    loopKeys = []; for l in &fun.loops { loopKeys = push(loopKeys, textAt(&l.tokens, 1)); };
+    loops = [];
+    for i in keyOrder(&loopKeys, true) {
+        l = get(&fun.loops, i);
+        context = ProofContext { names: namesIn(&l.tokens, known), ..clone(x) };
+        r = validationBlock(&context, clone(arena), integerAt(&l.tokens, 5).value);
+        if r.error != "" { return PackProofResult { fun: fun, arena: r.arena, error: r.error }; };
+        row = set(clone(l.tokens), 5, intToken(r.id));
+        loops = push(loops, FullRecord { name: clone(l.name), tokens: replaceProofEnv(&row, &r.entries, false) });
+        arena = r.arena;
+    };
+    blockKeys = []; for b in &fun.blocks { blockKeys = push(blockKeys, String::fromInt(b.id)); };
+    blocks = [];
+    for i in keyOrder(&blockKeys, true) {
+        b = get(&fun.blocks, i);
+        r = walkProofBlock(clone(x), clone(arena), &b.lines, known);
+        if r.error != "" { return PackProofResult { fun: fun, arena: r.arena, error: r.error }; };
+        blocks = push(blocks, FullBlock { id: b.id, lines: r.lines });
+        arena = r.arena;
+    };
+    return PackProofResult { fun: FullFunction { spec: spec, env: env, loops: loops, blocks: blocks, ..fun }, arena: arena, error: "" };
+};
