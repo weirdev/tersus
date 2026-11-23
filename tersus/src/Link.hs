@@ -3,18 +3,20 @@ module Link
     ( linkPrograms
     , pruneProgram
     , completeSpecEnvs
+    , standaloneCopies
     ) where
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import DataCodec (quote)
 import qualified Mir as M
-import MirCopies (makeCopiesWith)
+import MirCopiesNameProfile (nameProfilePrefix)
 import MirMoves (checkSpawns)
 import MirPass (programData, runPassWith)
 import PackageData (ModuleId (..))
 import Seed (cachedSeed)
 import System.IO.Unsafe (unsafePerformIO)
+import Types (Name)
 import Utils
 
 -- Linking runs in the pinned emitter seed (lib/mir/link), not stage 1: stage 1 is made from programs this module links.
@@ -22,16 +24,22 @@ import Utils
 linkPrograms :: [(ModuleId, M.Program)] -> Result M.Program String
 linkPrograms [] = Error "link error: no modules to link"
 linkPrograms units = flatResultMap unitData units `bindResult` \parts ->
-    linkPass ("merge " ++ show (length units) ++ "\n" ++ concat parts) `bindResult` \program ->
-        -- (a copy the call cannot have is refused as the elaborator refuses a call)
-        case makeCopiesWith library (M.completeInstances program) of
-            Error e -> Error ("Validation failed: " ++ e)
-            Ok copied -> checkSpawns library copied
+    profiledLinkPass ("merge-copies " ++ show (length units) ++ "\n" ++ concat parts) `bindResult` checkSpawns library
   where
     library = Set.fromList [name | (ModuleId "tersuslib" _, program) <- units, name <- Map.keys (M.progBounded program)]
     unitData (ModuleId pkg modu, program) = programData program `bindResult` \text ->
         Ok ("unit " ++ quote pkg ++ " " ++ maybe "none" (\name -> "some " ++ quote name) modu
             ++ " " ++ show (length (lines text)) ++ "\n" ++ text)
+
+standaloneCopies :: Set.Set Name -> M.Program -> Result M.Program String
+standaloneCopies library program
+    | Map.null (M.progBounded program) && Map.null (M.progInstances program) = Ok program
+    | otherwise = programData program `bindResult` \text ->
+        let header = unwords ("copies" : show (length (lines text)) : map quote (Set.toList library))
+         in profiledLinkPass (header ++ "\n" ++ text)
+
+profiledLinkPass :: String -> Result M.Program String
+profiledLinkPass request = linkPass (request ++ nameProfilePrefix [request])
 
 {-# NOINLINE pruneProgram #-}
 pruneProgram :: M.Program -> Result M.Program String

@@ -1,4 +1,4 @@
-module MirPacks
+module MirPacksOracle
     ( Expanded (..)
     , expandPack
     , isPackName

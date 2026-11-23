@@ -47,6 +47,8 @@ import TestBytes
 import TestConnectives
 import TestMirData
 import TestLink
+import TestMirCopiesParity (testFncReview, testMirCopiesParity, testMirCopyKeys)
+import TestMirCopiesFused (testMirCopiesFused)
 import TestMirPacks (testMirPacks)
 import TestMirOwnership
 import TestMirMono
@@ -231,6 +233,10 @@ originalGroups =
     , testMirVerify
     , testMirErase
     , testMirCopies
+    , testMirCopiesParity
+    , testFncReview
+    , testMirCopiesFused
+    , testMirCopyKeys
     , testMirVerifyPrograms
     , testMirEmit
     , testMirEmitPrograms

@@ -342,6 +342,7 @@ estimatedPeakMiB name
 peakTable :: Map.Map String Int
 peakTable = Map.fromList measuredPeaksMiB
 
+-- Whoever wins the shared MIR probe cache miss can reach 2,593 MiB; account for it in every participating group.
 measuredPeaksMiB :: [(String, Int)]
 measuredPeaksMiB =
     [ ("testAstData:1/4", 3328)
@@ -355,6 +356,9 @@ measuredPeaksMiB =
     , ("testFrontendBootstrap", 6912)
     , ("testHostValidation:elaborator", 4608)
     , ("testHostValidation:parser", 1536)
+    , ("testMirCopiesFused", 3072)
+    , ("testMirCopiesParity", 3072)
+    , ("testMirCopyKeys", 3072)
     , ("testMirEmit:2/4", 6400)
     , ("testMirEmit:3/4", 9728)
     , ("testMirEmit:4/4", 9728)
@@ -365,6 +369,7 @@ measuredPeaksMiB =
     , ("testMirLowered:3/4", 4352)
     , ("testMirLowered:4/4", 2816)
     , ("testMirOwnership", 4096)
+    , ("testMirPacks", 3072)
     , ("testMirSelfHosted:1/4", 9984)
     , ("testMirSelfHosted:2/4", 9984)
     , ("testMirSelfHosted:3/4", 7936)
@@ -717,6 +722,9 @@ testScheduling names batches = TestList "testScheduling"
     , testCase "small and empty trees never create empty batches" $
         testAssertTrue (null (splitTestGroups 4 (TestList "empty" []))
             && map groupName (splitTestGroups 4 (testCase "single" Nothing)) == ["single:1/1"])
+    , testCase "every MIR probe group can be charged as the cold build owner" $
+        testAssertEq (map estimatedPeakMiB ["testMirPacks", "testMirCopyKeys", "testMirCopiesParity", "testMirCopiesFused"])
+            (replicate 4 3072)
     , testCase "every CI shard's groups launch once, with estimated memory within the budget whenever two run" $
         testAssertTrue (all (\index -> case selectGroupNames (Arguments Nothing [] False (Just (index, ciShardCount))) names of
             Right shard -> let trace = admissionTrace shard

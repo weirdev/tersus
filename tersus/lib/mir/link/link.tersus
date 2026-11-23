@@ -4,6 +4,7 @@ import mir::full::tokens { integerAt, textAt, wordIs, quotedAt };
 import mir::full::read { recordAt };
 import mir::link::merge { LinkUnit, linkPrograms, completeSpecEnvs };
 import mir::link::prune { pruneProgram };
+import mir::link::fused { runFusedUnits, standaloneReply };
 
 fn isLinkRequest(lines: &List<List<Token>>) -> Bool ~ {
     row = recordAt(lines, 0);
@@ -14,7 +15,7 @@ fn takeRows(lines: &List<List<Token>>, lo: Int, hi: Int) -> List<List<Token>> ~ 
     for i in lo..hi { out = push(out, clone(get(lines, i))); }; return out;
 };
 fn linkError(message: &String) -> Bool ~ { message.printError(); "\n".printError(); return false; };
-fn mergeRequest(lines: &List<List<Token>>) -> Bool ~ {
+fn mergeRequest(lines: &List<List<Token>>, copies: Bool) -> Bool ~ {
     header = recordAt(lines, 1); count = integerAt(&header, 1);
     if size(header) != 2 || !count.ok || count.value < 0 || count.value > size(lines) { return linkError("the linking request is not unit data"); };
     units = []; at = 2;
@@ -28,6 +29,11 @@ fn mergeRequest(lines: &List<List<Token>>) -> Bool ~ {
         modu = ""; if hasModule { modu = textAt(&row, 3); };
         units = push(units, LinkUnit { pkg: textAt(&row, 1), modu: modu, hasModule: hasModule, program: p.value }); at = at + n.value + 1;
     };
+    if copies {
+        problem = runFusedUnits(lines, at, &units);
+        if problem != "" { return linkError(&problem); };
+        return true;
+    };
     if at != size(lines) { return linkError("the linking request has trailing data"); };
     linked = linkPrograms(&units); if !linked.ok { return linkError(&linked.message); };
     printFull(&linked.program); return true;
@@ -35,7 +41,13 @@ fn mergeRequest(lines: &List<List<Token>>) -> Bool ~ {
 fn runLink(lines: &List<List<Token>>) -> Bool ~ {
     if !isLinkRequest(lines) { return linkError("the input is not a linking request"); };
     command = recordAt(lines, 1);
-    if wordIs(&command, 0, "merge") { return mergeRequest(lines); };
+    if wordIs(&command, 0, "merge") { return mergeRequest(lines, false); };
+    if wordIs(&command, 0, "merge-copies") { return mergeRequest(lines, true); };
+    if wordIs(&command, 0, "copies") {
+        problem = standaloneReply(lines);
+        if problem != "" { return linkError(&problem); };
+        return true;
+    };
     if size(command) != 1 { return linkError("the linking request has no operation"); };
     p = fullAt(takeRows(lines, 2, size(lines))); if !p.ok { return linkError("the linking request contains unreadable MIR3"); };
     program = p.value;

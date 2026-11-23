@@ -1,4 +1,4 @@
-import data::codec::codec { Token, Parsed, parseInt, isWord, catStrings, quoteName, indexOf, wordAt };
+import data::codec::codec { Token, Parsed, parseInt, isWord, catStrings, quoteName, indexOf, wordAt, fnClausesAt };
 import mir::reader::reader { binaryWords, listWords };
 import data::reader::reader { validDecimal };
 
@@ -41,12 +41,62 @@ fn normalizeNumbers(ts: List<Token>) -> List<Token> ~ {
     return ts;
 };
 fn normalizeTypes(ts: List<Token>) -> List<Token> ~ {
-    out = [];
-    for t in &ts {
-        if !t.quoted && (t.text = "list" || t.text = "box") {
-            n = "List"; if t.text = "box" { n = "Box"; };
-            out = push(push(push(push(out, word("named")), name(n)), intToken(1)), word("type"));
-        } else { out = push(out, clone(t)); };
+    return normalizeTypeTokens([], &ts, 0, size(ts), true, false);
+};
+fn normalizeType(ts: &List<Token>) -> List<Token> ~ {
+    if typeEnd(ts, 0) != size(ts) { return []; };
+    return normalizeTypeTokens([], ts, 0, size(ts), true, true);
+};
+fn normalizeTypeRecord(ts: &List<Token>, allowContracts: Bool) -> List<Token> ~ {
+    return normalizeTypeTokens([], ts, 0, size(ts), allowContracts, true);
+};
+fn normalizeTypeTokens(out: List<Token>, ts: &List<Token>, lo: Int, hi: Int, allowContracts: Bool, numbers: Bool) -> List<Token> ~ {
+    at = lo;
+    while at < hi [{ affirm at >= lo; }] ~ {
+        if at < 0 || at >= size(ts) { return []; };
+        t = get(ts, at);
+        if !t.quoted && t.text = "fnc" {
+            if !allowContracts { return []; };
+            arity = numberAt(ts, at + 1);
+            contract = fnReturnEnd(ts, at + 2, arity);
+            end = fnContractEnd(ts, contract, arity);
+            if contract < at + 2 || end < contract || end > hi { return []; };
+            out = push(out, clone(t));
+            out = normalizeTypeTokens(out, ts, at + 1, contract, allowContracts, numbers);
+            if numbers {
+                out = push(out, intToken(arity));
+                names = namesEnd(ts, contract);
+                if names < contract + 1 { return []; };
+                for i in contract + 1..names { out = push(out, clone(get(ts, i))); };
+                clauses = names;
+                while clauses < end [{ affirm clauses >= names; }] ~ {
+                    count = numberAt(ts, clauses);
+                    if count < 0 { return []; };
+                    out = push(out, intToken(count)); clauses = clauses + 1;
+                    for j in 0..count [{ affirm clauses >= names; }] {
+                        tokens = numberAt(ts, clauses);
+                        out = push(out, intToken(tokens)); clauses = clauses + 1;
+                        next = clauses + 2 * tokens;
+                        if next < clauses || next > end { return []; };
+                        for i in clauses..next { out = push(out, clone(get(ts, i))); };
+                        clauses = next;
+                    };
+                };
+            } else {
+                for i in contract..end { out = push(out, clone(get(ts, i))); };
+            };
+            at = end;
+        } else {
+            if !t.quoted && (t.text = "list" || t.text = "box") {
+                n = "List"; if t.text = "box" { n = "Box"; };
+                out = push(push(push(push(out, word("named")), name(n)), intToken(1)), word("type"));
+            } else {
+                if numbers && !t.quoted && validDecimal(&t.text) {
+                    out = push(out, word(decimalText(&t.text)));
+                } else { out = push(out, clone(t)); };
+            };
+            at = at + 1;
+        };
     };
     return out;
 };
@@ -72,7 +122,7 @@ fn tokenLine(ts: &List<Token>) -> String ~ {
     };
     return String { bytes: bytes };
 };
-fn namesEnd(ts: &List<Token>, p: Int) -> Int ~ {
+fn namesEnd(ts: &List<Token>, p: Int) -> Int [{ }] [{ affirm return <= size(ts); }] ~ {
     n = numberAt(ts, p);
     if n < 0 || p + 1 + n > size(ts) { return 0 - 1; };
     for i in p + 1..p + 1 + n { if !quotedAt(ts, i) { return 0 - 1; }; };
@@ -102,6 +152,30 @@ fn argsEnd(ts: &List<Token>, p: Int, n: Int) -> Int ~ {
     for i in 0..n { at = argEnd(ts, at); if at < 0 { return at; }; };
     return at;
 };
+fn fnReturnEnd(ts: &List<Token>, p: Int, arity: Int) -> Int ~ {
+    if arity < 0 || arity > size(ts) { return 0 - 1; };
+    at = p;
+    for i in 0..arity { at = typeEnd(ts, at); if at < 0 { return at; }; };
+    return typeEnd(ts, at);
+};
+fn fnContractEnd(ts: &List<Token>, at: Int, arity: Int) -> Int [{ }] [{ affirm return <= size(ts); }] ~ {
+    if arity < 0 || numberAt(ts, at) != arity { return 0 - 1; };
+    names = namesEnd(ts, at);
+    if names < 0 { return names; };
+    seen = HashSet::new();
+    for i in 0..arity {
+        n = textAt(ts, at + 1 + i);
+        if n != "" {
+            if HashSet::contains(&seen, &n) { return 0 - 1; };
+            seen = seen.insert(n);
+        };
+    };
+    requires = fnClausesAt(ts, names);
+    if !requires.ok { return 0 - 1; };
+    ensures = fnClausesAt(ts, requires.pos);
+    if !ensures.ok { return 0 - 1; };
+    return ensures.pos;
+};
 fn typeEnd(ts: &List<Token>, p: Int) -> Int ~ {
     if p < 0 || p >= size(ts) || quotedAt(ts, p) { return 0 - 1; };
     w = textAt(ts, p);
@@ -117,12 +191,11 @@ fn typeEnd(ts: &List<Token>, p: Int) -> Int ~ {
         at = namesEnd(ts, at);
         return typeEnd(ts, at);
     };
-    if w = "fn" {
-        n = numberAt(ts, p + 1);
-        if n < 0 { return 0 - 1; };
-        at = p + 2;
-        for i in 0..n { at = typeEnd(ts, at); if at < 0 { return at; }; };
-        return typeEnd(ts, at);
+    if w = "fn" || w = "fnc" {
+        arity = numberAt(ts, p + 1);
+        at = fnReturnEnd(ts, p + 2, arity);
+        if w = "fnc" { return fnContractEnd(ts, at, arity); };
+        return at;
     };
     if w = "list" || w = "box" || w = "array" || w = "addr" || w = "block" || w = "uninit" || w = "ref" || w = "mutref" {
         at = typeEnd(ts, p + 1);

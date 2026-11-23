@@ -1,0 +1,509 @@
+import data::ast::ast { AstNode, AstTermination, AstOptTermination, AstStatement, AstStatements, AstValidations, AstValue, AstExpression };
+import data::codec::codec { Token, utf8Point };
+import mir::full::full { FullBlock, FullFunction, FullProgram, FullRecord };
+import mir::full::environments { baseIndex, functionEntry, resolveEnv };
+import mir::full::records { envEntries, envTokens, keyOrder, nodeAt, replaceEnv, statementAt };
+import mir::full::tokens { appendTokens, integerAt, intToken, intsEnd, name, namesEnd, textAt, typeEnd, word, wordIs };
+import mir::instances::complete { completeInstancesWith };
+import mir::instances::names { InstanceNameClasses };
+import mir::pack::expand { expandPack };
+import mir::pack::numbers { decimalFits };
+import mir::copies::keys { CopyBinding, CopyInstance, CopyKey, NamedCopy, boundCallParts, companionOf, concreteKey, instanceAt, nameOf, renderCopyType, sameKey, typeBigness };
+import mir::copies::keys { CopiesResult, CopyAncestor, CopyCx, CopyMade, CopyNeed, copyFind, parseImplCheckName };
+import mir::copies::transform { transformFunction };
+import mir::copies::finish { finishCopies, isStubName, usedNames };
+import mir::copies::frame { boxedArraySizeAt, frameRefusal };
+
+struct CopySources { functions: HashMap<String, Int>, bounded: HashMap<String, Int>, order: List<String> };
+struct CopyBuild { made: List<CopyMade>, arena: List<AstNode>, error: String };
+struct CopyBody {
+    fun: FullFunction, arena: List<AstNode>, types: List<CopyBinding>,
+    blocks: HashMap<Int, List<CopyBinding>>, locals: HashMap<Int, List<CopyBinding>>,
+    spreads: List<FullRecord>, error: String
+};
+struct CopyStep { made: CopyMade, needs: List<CopyNeed>, arena: List<AstNode>, error: String };
+
+fn sortedCopyNames(names: &List<String>) -> List<String> ~ {
+    out = [];
+    for i in keyOrder(names, false) {
+        if i >= 0 && i < size(names) { out = push(out, clone(get(names, i))); };
+    };
+    return out;
+};
+fn copyNamesAt(row: &List<Token>, at: Int) -> List<String> ~ {
+    out = [];
+    start = at + 1; end = namesEnd(row, at);
+    if end < start { return out; };
+    for p in start..end { out = push(out, textAt(row, p)); };
+    return out;
+};
+fn boundedLifted(bounded: &FullRecord) -> List<String> ~ {
+    return copyNamesAt(&bounded.tokens, namesEnd(&bounded.tokens, namesEnd(&bounded.tokens, 2)));
+};
+fn copyTypeParams(fun: &FullFunction) -> List<String> ~ {
+    row = &fun.header; ret = intsEnd(row, 3) + 1;
+    after = ret + 1;
+    if wordIs(row, ret, "some") { after = typeEnd(row, after); };
+    return copyNamesAt(row, namesEnd(row, after + 1) + 1);
+};
+fn sortedCopyRecords(rows: List<FullRecord>) -> List<FullRecord> ~ {
+    keys = []; for r in &rows { keys = push(keys, clone(r.name)); };
+    out = [];
+    for i in keyOrder(&keys, true) {
+        if i >= 0 && i < size(rows) { out = push(out, clone(get(&rows, i))); };
+    };
+    return out;
+};
+fn materializeCopyEnv(row: &List<Token>, shared: &List<List<Token>>) -> List<Token> ~ {
+    if baseIndex(row) < 0 { return clone(row); };
+    return replaceEnv(row, resolveEnv(row, shared));
+};
+fn prepareCopyFunction(fun: FullFunction, shared: &List<List<Token>>) -> FullFunction ~ {
+    env = materializeCopyEnv(&fun.env, shared);
+    loops = [];
+    for l in &fun.loops { loops = push(loops, FullRecord { name: clone(l.name), tokens: materializeCopyEnv(&l.tokens, shared) }); };
+    blocks = []; keys = [];
+    for b in fun.blocks {
+        rows = [];
+        for row in b.lines { rows = push(rows, materializeCopyEnv(&row, shared)); };
+        keys = push(keys, String::fromInt(b.id)); blocks = push(blocks, FullBlock { id: b.id, lines: rows });
+    };
+    ordered = [];
+    for i in keyOrder(&keys, true) {
+        if i >= 0 && i < size(blocks) { ordered = push(ordered, clone(get(&blocks, i))); };
+    };
+    return FullFunction { env: env, locals: sortedCopyRecords(fun.locals), loops: sortedCopyRecords(loops), blocks: ordered, ..fun };
+};
+fn rootCopyBases(program: &FullProgram) -> List<List<Token>> ~ {
+    mainName = textAt(&program.entry.header, 1);
+    aliases = HashSet::new();
+    for r in &program.instances { aliases = aliases.insert(clone(r.name)); };
+    bases = [];
+    for row in &program.shared {
+        kept = [];
+        for e in envEntries(row, 0) {
+            // Finish supplies surviving self-bindings for ordinary names again. Keep the entry and any binding that can be rewritten.
+            if !functionEntry(&e) || e.name != textAt(&e.value, 2) || e.name = mainName || HashSet::contains(&aliases, &e.name) || boundCallParts(&e.name).found {
+                kept = push(kept, clone(e));
+            };
+        };
+        bases = push(bases, envTokens(&kept));
+    };
+    return bases;
+};
+fn prepareCopies(program: FullProgram, lifted: &HashSet<String>) -> FullProgram ~ {
+    rootBases = rootCopyBases(&program);
+    bounded = HashSet::new();
+    for r in &program.bounded { bounded = bounded.insert(clone(r.name)); };
+    functions = [];
+    for f in &program.functions {
+        n = textAt(&f.header, 1);
+        if HashSet::contains(&bounded, &n) || HashSet::contains(lifted, &n) {
+            functions = push(functions, prepareCopyFunction(clone(f), &program.shared));
+        } else {
+            functions = push(functions, prepareCopyFunction(clone(f), &rootBases));
+        };
+    };
+    entry = prepareCopyFunction(program.entry, &rootBases);
+    return FullProgram { functions: functions, entry: entry, shared: [], ..program };
+};
+fn copySources(program: &FullProgram) -> CopySources ~ {
+    functions = HashMap::new(); bounded = HashMap::new(); names = [];
+    for i in 0..size(program.functions) {
+        fun = get(&program.functions, i); n = textAt(&fun.header, 1);
+        names = push(names, clone(n)); functions = HashMap::insert(functions, n, i);
+    };
+    for i in 0..size(program.bounded) { bounded = HashMap::insert(bounded, clone(get(&program.bounded, i).name), i); };
+    return CopySources { functions: functions, bounded: bounded, order: sortedCopyNames(&names) };
+};
+fn originalCopyNames(program: &FullProgram) -> List<NamedCopy> ~ {
+    names = [];
+    for row in &program.instances { names = push(names, clone(row.name)); };
+    out = [];
+    for i in keyOrder(&names, false) {
+        if i >= 0 && i < size(names) {
+            alias = get(&names, i); instance = instanceAt(program, alias);
+            if instance.found {
+                key = concreteKey(&instance.value);
+                if key.found { out = push(out, NamedCopy { key: key.value, name: clone(alias) }); };
+            };
+        };
+    };
+    return out;
+};
+fn copySetEqual(a: &HashSet<String>, b: &HashSet<String>) -> Bool ~ {
+    if a.size() != b.size() { return false; };
+    for n in a.elements() { if !HashSet::contains(b, &n) { return false; }; };
+    return true;
+};
+fn genericReferences(program: &FullProgram, sources: &CopySources, generic: &String) -> List<CopyInstance> ~ {
+    names = push([], clone(generic)); out = [];
+    i = HashMap::lookup(&sources.bounded, generic, -1);
+    if i >= 0 && i < size(program.bounded) { for n in boundedLifted(get(&program.bounded, i)) { names = push(names, clone(n)); }; };
+    for fnName in &names {
+        fi = HashMap::lookup(&sources.functions, fnName, -1);
+        if fi >= 0 && fi < size(program.functions) {
+            refs = usedNames(get(&program.functions, fi), &program.arena);
+            for n in sortedCopyNames(&refs) {
+                if !boundCallParts(&n).found {
+                    instance = instanceAt(program, &n);
+                    if instance.found && HashMap::contains(&sources.bounded, &instance.value.function) && !isStubName(&instance.value.function) {
+                        out = push(out, instance.value);
+                    };
+                };
+            };
+        };
+    };
+    return out;
+};
+fn genericClosure(program: &FullProgram, sources: &CopySources, used: HashSet<String>) -> HashSet<String> ~ {
+    more = used.elements(); i = 0;
+    while i < size(more) ~ {
+        for instance in genericReferences(program, sources, get(&more, i)) {
+            if !HashSet::contains(&used, &instance.function) && !concreteKey(&instance).found {
+                more = push(more, clone(instance.function)); used = HashSet::insert(used, clone(instance.function));
+            };
+        };
+        i = i + 1;
+    };
+    return used;
+};
+fn appendCopyNeeds(needs: List<CopyNeed>, more: &List<CopyNeed>) -> List<CopyNeed> ~ {
+    for n in more { needs = push(needs, clone(n)); };
+    return needs;
+};
+fn genericCopyNeeds(program: &FullProgram, sources: &CopySources, used: &HashSet<String>, needs: List<CopyNeed>) -> List<CopyNeed> ~ {
+    for n in sortedCopyNames(used.elements()) {
+        for ref in genericReferences(program, sources, &n) {
+            key = concreteKey(&ref);
+            if key.found { needs = push(needs, CopyNeed { key: key.value, chain: [] }); };
+        };
+    };
+    return needs;
+};
+fn copyReferenceAt(row: &List<Token>, at: Int) -> Bool ~ {
+    return wordIs(row, at, "ref") || wordIs(row, at, "mutref");
+};
+fn sizedBoxedCopyUsed(made: &List<CopyMade>) -> Bool ~ {
+    for c in made {
+        for local in &c.fun.locals {
+            at = 3; if wordIs(&local.tokens, 2, "some") { at = 4; };
+            row = &local.tokens;
+            while copyReferenceAt(row, at) ~ { at = at + 1; };
+            bound = boxedArraySizeAt(row, at);
+            if bound >= 0 && !wordIs(row, bound, "any") { return true; };
+        };
+    };
+    return false;
+};
+fn copyUsedAfter(made: &List<CopyMade>, sources: &CopySources, always: &HashSet<String>) -> HashSet<String> ~ {
+    used = clone(always);
+    for c in made { used = HashSet::insert(used, clone(c.generic)); };
+    if sizedBoxedCopyUsed(made) {
+        for n in push(push(push([], "sizedBoxedSize"), "sizedBoxedGet"), "sizedBoxedSet") {
+            if HashMap::contains(&sources.bounded, &n) { used = HashSet::insert(used, clone(n)); };
+        };
+    };
+    return used;
+};
+fn spreadCopyRecord(pack: &String, spread: &String, instance: &CopyInstance, lo: Int, hi: Int) -> FullRecord ~ {
+    args = []; count = 0;
+    for arg in &instance.args {
+        if size(arg) = 3 && wordIs(arg, 0, "type") && wordIs(arg, 1, "param") && textAt(arg, 2) = pack {
+            if lo <= hi {
+                for k in lo..hi {
+                    param = clone(pack).concat("#").concat(String::fromInt(k));
+                    args = push(push(push(args, word("type")), word("param")), name(param)); count = count + 1;
+                };
+            };
+        } else { args = appendTokens(args, arg); count = count + 1; };
+    };
+    header = push(push(push(push([], word("instance")), name(clone(spread))), name(clone(instance.function))), intToken(count));
+    return FullRecord { name: clone(spread), tokens: appendTokens(header, &args) };
+};
+fn bindPackIndexes(indexes: &HashMap<Int, HashMap<String, String>>, types: &List<List<Token>>, fixed: Int) -> HashMap<Int, List<CopyBinding>> [{ affirm fixed >= 0; }] [{ }] ~ {
+    out = HashMap::new();
+    for e in indexes.entries() {
+        entries = e.value.entries();
+        keys = []; for p in &entries { keys = push(keys, clone(p.key)); };
+        binds = [];
+        for i in keyOrder(&keys, false) {
+            if i >= 0 && i < size(entries) {
+                p = get(&entries, i);
+                k = decimalFits(&p.value);
+                if k.ok && k.value >= 0 && k.value < size(types) - fixed {
+                    binds = push(binds, CopyBinding { name: clone(p.key), tokens: clone(get(types, fixed + k.value)) });
+                };
+            };
+        };
+        out = HashMap::insert(out, e.key, binds);
+    };
+    return out;
+};
+fn plainCopyBody(fun: FullFunction, params: &List<String>, key: &CopyKey, arena: List<AstNode>) -> CopyBody ~ {
+    bindings = [];
+    for i in 0..size(params) {
+        if i < size(key.types) { bindings = push(bindings, CopyBinding { name: clone(get(params, i)), tokens: clone(get(&key.types, i)) }); };
+    };
+    return CopyBody { fun: fun, arena: arena, types: bindings, blocks: HashMap::new(), locals: HashMap::new(), spreads: [], error: "" };
+};
+fn packCopyBody(program: &FullProgram, bounded: &FullRecord, fun: FullFunction, fixed: &List<String>, pack: &String, key: &CopyKey, arena: List<AstNode>) -> CopyBody ~ {
+    count = size(key.types) - size(fixed);
+    expanded = expandPack(bounded, pack, count, fun, arena);
+    body = plainCopyBody(expanded.fun, fixed, key, expanded.arena);
+    if expanded.error != "" { return CopyBody { error: expanded.error, ..body }; };
+    entries = expanded.spreads.entries();
+    names = []; for e in &entries { names = push(names, clone(e.key)); };
+    spreads = [];
+    for i in keyOrder(&names, false) {
+        if i >= 0 && i < size(entries) {
+            spread = get(&entries, i);
+            callee = &spread.value.callee;
+            original = instanceAt(program, callee);
+            if !original.found { return CopyBody { error: "internal compiler error: a call forwards a pack to ".concat(callee).concat(", which names no copy"), ..body }; };
+            spreads = push(spreads, spreadCopyRecord(pack, &spread.key, &original.value, spread.value.lo, spread.value.hi));
+        };
+    };
+    bindings = body.types;
+    if count >= 0 {
+        for k in 0..count {
+            n = clone(pack).concat("#").concat(String::fromInt(k));
+            bindings = push(bindings, CopyBinding { name: n, tokens: clone(get(&key.types, size(fixed) + k)) });
+        };
+    };
+    return CopyBody { types: bindings, spreads: spreads, blocks: bindPackIndexes(&expanded.blocks, &key.types, size(fixed)), locals: bindPackIndexes(&expanded.locals, &key.types, size(fixed)), ..body };
+};
+fn withPackInstances(program: &FullProgram, spreads: List<FullRecord>) -> FullProgram ~ {
+    names = HashSet::new(); for r in &spreads { names = HashSet::insert(names, clone(r.name)); };
+    for r in &program.instances { if !HashSet::contains(&names, &r.name) { spreads = push(spreads, clone(r)); }; };
+    return FullProgram { instances: spreads, ..clone(program) };
+};
+fn copyGrowthError(classes: &InstanceNameClasses, key: &CopyKey, chain: &List<CopyAncestor>, bigness: Int) -> String ~ {
+    for ancestor in chain {
+        if ancestor.function = key.function && ancestor.bigness <= bigness {
+            types = ""; first = true;
+            for t in &key.types {
+                if !first { types = types.concat(", "); }; first = false;
+                types = types.concat(renderCopyType(classes, t));
+            };
+            return "Type error: ".concat(&key.function).concat(" calls itself with the types ").concat(types).concat(", which are not those it is made for: a function with bounds is made for each type, and one that is made for a bigger type at each call would never end");
+        };
+    };
+    return "";
+};
+fn liftedSuffix(generic: &String, lifted: &String) -> String ~ {
+    end = size(lifted.bytes); prefix = size(generic.bytes);
+    if prefix <= end && lifted.startsWith(generic) { return lifted.slice(prefix, end); };
+    genericAt = 0; liftedAt = 0;
+    while genericAt < prefix && liftedAt < end [{ affirm liftedAt >= 0; affirm liftedAt <= end; }] ~ {
+        genericAt = utf8Point(generic, genericAt).next;
+        liftedAt = utf8Point(lifted, liftedAt).next;
+    };
+    return lifted.slice(liftedAt, end);
+};
+fn failedCopyStep(program: &FullProgram, error: String) -> CopyStep ~ {
+    return CopyStep { made: CopyMade { generic: "", fun: clone(program.entry), lifted: [] }, needs: [], arena: [], error: error };
+};
+fn copyOne(classes: &InstanceNameClasses, program: &FullProgram, sources: &CopySources, named: &List<NamedCopy>, need: &CopyNeed, arena: List<AstNode>) -> CopyStep ~ {
+    key = clone(need.key); f = &key.function; copy = nameOf(classes, named, &key);
+    gi = HashMap::lookup(&sources.functions, f, -1); bi = HashMap::lookup(&sources.bounded, f, -1);
+    if gi < 0 || gi >= size(program.functions) || bi < 0 || bi >= size(program.bounded) {
+        return failedCopyStep(program, "internal compiler error: the copy ".concat(&copy).concat(" is of ").concat(f).concat(", which is not a function with bounds of the program"));
+    };
+    generic = get(&program.functions, gi); bounded = get(&program.bounded, bi);
+    bigness = 0; for t in &key.types { bigness = bigness + typeBigness(t); };
+    error = copyGrowthError(classes, &key, &need.chain, bigness);
+    if error != "" { return failedCopyStep(program, error); };
+    params = copyTypeParams(generic); packs = []; fixed = [];
+    for p in &params {
+        if p.startsWith("..") { packs = push(packs, clone(p)); } else { fixed = push(fixed, clone(p)); };
+    };
+    sizes = copyNamesAt(&bounded.tokens, 2);
+    nt = size(key.types); ns = size(key.sizes);
+    if (size(packs) = 0 && nt != size(params)) || (size(packs) != 0 && nt < size(fixed)) || ns != size(sizes) {
+        return failedCopyStep(program, "internal compiler error: ".concat(&copy).concat(" gives ").concat(f).concat(" ").concat(String::fromInt(nt)).concat(" types and ").concat(String::fromInt(ns)).concat(" sizes, and it has ").concat(String::fromInt(size(params))).concat(" and ").concat(String::fromInt(size(sizes))));
+    };
+    body = if size(packs) = 1 {
+        packCopyBody(program, bounded, clone(generic), &fixed, get(&packs, 0), &key, arena)
+    } else {
+        plainCopyBody(clone(generic), &params, &key, arena)
+    };
+    if body.error != "" { return failedCopyStep(program, body.error); };
+    lifted = boundedLifted(bounded); liftedNames = HashMap::new();
+    for n in &lifted {
+        liftedNames = HashMap::insert(liftedNames, clone(n), clone(copy).concat(liftedSuffix(f, n)));
+    };
+    sizeArgs = [];
+    for i in 0..ns { sizeArgs = push(sizeArgs, CopyBinding { name: clone(get(&sizes, i)), tokens: push(push([], word("c")), word(clone(get(&key.sizes, i)))) }); };
+    chain = push(clone((*need).chain), CopyAncestor { function: clone(*f), bigness: bigness });
+    cx = CopyCx { named: clone(*named), types: body.types, sizes: sizeArgs, lifted: liftedNames, copy: copy, chain: chain, blockTypes: body.blocks, localTypes: body.locals };
+    if size(body.spreads) = 0 { return transformCopyFamily(classes, program, program, sources, &cx, &key, &lifted, body.fun, body.arena); };
+    expanded = withPackInstances(program, body.spreads);
+    return transformCopyFamily(classes, program, &expanded, sources, &cx, &key, &lifted, body.fun, body.arena);
+};
+struct LiftedCopies { funs: List<FullFunction>, originals: List<Int>, needs: List<CopyNeed>, arena: List<AstNode>, error: String };
+fn transformLiftedCopies(classes: &InstanceNameClasses, program: &FullProgram, expanded: &FullProgram, sources: &CopySources, cx: &CopyCx, generic: &String, lifted: &List<String>, arena: List<AstNode>, needs: List<CopyNeed>) -> LiftedCopies [{ }] [{
+    affirm size(return.funs) = size(return.originals);
+    affirm forall j in 0..size(return.originals): get(return.originals, j) >= 0;
+    affirm forall j in 0..size(return.originals): get(return.originals, j) < size(program.functions);
+}] ~ {
+    funs = []; originals = [];
+    for n in lifted [{
+        affirm size(funs) = size(originals);
+        affirm forall j in 0..size(originals): get(originals, j) >= 0;
+        affirm forall j in 0..size(originals): get(originals, j) < size(program.functions);
+    }] {
+        i = HashMap::lookup(&sources.functions, n, -1);
+        if i < 0 || i >= size(program.functions) {
+            error = "internal compiler error: ".concat(generic).concat(" lifts ").concat(n).concat(", which the program does not have");
+            return LiftedCopies { funs: funs, originals: originals, needs: needs, arena: arena, error: error };
+        };
+        result = transformFunction(classes, expanded, cx, clone(get(&program.functions, i)), arena);
+        arena = result.arena;
+        if result.error != "" { return LiftedCopies { funs: funs, originals: originals, needs: needs, arena: arena, error: result.error }; };
+        originals = push(originals, i); funs = push(funs, result.fun);
+        needs = appendCopyNeeds(needs, &result.needs);
+    };
+    return LiftedCopies { funs: funs, originals: originals, needs: needs, arena: arena, error: "" };
+};
+fn transformCopyFamily(classes: &InstanceNameClasses, program: &FullProgram, expanded: &FullProgram, sources: &CopySources, cx: &CopyCx, key: &CopyKey, lifted: &List<String>, body: FullFunction, arena: List<AstNode>) -> CopyStep ~ {
+    result = transformFunction(classes, expanded, cx, clone(body), arena);
+    if result.error != "" { return failedCopyStep(program, result.error); };
+    liftedDone = transformLiftedCopies(classes, program, expanded, sources, cx, &key.function, lifted, result.arena, result.needs);
+    if liftedDone.error != "" { return failedCopyStep(program, liftedDone.error); };
+    error = frameRefusal(classes, program, &key.function, &cx.copy, &body, &result.fun);
+    if error != "" { return failedCopyStep(program, error); };
+    for i in 0..size(liftedDone.funs) {
+        error = frameRefusal(classes, program, &key.function, &cx.copy, get(&program.functions, get(&liftedDone.originals, i)), get(&liftedDone.funs, i));
+        if error != "" { return failedCopyStep(program, error); };
+    };
+    needs = liftedDone.needs; companion = companionOf(&key.function);
+    if companion.found {
+        n = companion.value;
+        if HashMap::contains(&sources.bounded, &n) {
+            needs = push(needs, CopyNeed { key: CopyKey { function: n, ..clone(*key) }, chain: clone((*cx).chain) });
+        };
+    };
+    return CopyStep { made: CopyMade { generic: clone(key.function), fun: result.fun, lifted: liftedDone.funs }, needs: needs, arena: liftedDone.arena, error: "" };
+};
+fn emptyCopyDone() -> HashMap<String, List<CopyKey>> ~ { return HashMap::new(); };
+fn buildCopies(classes: &InstanceNameClasses, program: &FullProgram, sources: &CopySources, named: &List<NamedCopy>, queue: List<CopyNeed>, arena: List<AstNode>) -> CopyBuild ~ {
+    done = emptyCopyDone(); made = []; i = 0;
+    while i < size(queue) ~ {
+        need = clone(get(&queue, i)); i = i + 1;
+        prior = HashMap::lookup(&done, &need.key.function, []); seen = false;
+        for k in &prior { if sameKey(k, &need.key) { seen = true; }; };
+        if !seen {
+            result = copyOne(classes, program, sources, named, &need, arena);
+            if result.error != "" { return CopyBuild { made: [], arena: [], error: result.error }; };
+            done = HashMap::insert(done, clone(need.key.function), push(prior, need.key));
+            arena = result.arena; made = push(made, result.made); queue = appendCopyNeeds(queue, &result.needs);
+        };
+    };
+    return CopyBuild { made: made, arena: arena, error: "" };
+};
+fn hasMayDiverge(fun: &FullFunction, arena: &List<AstNode>) -> Bool ~ {
+    id = integerAt(&fun.spec, 6);
+    if !id.ok || id.value < 0 || id.value >= size(arena) { return false; };
+    stmt = statementAt(arena, id.value);
+    if !(stmt is AstStatement::While) { return false; };
+    opt = nodeAt(arena, (stmt as AstStatement::While).t);
+    if !(opt is AstNode::OptTermination) { return false; };
+    term = (opt as AstNode::OptTermination).value;
+    if !(term is AstOptTermination::SomeTermination) { return false; };
+    node = nodeAt(arena, (term as AstOptTermination::SomeTermination).t);
+    if node is AstNode::Termination { return (node as AstNode::Termination).value is AstTermination::MayDiverge; };
+    return false;
+};
+fn callsDiverging(fun: &FullFunction, known: &HashSet<String>) -> Bool ~ {
+    for block in &fun.blocks {
+        for row in &block.lines {
+            if wordIs(row, 0, "call") && wordIs(row, 1, "const") && wordIs(row, 2, "fn") && HashSet::contains(known, textAt(row, 3)) { return true; };
+        };
+    };
+    return false;
+};
+fn divergingCopies(program: FullProgram) -> FullProgram ~ {
+    known = HashSet::new(); copies = [];
+    n = size(program.functions);
+    for i in 0..n [{
+        affirm forall j in 0..size(copies): get(copies, j) >= 0;
+        affirm forall j in 0..size(copies): get(copies, j) < n;
+    }] {
+        fun = get(&program.functions, i); label = textAt(&fun.header, 1);
+        if hasMayDiverge(fun, &program.arena) { known = known.insert(label); }
+        else { if copyFind(&label, "[", 0) >= 0 && !parseImplCheckName(&label).found { copies = push(copies, i); }; };
+    };
+    if size(known) = 0 || size(copies) = 0 { return program; };
+    functions = program.functions; arena = program.arena;
+    changing = true;
+    while changing [{ affirm size(functions) = n; }] ~ {
+        changing = false;
+        for j in 0..size(copies) [{ affirm size(functions) = n; }] {
+            i = get(&copies, j);
+            fun = get(&functions, i); label = textAt(&fun.header, 1);
+            if !HashSet::contains(&known, &label) && callsDiverging(fun, &known) {
+                term = size(arena);
+                arena = push(arena, AstNode::Termination { value: AstTermination::MayDiverge });
+                opt = size(arena);
+                arena = push(arena, AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: term } });
+                inv = size(arena);
+                arena = push(arena, AstNode::Validations { value: AstValidations::End });
+                body = size(arena);
+                arena = push(arena, AstNode::Statements { value: AstStatements::End });
+                bool = size(arena);
+                arena = push(arena, AstNode::Value { value: AstValue::VBool { b: true } });
+                expr = size(arena);
+                arena = push(arena, AstNode::Expression { value: AstExpression::Val { v: bool } });
+                spec = [];
+                for k in 0..size(fun.spec) {
+                    if k = 6 { spec = push(spec, intToken(size(arena))); }
+                    else { spec = push(spec, clone(get(&fun.spec, k))); };
+                };
+                arena = push(arena, AstNode::Statement { value: AstStatement::While { e: expr, vs: inv, t: opt, xs: body } });
+                functions = set(functions, i, FullFunction { spec: spec, ..clone(fun) });
+                known = known.insert(label); changing = true;
+            };
+        };
+    };
+    return FullProgram { functions: functions, arena: arena, ..program };
+};
+fn makeCopiesWith(classes: &InstanceNameClasses, program: FullProgram, library: &HashSet<String>) -> CopiesResult ~ {
+    if size(program.bounded) = 0 && size(program.instances) = 0 { return CopiesResult { value: program, error: "" }; };
+    sources = copySources(&program); named = originalCopyNames(&program);
+    lifted = HashSet::new(); always = HashSet::new();
+    for row in &program.bounded {
+        for n in boundedLifted(row) { lifted = HashSet::insert(lifted, clone(n)); };
+        if !isStubName(&row.name) && !HashSet::contains(library, &row.name) { always = HashSet::insert(always, clone(row.name)); };
+    };
+    program = prepareCopies(program, &lifted);
+    rootCx = CopyCx { named: clone(named), types: [], sizes: [], lifted: HashMap::new(), copy: "", chain: [], blockTypes: HashMap::new(), localTypes: HashMap::new() };
+    roots = []; arena = clone(program.arena); needs = [];
+    for n in &sources.order {
+        if !HashMap::contains(&sources.bounded, n) && !HashSet::contains(&lifted, n) {
+            i = HashMap::lookup(&sources.functions, n, -1);
+            if i < 0 || i >= size(program.functions) {
+                return CopiesResult { value: program, error: "internal compiler error: the copy worklist refers to a missing root ".concat(n) };
+            };
+            f = get(&program.functions, i);
+            result = transformFunction(classes, &program, &rootCx, clone(f), arena);
+            if result.error != "" { return CopiesResult { value: program, error: result.error }; };
+            arena = result.arena; roots = push(roots, result.fun); needs = appendCopyNeeds(needs, &result.needs);
+        };
+    };
+    entry = transformFunction(classes, &program, &rootCx, clone(program.entry), arena);
+    if entry.error != "" { return CopiesResult { value: program, error: entry.error }; };
+    needs = appendCopyNeeds(needs, &entry.needs); used = genericClosure(&program, &sources, clone(always));
+    while true ~ {
+        queue = genericCopyNeeds(&program, &sources, &used, clone(needs));
+        built = buildCopies(classes, &program, &sources, &named, queue, clone(entry.arena));
+        if built.error != "" { return CopiesResult { value: program, error: built.error }; };
+        next = genericClosure(&program, &sources, copyUsedAfter(&built.made, &sources, &always));
+        if copySetEqual(&used, &next) {
+            out = finishCopies(classes, FullProgram { arena: built.arena, ..program }, &named, &used, roots, entry.fun, &built.made);
+            return CopiesResult { value: divergingCopies(completeInstancesWith(out, classes)), error: "" };
+        };
+        used = next;
+    };
+    return CopiesResult { value: program, error: "internal compiler error: the copy worklist did not reach a fixed point" };
+};
