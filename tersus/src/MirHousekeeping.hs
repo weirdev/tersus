@@ -915,19 +915,21 @@ nativeProgramWith :: IO (Result [(ModuleId, Program)] String) -> Program -> IO (
 nativeProgramWith = nativeProgramUsing ownershipTool
 
 nativeProgramUsing :: IO Tool -> IO (Result [(ModuleId, Program)] String) -> Program -> IO (Result Program String)
-nativeProgramUsing tool library program = do
-    ready <- prepareBootstrap
-    case ready of
-        Error e -> pure (Error e)
-        Ok () -> do
-            expanded <- ownershipPassWith tool "expand" program
-            case expanded of
-                Error e -> pure (Error e)
-                Ok written
-                    | not (hasLists written) -> pure (Ok written)
-                    | otherwise -> do
-                        units <- library
-                        pure (lowerLists units written)
+nativeProgramUsing tool library raw = case abiView raw of
+    Error e -> pure (Error e)
+    Ok program -> do
+        ready <- prepareBootstrap
+        case ready of
+            Error e -> pure (Error e)
+            Ok () -> do
+                expanded <- ownershipPassWith tool "expand" program
+                case expanded of
+                    Error e -> pure (Error e)
+                    Ok written
+                        | not (hasLists written) -> pure (Ok written)
+                        | otherwise -> do
+                            units <- library
+                            pure (lowerLists units written)
 
 {-# NOINLINE emitterOwnedProgram #-}
 emitterOwnedProgram :: Result Program String
