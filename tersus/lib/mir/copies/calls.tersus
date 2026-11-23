@@ -1,0 +1,438 @@
+import data::codec::codec { Token };
+import mir::full::full { FullProgram, FullFunction };
+import mir::full::read { fieldsEnd };
+import mir::full::tokens { argEnd, integerAt, intToken, namesEnd, numberAt, sizeEnd, sliceTokens, textAt, typeEnd, word, wordIs };
+import mir::copies::keys { Maybe, CopyKey, CopyBinding, CopyInstance, CopyCx, CopyNeed, DispatchEdge, boundCallParts, instanceAt, concreteKey, nameOf, companionOf, renderCopyType, copyLookup };
+import mir::copies::types { substituteArg };
+import mir::instances::names { InstanceNameClasses };
+import mir::instances::complete { tupleArity };
+
+enum CopyTarget {
+    Named { name: String, extras: List<List<Token>> },
+    InlineCopy,
+    InlineEq,
+    InlineBuiltin { builtin: String, op: String }
+};
+impl Clone for CopyTarget { };
+
+struct CopyCall { target: CopyTarget, error: String, needs: List<CopyNeed>, dispatch: List<DispatchEdge> };
+
+fn resolved(value: CopyTarget) -> CopyCall ~ {
+    return CopyCall { target: value, error: "", needs: [], dispatch: [] };
+};
+
+fn callError(message: String) -> CopyCall ~ {
+    return CopyCall { target: CopyTarget::Named { name: "", extras: [] }, error: message, needs: [], dispatch: [] };
+};
+
+fn namedCopy(classes: &InstanceNameClasses, cx: &CopyCx, key: CopyKey, extras: List<List<Token>>) -> CopyCall ~ {
+    return CopyCall {
+        target: CopyTarget::Named { name: nameOf(classes, &cx.named, &key), extras: extras },
+        error: "",
+        needs: push([], CopyNeed { key: key, chain: clone(cx.chain) }),
+        dispatch: []
+    };
+};
+
+fn target(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, constants: &HashMap<Int, String>, caller: &FullFunction, callee: &String, args: &List<List<Token>>, dest: Maybe<Int>) -> CopyCall ~ {
+    lifted = HashMap::lookup(&cx.lifted, callee, "");
+    if lifted != "" { return resolved(CopyTarget::Named { name: lifted, extras: [] }); };
+    shown = clone(cx.copy);
+    if shown = "" { shown = textAt(&caller.header, 1); };
+    bound = boundCallParts(callee);
+    if bound.found {
+        ty = copyLookup(&cx.types, &bound.value.param);
+        if size(ty) > 0 {
+            resolved = resolveBound(classes, program, cx, constants, caller, libraryBuiltin(program, callee), &bound.value.trait, &bound.value.method, &ty, args, dest);
+            if resolved.error = "" && resolved.target is CopyTarget::Named {
+                stub = bound.value.trait.concat(" for $Self::").concat(&bound.value.method);
+                edge = DispatchEdge { stub: stub, callee: clone((resolved.target as CopyTarget::Named).name) };
+                return CopyCall { dispatch: push([], edge), ..resolved };
+            };
+            return resolved;
+        };
+        return callError("internal compiler error: ".concat(callee).concat(" is a call through a bound of ").concat(&bound.value.param).concat(", which ").concat(shown).concat(" has no type for"));
+    };
+    instance = instanceAt(program, callee);
+    if instance.found {
+        applied = [];
+        for arg in &instance.value.args { applied = push(applied, substituteArg(arg, &cx.sizes, &cx.types)); };
+        inst = CopyInstance { function: clone(instance.value.function), args: applied };
+        key = concreteKey(&inst);
+        if key.found { return namedCopy(classes, cx, key.value, []); };
+        return callError("Type error: the size in a bound of ".concat(&instance.value.function).concat(" cannot be worked out from its arguments, in ").concat(shown));
+    };
+    return resolved(CopyTarget::Named { name: clone(callee), extras: [] });
+};
+
+fn libraryBuiltin(program: &FullProgram, callee: &String) -> Bool ~ {
+    instance = instanceAt(program, callee);
+    return instance.found && instance.value.function = "$builtin" && size(instance.value.args) = 0;
+};
+
+fn functionIndex(program: &FullProgram, callee: &String) -> Int ~ {
+    for i in 0..size(program.functions) {
+        fun = get(program.functions, i);
+        if textAt(&fun.header, 1) = callee { return i; };
+    };
+    return 0 - 1;
+};
+
+fn boundedIndex(program: &FullProgram, callee: &String) -> Int ~ {
+    for i in 0..size(program.bounded) { if get(program.bounded, i).name = callee { return i; }; };
+    return 0 - 1;
+};
+
+fn resolveBound(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, constants: &HashMap<Int, String>, caller: &FullFunction, library: Bool, traitName: &String, method: &String, ty: &List<Token>, args: &List<List<Token>>, dest: Maybe<Int>) -> CopyCall ~ {
+    if traitName = "Clone" && method = "clone" { return traitClone(classes, program, cx, constants, caller, ty, args, dest); };
+    base = unref(ty);
+    if traitName = "Eq" && method = "eq" {
+        if wordType(&base) { return resolved(CopyTarget::InlineEq); };
+        elem = unsizedBoxed(ty);
+        if elem.found && boundedIndex(program, "eqBoxedArrays") >= 0 {
+            return namedCopy(classes, cx, CopyKey { function: "eqBoxedArrays", types: push([], elem.value), sizes: [] }, []);
+        };
+    };
+    inline = sequenceBuiltin(method, ty);
+    inner = boxedArray(&base);
+    if library && inline.found && size(inner) > 0 && !wordIs(&inner, typeEnd(&inner, 1), "any") {
+        return resolved(inline.value);
+    };
+    owner = ownerOfType(program, &base);
+    if owner != "" {
+        callee = "<".concat(owner).concat(" as ").concat(traitName).concat(">::").concat(method);
+        if functionIndex(program, &callee) >= 0 {
+            witness = Maybe<List<Token>> { found: true, value: clone(ty) };
+            if library && (method = "size" || method = "get") && sequenceType(ty) {
+                return calling(classes, program, cx, constants, caller, witness, &callee, args, dest);
+            };
+            return callingCheck(classes, program, cx, constants, caller, witness, &callee, args, dest);
+        };
+    };
+    if inline.found && (traitName = "Sequence" || traitName = "Growable") { return resolved(inline.value); };
+    return callError("internal compiler error: ".concat(traitName).concat("::").concat(method).concat(" is called on a ").concat(renderCopyType(classes, ty)).concat(" in ").concat(&cx.copy).concat(", which has no impl of it"));
+};
+
+fn cloneTarget(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, constants: &HashMap<Int, String>, caller: &FullFunction, ty: &List<Token>, args: &List<List<Token>>, dest: Maybe<Int>) -> CopyCall ~ {
+    base = unref(ty);
+    if wordType(&base) || wordIs(&base, 0, "fn") || isReference(&base) { return resolved(CopyTarget::InlineCopy); };
+    return traitClone(classes, program, cx, constants, caller, ty, args, dest);
+};
+
+fn traitClone(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, constants: &HashMap<Int, String>, caller: &FullFunction, ty: &List<Token>, args: &List<List<Token>>, dest: Maybe<Int>) -> CopyCall ~ {
+    base = unref(ty);
+    elem = unsizedBoxed(&base);
+    if elem.found && boundedIndex(program, "cloneBoxedArray") >= 0 {
+        return namedCopy(classes, cx, CopyKey { function: "cloneBoxedArray", types: push([], elem.value), sizes: [] }, []);
+    };
+    if wordIs(&base, 0, "named") && tupleArity(textAt(&base, 1)) > 0 { return resolved(CopyTarget::InlineCopy); };
+    owner = ownerOfType(program, unref(&base));
+    if owner != "" {
+        callee = "<".concat(owner).concat(" as Clone>::clone");
+        if functionIndex(program, &callee) >= 0 {
+            witness = Maybe<List<Token>> { found: true, value: clone(ty) };
+            return callingCheck(classes, program, cx, constants, caller, witness, &callee, args, dest);
+        };
+    };
+    return resolved(CopyTarget::InlineCopy);
+};
+
+fn callingCheck(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, constants: &HashMap<Int, String>, caller: &FullFunction, witness: Maybe<List<Token>>, callee: &String, args: &List<List<Token>>, dest: Maybe<Int>) -> CopyCall ~ {
+    check = companionOf(callee);
+    if check.found && functionIndex(program, &check.value) >= 0 { return calling(classes, program, cx, constants, caller, witness, &check.value, args, dest); };
+    return callError("internal compiler error: ".concat(callee).concat(" has no check function, which a call through a bound in ").concat(&cx.copy).concat(" calls"));
+};
+
+fn isReference(ty: &List<Token>) -> Bool ~ { return wordIs(ty, 0, "ref") || wordIs(ty, 0, "mutref"); };
+
+fn unref(ty: &List<Token>) -> List<Token> ~ {
+    if isReference(ty) { return sliceTokens(ty, 1, size(ty)); };
+    return clone(ty);
+};
+
+fn wordType(ty: &List<Token>) -> Bool ~ {
+    tag = textAt(ty, 0);
+    return tag = "int" || tag = "byte" || tag = "bool" || tag = "addr" || tag = "i8" || tag = "i16" || tag = "i32" || tag = "u16" || tag = "u32";
+};
+
+fn unaryNominal(ty: &List<Token>, base: &String) -> Bool ~ {
+    return wordIs(ty, 0, "named") && textAt(ty, 1) = base && numberAt(ty, 2) = 1 && wordIs(ty, 3, "type");
+};
+
+fn boxedArray(ty: &List<Token>) -> List<Token> ~ {
+    p = 0 - 1;
+    if unaryNominal(ty, "Box") { p = 4; };
+    if wordIs(ty, 0, "box") { p = 1; };
+    if wordIs(ty, p, "array") { return sliceTokens(ty, p, size(ty)); };
+    return [];
+};
+
+fn unsizedBoxed(ty: &List<Token>) -> Maybe<List<Token>> ~ {
+    base = unref(ty);
+    arr = boxedArray(&base);
+    end = typeEnd(&arr, 1);
+    if end >= 0 && wordIs(&arr, end, "any") { return Maybe<List<Token>> { found: true, value: sliceTokens(&arr, 1, end) }; };
+    return Maybe<List<Token>> { found: false, value: [] };
+};
+
+fn sequenceType(ty: &List<Token>) -> Bool ~ {
+    base = unref(ty);
+    return wordIs(&base, 0, "array") || wordIs(&base, 0, "list") || unaryNominal(&base, "List") || size(boxedArray(&base)) > 0;
+};
+
+fn sequenceBuiltin(method: &String, ty: &List<Token>) -> Maybe<CopyTarget> ~ {
+    if sequenceType(ty) {
+        if method = "size" { return Maybe<CopyTarget> { found: true, value: CopyTarget::InlineBuiltin { builtin: "size", op: "length" } }; };
+        if method = "get" || method = "set" || method = "push" || method = "pop" || method = "first" || method = "last" {
+            return Maybe<CopyTarget> { found: true, value: CopyTarget::InlineBuiltin { builtin: clone(method), op: clone(method) } };
+        };
+    };
+    return Maybe<CopyTarget> { found: false, value: CopyTarget::InlineCopy };
+};
+
+fn ownerOfType(program: &FullProgram, base: &List<Token>) -> String ~ {
+    tag = textAt(base, 0);
+    if tag = "array" { return "Array"; };
+    if tag = "box" { return "Box"; };
+    if tag = "list" { return "List"; };
+    if tag = "named" { return textAt(base, 1); };
+    if tag = "int" { return "Int"; };
+    if tag = "byte" { return "Byte"; };
+    if tag = "bool" { return "Bool"; };
+    if tag = "variant" { return variantOwner(program, textAt(base, 1)); };
+    return "";
+};
+
+fn variantOwner(program: &FullProgram, variantName: &String) -> String ~ {
+    for decl in &program.types {
+        if decl.name = variantName && wordIs(&decl.tokens, 0, "struct") { return clone(decl.name); };
+    };
+    for decl in &program.types {
+        if wordIs(&decl.tokens, 0, "enum") {
+            n = numberAt(&decl.tokens, 2);
+            p = 3;
+            if n >= 0 {
+                for i in 0..n {
+                    if textAt(&decl.tokens, p) = variantName { return clone(decl.name); };
+                    p = fieldsEnd(&decl.tokens, p + 1);
+                    if p < 0 { return ""; };
+                };
+            };
+        };
+    };
+    return "";
+};
+
+fn sameOwner(pat: &List<Token>, actual: &List<Token>) -> Bool ~ {
+    p = unref(pat); a = unref(actual);
+    if wordIs(&p, 0, "array") && wordIs(&a, 0, "array") { return true; };
+    return wordIs(&p, 0, "named") && wordIs(&a, 0, "named") && textAt(&p, 1) = textAt(&a, 1);
+};
+
+fn sizeParamsAt(ts: &List<Token>) -> Int ~ {
+    at = 4 + numberAt(ts, 3);
+    if !wordIs(ts, at, "returns") { return -1; };
+    if wordIs(ts, at + 1, "none") { return at + 2; };
+    if wordIs(ts, at + 1, "some") { return typeEnd(ts, at + 2); };
+    return -1;
+};
+
+fn sizeParams(ts: &List<Token>) -> List<String> ~ {
+    at = sizeParamsAt(ts);
+    if !wordIs(ts, at, "sizeparams") { return []; };
+    return itemsAt(ts, at + 1);
+};
+
+fn typeParams(ts: &List<Token>) -> List<String> ~ {
+    at = sizeParamsAt(ts);
+    if !wordIs(ts, at, "sizeparams") { return []; };
+    next = namesEnd(ts, at + 1);
+    if !wordIs(ts, next, "typeparams") { return []; };
+    return itemsAt(ts, next + 1);
+};
+
+fn itemsAt(ts: &List<Token>, at: Int) -> List<String> ~ {
+    n = numberAt(ts, at);
+    if n < 0 || at + n >= size(ts) { return []; };
+    out = [];
+    for j in 0..n { out = push(out, textAt(ts, at + 1 + j)); };
+    return out;
+};
+
+fn returnType(fun: &FullFunction) -> List<Token> ~ {
+    h = &fun.header;
+    at = 4 + numberAt(h, 3);
+    if wordIs(h, at, "returns") && wordIs(h, at + 1, "some") { return sliceTokens(h, at + 2, typeEnd(h, at + 2)); };
+    return [];
+};
+
+fn localType(fun: &FullFunction, id: &String) -> List<Token> ~ {
+    for local in &fun.locals {
+        if textAt(&local.tokens, 1) = id {
+            start = 3;
+            if wordIs(&local.tokens, 2, "some") { start = 4; };
+            return sliceTokens(&local.tokens, start, size(local.tokens));
+        };
+    };
+    return [];
+};
+
+fn operandType(caller: &FullFunction, arg: &List<Token>) -> List<Token> ~ {
+    if wordIs(arg, 0, "copy") || wordIs(arg, 0, "move") { return localType(caller, textAt(arg, 1)); };
+    return [];
+};
+
+struct CallTypes { param: List<Token>, actual: List<Token> };
+impl Clone for CallTypes { };
+
+fn callTypes(caller: &FullFunction, generic: &FullFunction, witness: &Maybe<List<Token>>, args: &List<List<Token>>, dest: &Maybe<Int>) -> List<CallTypes> ~ {
+    params = [];
+    for id in itemsAt(&generic.header, 3) {
+        p = localType(generic, &id);
+        if size(p) > 0 { params = push(params, p); };
+    };
+    out = [];
+    for i in 0..size(params) {
+        if i < size(args) {
+            actual = operandType(caller, get(args, i));
+            if size(actual) > 0 { out = push(out, CallTypes { param: clone(get(&params, i)), actual: actual }); };
+        };
+    };
+    ret = returnType(generic);
+    if size(ret) > 0 && dest.found {
+        actual = localType(caller, String::fromInt(dest.value));
+        if size(actual) > 0 { out = push(out, CallTypes { param: clone(ret), actual: actual }); };
+    };
+    if witness.found {
+        if size(ret) > 0 { params = push(params, ret); };
+        for param in &params {
+            if sameOwner(param, &witness.value) { out = push(out, CallTypes { param: clone(param), actual: clone(witness.value) }); };
+        };
+    };
+    return out;
+};
+
+fn intOperand(decimal: String) -> List<Token> ~ { return push(push(push([], word("const")), word("int")), word(decimal)); };
+
+fn sizeOperand(constants: &HashMap<Int, String>, caller: &FullFunction, matchedSize: &List<Token>) -> List<Token> ~ {
+    if wordIs(matchedSize, 0, "c") { return intOperand(textAt(matchedSize, 1)); };
+    if !wordIs(matchedSize, 0, "p") { return []; };
+    q = textAt(matchedSize, 1);
+    params = numberAt(&caller.header, 3);
+    names = sizeParams(&caller.header);
+    start = params - size(names);
+    if start < 0 { start = 0; };
+    for i in 0..size(names) {
+        if i + start < params && get(&names, i) = q {
+            id = integerAt(&caller.header, i + start + 4);
+            if !id.ok { return []; };
+            decimal = HashMap::lookup(constants, &id.value, "");
+            if decimal != "" { return intOperand(decimal); };
+            return push(push([], word("copy")), intToken(id.value));
+        };
+    };
+    return [];
+};
+
+fn missingArg(cx: &CopyCx, callee: &String, kind: &String, variable: &String) -> CopyCall ~ {
+    return callError("internal compiler error: the ".concat(kind).concat(" ").concat(variable).concat(" of ").concat(callee).concat(" is not known from a call of it in ").concat(&cx.copy));
+};
+
+fn calling(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, constants: &HashMap<Int, String>, caller: &FullFunction, witness: Maybe<List<Token>>, callee: &String, args: &List<List<Token>>, dest: Maybe<Int>) -> CopyCall ~ {
+    idx = functionIndex(program, callee);
+    if idx < 0 || idx >= size(program.functions) {
+        return callError("internal compiler error: ".concat(callee).concat(", which a copy of ").concat(&cx.copy).concat(" calls, is not a function of the program"));
+    };
+    generic = get(program.functions, idx);
+    pairs = callTypes(caller, generic, &witness, args, &dest);
+    sizes = [];
+    for pair in &pairs { sizes = matchBindings(sizes, &pair.param, &pair.actual, true); };
+    extras = [];
+    for s in sizeParams(&generic.header) {
+        value = copyLookup(&sizes, &s);
+        if size(value) = 0 { return missingArg(cx, callee, "size", &s); };
+        op = sizeOperand(constants, caller, &value);
+        if size(op) = 0 { return callError("internal compiler error: the size ".concat(s).concat(" of ").concat(callee).concat(" is not known in ").concat(&cx.copy)); };
+        extras = push(extras, op);
+    };
+    bounded = boundedIndex(program, callee);
+    if bounded < 0 || bounded >= size(program.bounded) { return resolved(CopyTarget::Named { name: clone(callee), extras: extras }); };
+    types = [];
+    for pair in &pairs { types = matchBindings(types, &pair.param, &pair.actual, false); };
+    tys = [];
+    for v in typeParams(&generic.header) {
+        ty = copyLookup(&types, &v);
+        if size(ty) = 0 { return missingArg(cx, callee, "type", &v); };
+        tys = push(tys, ty);
+    };
+    boundSizes = [];
+    boundedRecord = get(program.bounded, bounded);
+    for s in itemsAt(&boundedRecord.tokens, 2) {
+        value = copyLookup(&sizes, &s);
+        if !wordIs(&value, 0, "c") { return missingArg(cx, callee, "size", &s); };
+        boundSizes = push(boundSizes, textAt(&value, 1));
+    };
+    return namedCopy(classes, cx, CopyKey { function: clone(callee), types: tys, sizes: boundSizes }, extras);
+};
+
+fn matchTy(pat: &List<Token>, actual: &List<Token>) -> List<CopyBinding> ~ { return matchBindings([], pat, actual, false); };
+fn matchSizes(pat: &List<Token>, actual: &List<Token>) -> List<CopyBinding> ~ { return matchBindings([], pat, actual, true); };
+
+fn matchSize(bs: List<CopyBinding>, pat: &List<Token>, p: Int, actual: &List<Token>, a: Int) -> List<CopyBinding> ~ {
+    if !wordIs(pat, p, "p") { return bs; };
+    return push(bs, CopyBinding { name: textAt(pat, p + 1), tokens: sliceTokens(actual, a, sizeEnd(actual, a)) });
+};
+
+fn matchBindings(bs: List<CopyBinding>, pat: &List<Token>, actual: &List<Token>, sizes: Bool) -> List<CopyBinding> ~ {
+    if size(pat) = 0 || size(actual) = 0 { return bs; };
+    if !sizes && wordIs(pat, 0, "param") { return push(bs, CopyBinding { name: textAt(pat, 1), tokens: clone(actual) }); };
+    if isReference(pat) { return matchBindings(bs, unref(pat), actual, sizes); };
+    if isReference(actual) { return matchBindings(bs, pat, unref(actual), sizes); };
+    tag = textAt(pat, 0);
+    if tag != textAt(actual, 0) { return bs; };
+    if tag = "addr" || tag = "uninit" || tag = "block" || tag = "array" {
+        p = typeEnd(pat, 1); a = typeEnd(actual, 1);
+        if sizes && tag = "array" { bs = matchSize(bs, pat, p, actual, a); };
+        return matchBindings(bs, sliceTokens(pat, 1, p), sliceTokens(actual, 1, a), sizes);
+    };
+    if tag = "named" { return matchNamed(bs, pat, actual, sizes); };
+    if !sizes && tag = "fn" { return matchFunction(bs, pat, actual); };
+    return bs;
+};
+
+fn matchNamed(bs: List<CopyBinding>, pat: &List<Token>, actual: &List<Token>, sizes: Bool) -> List<CopyBinding> ~ {
+    n = numberAt(pat, 2);
+    if n < 0 || n != numberAt(actual, 2) || textAt(pat, 1) != textAt(actual, 1) { return bs; };
+    p = 3; a = 3;
+    for i in 0..n {
+        pe = argEnd(pat, p); ae = argEnd(actual, a);
+        if pe < 0 || ae < 0 { return bs; };
+        if wordIs(pat, p, "type") && wordIs(actual, a, "type") { bs = matchBindings(bs, sliceTokens(pat, p + 1, pe), sliceTokens(actual, a + 1, ae), sizes); };
+        if sizes && wordIs(pat, p, "size") && wordIs(actual, a, "size") { bs = matchSize(bs, pat, p + 1, actual, a + 1); };
+        p = pe; a = ae;
+    };
+    return bs;
+};
+
+fn functionTypes(ty: &List<Token>) -> List<List<Token>> ~ {
+    n = numberAt(ty, 1);
+    if n < 0 { return []; };
+    params = []; p = 2;
+    for i in 0..n {
+        end = typeEnd(ty, p);
+        if end < 0 { return []; };
+        params = push(params, sliceTokens(ty, p, end));
+        p = end;
+    };
+    out = push([], sliceTokens(ty, p, size(ty)));
+    for param in params { out = push(out, clone(param)); };
+    return out;
+};
+
+fn matchFunction(bs: List<CopyBinding>, pat: &List<Token>, actual: &List<Token>) -> List<CopyBinding> ~ {
+    ps = functionTypes(pat); actuals = functionTypes(actual);
+    for i in 0..size(ps) {
+        if i < size(actuals) { bs = matchBindings(bs, get(&ps, i), get(&actuals, i), false); };
+    };
+    return bs;
+};

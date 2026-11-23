@@ -3,7 +3,7 @@ import data::ast::ast { AstNode };
 import mir::full::full { FullBlock, FullFunction, FullRecord };
 import mir::full::tokens { appendTokens, argEnd, integerAt, intToken, intsEnd, name, namesEnd, operandEnd, sliceTokens, textAt, typeEnd, word, wordIs };
 import mir::full::records { EnvEntry, envEntries, envStart, keyOrder, orderEntries, replaceEnv };
-import mir::pack::numbers { decimalAdd, decimalCmp, decimalFits };
+import mir::pack::numbers { decimalAdd, decimalCmp, decimalFits, decimalInvariantError };
 import mir::pack::body { PackBinding, PackSpread, constantsOf, operandConstant, renameRow, resolveElements, rowLocals, spreadForwards, targets, usesPack };
 import mir::pack::proofs { packProofs, proofDefineName, renameInvariantPayload, renameTerminationPayload, renameValidationPayload };
 
@@ -26,14 +26,15 @@ struct ExpansionState {
 
 fn packInt(row: &List<Token>, p: Int) -> Int ~ { return integerAt(row, p).value; };
 fn packLoopIntList(row: &List<Token>, p: Int) -> List<Int> ~ {
-    out = [];
-    for i in 0..packInt(row, p) { out = push(out, packInt(row, p + 1 + i)); };
+    out = []; count = packInt(row, p);
+    if count > 0 { for i in 0..count { out = push(out, packInt(row, p + 1 + i)); }; };
     return out;
 };
 
 fn packLoops(row: &List<Token>) -> List<PackLoop> ~ {
     at = namesEnd(row, namesEnd(row, namesEnd(row, 2)));
     count = packInt(row, at); at = at + 1; out = [];
+    if count <= 0 { return out; };
     for i in 0..count {
         bs = at + 3; ls = intsEnd(row, bs); tail = intsEnd(row, ls);
         out = push(out, PackLoop {
@@ -64,8 +65,8 @@ fn spreadIDs(header: &List<Token>, at: Int, pack: Int, elements: &List<Int>) -> 
 fn expandHeader(row: &List<Token>, pack: Int, packType: &String, elements: &List<Int>) -> List<Token> ~ {
     at = headerTypes(row); borrowed = namesEnd(row, at) + 1;
     types = []; count = 0;
-    for i in at + 1..borrowed - 1 {
-        if textAt(row, i) != packType { types = push(types, clone(get(row, i))); count = count + 1; };
+    for t in sliceTokens(row, at + 1, borrowed - 1) {
+        if t.text != packType { types = push(types, clone(t)); count = count + 1; };
     };
     out = appendTokens(sliceTokens(row, 0, 3), spreadIDs(row, 3, pack, elements));
     out = push(appendTokens(out, sliceTokens(row, intsEnd(row, 3), at)), intToken(count));
@@ -81,12 +82,12 @@ fn freshElement(id: Int, k: Int, packName: &String, packType: &String) -> FullRe
 };
 fn orderedBlocks(blocks: List<FullBlock>) -> List<FullBlock> ~ {
     keys = []; for b in &blocks { keys = push(keys, String::fromInt(b.id)); };
-    out = []; for i in keyOrder(&keys, true) { out = push(out, clone(get(&blocks, i))); };
+    out = []; for i in keyOrder(&keys, true) { if i >= 0 && i < size(blocks) { out = push(out, clone(get(&blocks, i))); }; };
     return out;
 };
 fn orderedRecords(records: List<FullRecord>) -> List<FullRecord> ~ {
     keys = []; for r in &records { keys = push(keys, clone(r.name)); };
-    out = []; for i in keyOrder(&keys, true) { out = push(out, clone(get(&records, i))); };
+    out = []; for i in keyOrder(&keys, true) { if i >= 0 && i < size(records) { out = push(out, clone(get(&records, i))); }; };
     return out;
 };
 fn orderedFunction(fun: FullFunction) -> FullFunction ~ {
@@ -95,7 +96,10 @@ fn orderedFunction(fun: FullFunction) -> FullFunction ~ {
 fn blockTable(blocks: &List<FullBlock>) -> HashMap<Int, FullBlock> ~ {
     out = HashMap::new(); for b in blocks { out = HashMap::insert(out, b.id, clone(b)); }; return out;
 };
-fn lastRow(b: &FullBlock) -> List<Token> ~ { return clone(get(&b.lines, size(b.lines) - 1)); };
+fn lastRow(b: &FullBlock) -> List<Token> ~ {
+    if size(b.lines) <= 0 { return []; };
+    return clone(last(&b.lines));
+};
 fn reached(blocks: &List<FullBlock>) -> HashSet<Int> ~ {
     table = blockTable(blocks); todo = push([], 0); seen = HashSet::new(); i = 0;
     while i < size(todo) ~ {
@@ -131,16 +135,16 @@ fn prune(fun: FullFunction, requireBody: Bool) -> FullFunction ~ {
     };
     return FullFunction { blocks: bs, loops: specs, ..fun };
 };
-fn foldGuards(fun: FullFunction, pack: Int, count: Int) -> FullFunction ~ {
-    known = constantsOf(&fun, pack, count); bs = [];
+fn foldGuards(fun: FullFunction, known: &HashMap<Int,List<Token>>) -> FullFunction ~ {
+    bs = [];
     for b in fun.blocks {
         row = lastRow(&b); out = clone(b);
         if wordIs(&row, 0, "switch") {
-            end = operandEnd(&row, 1); value = operandConstant(&known, sliceTokens(&row, 1, end));
+            end = operandEnd(&row, 1); value = operandConstant(known, sliceTokens(&row, 1, end));
             if wordIs(&value, 1, "bool") {
                 at = end; if wordIs(&value, 2, "false") { at = at + 1; };
                 idx = size(out.lines) - 1;
-                out = FullBlock { id: out.id, lines: set(out.lines, idx, push(push([], word("goto")), intToken(packInt(&row, at)))) };
+                if idx >= 0 { out = FullBlock { id: out.id, lines: set(out.lines, idx, push(push([], word("goto")), intToken(packInt(&row, at)))) }; };
             };
         };
         bs = push(bs, out);
@@ -219,14 +223,18 @@ fn mentionedParams(row: &List<Token>, at: Int) -> List<String> ~ {
     if kind = "list" || kind = "box" || kind = "array" || kind = "addr" || kind = "block" || kind = "uninit" || kind = "ref" || kind = "mutref" { return mentionedParams(row, at + 1); };
     names = [];
     if kind = "fn" {
-        p = at + 2; count = packInt(row, at + 1);
-        for i in 0..count + 1 { for n in mentionedParams(row, p) { names = push(names, clone(n)); }; p = typeEnd(row, p); };
+        p = at + 2; end = packInt(row, at + 1) + 1;
+        if end > 0 {
+            for i in 0..end { for n in mentionedParams(row, p) { names = push(names, clone(n)); }; p = typeEnd(row, p); };
+        };
     };
     if kind = "named" {
-        p = at + 3;
-        for i in 0..packInt(row, at + 2) {
-            if wordIs(row, p, "type") { for n in mentionedParams(row, p + 1) { names = push(names, clone(n)); }; };
-            p = argEnd(row, p);
+        p = at + 3; count = packInt(row, at + 2);
+        if count > 0 {
+            for i in 0..count {
+                if wordIs(row, p, "type") { for n in mentionedParams(row, p + 1) { names = push(names, clone(n)); }; };
+                p = argEnd(row, p);
+            };
         };
     };
     return names;
@@ -245,10 +253,15 @@ fn expandPack(bounded: &FullRecord, packType: &String, count: Int, fun: FullFunc
         };
     };
     if matches != 1 { return packFailure(fun, arena, ice.concat(&funName).concat(" has no pack parameter of ").concat(packType)); };
-    for b in &fun.blocks { if b.id > nextBlock { nextBlock = b.id; }; };
+    for b in &fun.blocks {
+        if size(b.lines) = 0 { return packFailure(fun, arena, ice.concat("a block has no terminator in a copy of ").concat(&funName)); };
+        if b.id > nextBlock { nextBlock = b.id; };
+    };
     nextLocal = nextLocal + 1; nextBlock = nextBlock + 1; es = []; ls = fun.locals;
-    for k in 0..count {
-        id = nextLocal + k; es = push(es, id); ls = push(ls, freshElement(id, k, &packName, packType));
+    if count > 0 {
+        for k in 0..count {
+            id = nextLocal + k; es = push(es, id); ls = push(ls, freshElement(id, k, &packName, packType));
+        };
     };
     header = expandHeader(&fun.header, pack, packType, &es);
     loops = packLoops(&bounded.tokens); specs = [];
@@ -265,8 +278,9 @@ fn expandPack(bounded: &FullRecord, packType: &String, count: Int, fun: FullFunc
     fw = spreadForwards(prune(orderedFunction(er.fun), false), er.arena, pack, &packName, &es);
     if fw.error != "" { return packFailure(fw.fun, fw.arena, fw.error); };
     fun = prune(orderedFunction(fw.fun), false);
-    known = constantsOf(&fun, pack, count);
-    pr = packProofs(fun, fw.arena, &known, &packName, packType, count);
+    constants = constantsOf(&fun, pack, count);
+    if constants.error != "" { return packFailure(fun, fw.arena, constants.error); };
+    pr = packProofs(fun, fw.arena, &constants.values, &packName, packType, count);
     if pr.error != "" { return packFailure(pr.fun, pr.arena, pr.error); };
     fun = dropUnused(transformEnvs(pr.fun, pack, &packName, &es, HashSet::new(), true));
     if usesPack(&fun, pack) { return packFailure(fun, pr.arena, ice.concat("the pack ").concat(&packName).concat(" of ").concat(&funName).concat(" is used as a value in a copy")); };
@@ -309,16 +323,18 @@ fn intSet(xs: &List<Int>) -> HashSet<Int> ~ {
 fn unrollAll(st: ExpansionState, pack: Int, elements: &List<Int>) -> ExpansionState ~ {
     more = true;
     while more ~ {
-        fnp = prune(foldGuards(st.fun, pack, size(elements)), true);
+        constants = constantsOf(&st.fun, pack, size(elements));
+        if constants.error != "" { return ExpansionState { error: constants.error, ..st }; };
+        fnp = prune(foldGuards(st.fun, &constants.values), true);
         seen = reached(&fnp.blocks); ls = [];
         for l in st.loops { if HashSet::contains(&seen, l.header) { ls = push(ls, clone(l)); }; };
         st = ExpansionState { fun: fnp, loops: ls, ..st };
         if size(st.loops) = 0 { return st; };
-        chosen = -1; p = 0;
-        for l in &st.loops {
+        chosen = -1;
+        for p, l in &st.loops [{ affirm chosen < size(st.loops); }] {
             nested = false;
             for other in &st.loops { if other.header != l.header && intIndex(&other.blocks, l.header) >= 0 { nested = true; }; };
-            if !nested && chosen < 0 { chosen = p; }; p = p + 1;
+            if !nested && chosen < 0 { chosen = p; };
         };
         if chosen < 0 { return ExpansionState { error: "internal compiler error: the loops over the pack of ".concat(textAt(&st.fun.header, 1)).concat(" are not nested"), ..st }; };
         loop = clone(get(&st.loops, chosen));
@@ -353,7 +369,7 @@ fn intIntersection(a: &HashSet<Int>, b: &HashSet<Int>) -> HashSet<Int> ~ {
     out = HashSet::new(); for k in HashSet::elements(a) { if HashSet::contains(b, k) { out = HashSet::insert(out, k); }; }; return out;
 };
 fn emptyPredecessors() -> HashMap<Int, List<Int>> ~ { return HashMap::new(); };
-fn dominators(loop: &PackLoop, table: &HashMap<Int, FullBlock>) -> HashMap<Int, HashSet<Int>> ~ {
+fn dominators(loop: &PackLoop, table: &HashMap<Int, FullBlock>) -> Parsed<HashMap<Int, HashSet<Int>>> ~ {
     body = intSet(&loop.blocks); predecessors = emptyPredecessors(); doms = HashMap::new();
     for b in &loop.blocks {
         d = clone(body); if b = loop.body { d = HashSet::insert(HashSet::new(), b); };
@@ -374,29 +390,35 @@ fn dominators(loop: &PackLoop, table: &HashMap<Int, FullBlock>) -> HashMap<Int, 
             d = HashSet::new(); ps = HashMap::lookup(&predecessors, b, []);
             if b != loop.body && size(ps) > 0 {
                 d = clone(body);
-                for p in ps { d = intIntersection(&d, HashMap::lookupRef(&doms, p)); };
+                for p in ps {
+                    if !HashMap::contains(&doms, p) { return Parsed<HashMap<Int, HashSet<Int>>> { value: doms, pos: 0, ok: false }; };
+                    d = intIntersection(&d, HashMap::lookupRef(&doms, p));
+                };
             };
             d = HashSet::insert(d, b);
+            if !HashMap::contains(&doms, b) { return Parsed<HashMap<Int, HashSet<Int>>> { value: doms, pos: 0, ok: false }; };
             old = HashMap::lookupRef(&doms, b);
             if size(d.elements()) != size(HashSet::elements(old)) { changed = true; };
             next = HashMap::insert(next, b, d);
         };
         doms = next;
     };
-    return doms;
+    return Parsed<HashMap<Int, HashSet<Int>>> { value: doms, pos: 0, ok: true };
 };
 struct LoopDefine { name: String, position: Int };
 impl Clone for LoopDefine { };
 struct LoopProofs {
-    defines: HashMap<Int, List<LoopDefine>>, names: HashSet<String>, doms: HashMap<Int, HashSet<Int>>
+    defines: HashMap<Int, List<LoopDefine>>, names: HashSet<String>, doms: HashMap<Int, HashSet<Int>>, ok: Bool
 };
 fn loopProofNames(loop: &PackLoop, table: &HashMap<Int, FullBlock>, arena: &List<AstNode>) -> LoopProofs ~ {
     names = HashSet::new(); defines = HashMap::new();
     for b in &loop.blocks {
-        ds = []; i = 0;
+        ds = [];
         if HashMap::contains(table, b) {
             blk = HashMap::lookupRef(table, b);
-            for row in &(*blk).lines {
+            lines = &(*blk).lines; i = 0;
+            while i < size(lines) [{ affirm i >= 0; }] shrinks size(lines) - i {
+                row = &get(lines, i);
                 def = proofDefineName(arena, row);
                 if def.ok && !def.value.startsWith("$pack read at ") { names = HashSet::insert(names, clone(def.value)); ds = push(ds, LoopDefine { name: def.value, position: i }); };
                 i = i + 1;
@@ -404,43 +426,52 @@ fn loopProofNames(loop: &PackLoop, table: &HashMap<Int, FullBlock>, arena: &List
         };
         defines = HashMap::insert(defines, b, ds);
     };
-    return LoopProofs { defines: defines, names: names, doms: dominators(loop, table) };
+    doms = dominators(loop, table);
+    return LoopProofs { defines: defines, names: names, doms: doms.value, ok: doms.ok };
 };
 fn iterationNames(names: &HashSet<String>, value: &String) -> HashMap<String, String> ~ {
     out = HashMap::new();
     for n in HashSet::elements(names) { renamed = clone(n).concat(" in iteration ").concat(value); out = HashMap::insert(out, clone(n), renamed); };
     return out;
 };
-fn visibleNames(proofs: &LoopProofs, names: &HashMap<String, String>, block: Int, position: Int) -> HashMap<String, String> ~ {
+fn visibleNames(proofs: &LoopProofs, names: &HashMap<String, String>, block: Int, position: Int) -> Parsed<HashMap<String, String>> ~ {
     out = HashMap::new(); doms = HashMap::lookup(&proofs.doms, block, HashSet::new());
     for d in doms.elements() {
-        for def in HashMap::lookupRef(&proofs.defines, d) {
-            if d != block || def.position < position { v = HashMap::lookup(names, &def.name, ""); out = HashMap::insert(out, clone(def.name), v); };
+        if !HashMap::contains(&proofs.defines, d) { return Parsed<HashMap<String, String>> { value: out, pos: 0, ok: false }; };
+        defs = HashMap::lookupRef(&proofs.defines, d); i = 0;
+        while i < size(defs) [{ affirm i >= 0; }] shrinks size(defs) - i {
+            def = &get(defs, i);
+            if d != block || (*def).position < position { v = HashMap::lookup(names, &(*def).name, ""); out = HashMap::insert(out, clone((*def).name), v); };
+            i = i + 1;
         };
     };
-    return out;
+    return Parsed<HashMap<String, String>> { value: out, pos: 0, ok: true };
 };
-struct ClonedBlock { arena: List<AstNode>, block: FullBlock };
-struct ClonedSpec { arena: List<AstNode>, spec: FullRecord };
+struct ClonedBlock { arena: List<AstNode>, block: FullBlock, ok: Bool };
+struct ClonedSpec { arena: List<AstNode>, spec: FullRecord, ok: Bool };
 fn freshBlock(b: &FullBlock, arena: List<AstNode>, loop: &PackLoop, bm: &HashMap<Int, Int>, rowBlocks: &HashMap<Int, Int>, lm: &HashMap<Int, Int>, value: &String, inRange: Bool, proofs: &LoopProofs, names: &HashMap<String, String>) -> ClonedBlock ~ {
     rows = []; p = 0;
     for row in &b.lines {
         if !isMarker(row) && !(inRange && wordIs(row, 0, "assign") && packInt(row, 1) = loop.element) {
             renamed = renameRow(row, lm, rowBlocks, loop.index, value);
             if wordIs(row, 0, "ghost") && wordIs(row, 1, "validation") {
+                uses = visibleNames(proofs, names, b.id, p);
+                if !uses.ok || size(renamed) <= 0 { return ClonedBlock { arena: arena, block: clone(b), ok: false }; };
                 at = size(renamed) - 1; id = packInt(&renamed, at);
-                result = renameValidationPayload(arena, id, names, visibleNames(proofs, names, b.id, p));
+                result = renameValidationPayload(arena, id, names, &uses.value);
                 arena = result.arena; renamed = set(renamed, at, intToken(result.id));
             };
             rows = push(rows, renamed);
         };
         p = p + 1;
     };
-    return ClonedBlock { arena: arena, block: FullBlock { id: HashMap::lookup(bm, b.id, b.id), lines: rows } };
+    ok = size(rows) > 0;
+    return ClonedBlock { arena: arena, block: FullBlock { id: HashMap::lookup(bm, b.id, b.id), lines: rows }, ok: ok };
 };
 fn freshSpec(r: &FullRecord, arena: List<AstNode>, loop: &PackLoop, bm: &HashMap<Int, Int>, lm: &HashMap<Int, Int>, value: &String, uses: &HashMap<String, String>) -> ClonedSpec ~ {
     h = packInt(&r.tokens, 1); mapped = HashMap::lookup(bm, h, h); b = packInt(&r.tokens, 3);
     row = renameRow(&r.tokens, lm, HashMap::new(), loop.index, value);
+    if size(row) <= 7 { return ClonedSpec { arena: arena, spec: clone(r), ok: false }; };
     row = set(row, 1, intToken(mapped)); row = set(row, 3, intToken(HashMap::lookup(bm, b, b)));
     result = renameInvariantPayload(arena, packInt(&row, 5), uses);
     arena = result.arena; row = set(row, 5, intToken(result.id));
@@ -448,14 +479,16 @@ fn freshSpec(r: &FullRecord, arena: List<AstNode>, loop: &PackLoop, bm: &HashMap
         term = renameTerminationPayload(clone(arena), packInt(&row, 7), uses);
         arena = term.arena; row = set(row, 7, intToken(term.id));
     };
-    return ClonedSpec { arena: arena, spec: FullRecord { name: String::fromInt(mapped), tokens: row } };
+    return ClonedSpec { arena: arena, spec: FullRecord { name: String::fromInt(mapped), tokens: row }, ok: true };
 };
-fn freshLocal(r: &FullRecord, id: Int) -> FullRecord ~ {
+fn freshLocal(r: &FullRecord, id: Int) -> FullRecord [{ affirm size(r.tokens) > 1; }] [{ }] ~ {
     return FullRecord { name: String::fromInt(id), tokens: set(clone(r.tokens), 1, intToken(id)) };
 };
 fn unrollOne(st: ExpansionState, loop: &PackLoop, pack: Int, elements: &List<Int>) -> ExpansionState ~ {
     count = size(elements);
-    known = constantsOf(&st.fun, pack, count);
+    constants = constantsOf(&st.fun, pack, count);
+    if constants.error != "" { return ExpansionState { error: constants.error, ..st }; };
+    known = constants.values;
     lo = HashMap::lookup(&known, loop.lo, []); hi = HashMap::lookup(&known, loop.hi, []);
     if !wordIs(&lo, 1, "int") || !wordIs(&hi, 1, "int") {
         return ExpansionState { error: "internal compiler error: a bound of a loop over the pack of ".concat(textAt(&st.fun.header, 1)).concat(" is not fixed in a copy"), ..st };
@@ -468,16 +501,28 @@ fn unrollOne(st: ExpansionState, loop: &PackLoop, pack: Int, elements: &List<Int
     if loop.taken.ok { dropped = HashSet::insert(dropped, loop.taken.value); };
     if HashMap::contains(&table, loop.header) {
         hdr = HashMap::lookupRef(&table, loop.header);
-        for row in &(*hdr).lines { if wordIs(row, 0, "assign") { dropped = HashSet::insert(dropped, packInt(row, 1)); }; };
+        lines = &(*hdr).lines; i = 0;
+        while i < size(lines) [{ affirm i >= 0; }] shrinks size(lines) - i {
+            row = &get(lines, i);
+            if wordIs(row, 0, "assign") { dropped = HashSet::insert(dropped, packInt(row, 1)); };
+            i = i + 1;
+        };
     };
     markers = [];
     for b in &loop.blocks {
         if HashMap::contains(&table, b) {
             bb = HashMap::lookupRef(&table, b);
-            for row in &(*bb).lines { if isMarker(row) { markers = push(markers, clone(row)); }; };
+            lines = &(*bb).lines; i = 0;
+            while i < size(lines) [{ affirm i >= 0; }] shrinks size(lines) - i {
+                row = &get(lines, i);
+                if isMarker(row) { markers = push(markers, clone(*row)); };
+                i = i + 1;
+            };
         };
     };
     proofNames = loopProofNames(loop, &table, &st.arena);
+    shapeError = "internal compiler error: malformed loop over the pack of ".concat(textAt(&st.fun.header, 1));
+    if !proofNames.ok { return ExpansionState { error: shapeError, ..st }; };
     nb = st.nextBlock; nl = st.nextLocal;
     off = intIndex(&loop.blocks, loop.body); entry = loop.exit;
     if decimalCmp(&vt, &end) < 0 { entry = nb + off; };
@@ -486,11 +531,18 @@ fn unrollOne(st: ExpansionState, loop: &PackLoop, pack: Int, elements: &List<Int
     for l in dropped.elements() { localIndexes = HashMap::remove(localIndexes, l); };
     while decimalCmp(&vt, &end) < 0 ~ {
         bm = consecutiveMap(&loop.blocks, nb); lm = consecutiveMap(&ids, nl);
-        nextValue = decimalAdd(&vt, "1"); next = loop.exit;
+        nextValue = decimalAdd(&vt, "1");
+        if nextValue = "" { return ExpansionState { error: decimalInvariantError(), ..st }; };
+        next = loop.exit;
         if decimalCmp(&nextValue, &end) < 0 { next = nb + size(loop.blocks) + off; };
         rowBlocks = HashMap::insert(clone(bm), loop.header, next);
-        inRange = withinPack(&vt, count);
-        if inRange { lm = HashMap::insert(lm, loop.element, get(elements, decimalFits(&vt).value)); };
+        ixValue = decimalFits(&vt);
+        k = ixValue.value;
+        inRange = false;
+        if ixValue.ok && k >= 0 && k < size(elements) {
+            lm = HashMap::insert(lm, loop.element, get(elements, k));
+            inRange = true;
+        };
         names = iterationNames(&proofNames.names, &vt);
         for id in &loop.blocks {
             to = HashMap::lookup(&bm, id, id);
@@ -498,6 +550,7 @@ fn unrollOne(st: ExpansionState, loop: &PackLoop, pack: Int, elements: &List<Int
             blockIndexes = HashMap::insert(blockIndexes, to, ix);
             if HashMap::contains(&table, id) {
                 result = freshBlock(HashMap::lookupRef(&table, id), clone(arena), loop, &bm, &rowBlocks, &lm, &vt, inRange, &proofNames, &names);
+                if !result.ok { return ExpansionState { error: shapeError, ..st }; };
                 arena = result.arena; blocks = push(blocks, result.block);
             };
         };
@@ -506,13 +559,20 @@ fn unrollOne(st: ExpansionState, loop: &PackLoop, pack: Int, elements: &List<Int
                 to = HashMap::lookup(&lm, id, id);
                 ix = HashMap::insert(lookupIndexes(&st.locals, id), clone(loop.elementType), clone(vt));
                 localIndexes = HashMap::insert(localIndexes, to, ix);
-                if HashMap::contains(&decls, id) { locals = push(locals, freshLocal(HashMap::lookupRef(&decls, id), to)); };
+                if HashMap::contains(&decls, id) {
+                    r = HashMap::lookupRef(&decls, id);
+                    if size((*r).tokens) <= 1 { return ExpansionState { error: shapeError, ..st }; };
+                    locals = push(locals, freshLocal(r, to));
+                };
             };
         };
         for r in &st.fun.loops {
             h = packInt(&r.tokens, 1);
             if HashSet::contains(&body, h) {
-                result = freshSpec(r, clone(arena), loop, &bm, &lm, &vt, visibleNames(&proofNames, &names, h, 0));
+                uses = visibleNames(&proofNames, &names, h, 0);
+                if !uses.ok { return ExpansionState { error: shapeError, ..st }; };
+                result = freshSpec(r, clone(arena), loop, &bm, &lm, &vt, &uses.value);
+                if !result.ok { return ExpansionState { error: shapeError, ..st }; };
                 arena = result.arena; specs = push(specs, result.spec);
             };
         };
@@ -522,8 +582,10 @@ fn unrollOne(st: ExpansionState, loop: &PackLoop, pack: Int, elements: &List<Int
     redirect = HashMap::insert(HashMap::new(), loop.header, entry);
     for b in st.fun.blocks {
         if b.id != loop.header && !HashSet::contains(&body, b.id) {
-            rows = []; term = lastRow(&b);
-            for p in 0..size(b.lines) - 1 {
+            rows = []; prefixSize = size(b.lines) - 1;
+            if prefixSize < 0 { return ExpansionState { error: shapeError, ..st }; };
+            term = lastRow(&b);
+            for p in 0..prefixSize {
                 row = get(&b.lines, p);
                 if !(loop.taken.ok && wordIs(row, 0, "assign") && packInt(row, 1) = loop.taken.value) { rows = push(rows, clone(row)); };
             };

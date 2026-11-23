@@ -34,10 +34,28 @@ extra-source-files:
     lib/mir/link/link.tersus
     lib/mir/link/merge.tersus
     lib/mir/link/prune.tersus
-    dev/mir-packs/expand.tersus
-    dev/mir-packs/body.tersus
-    dev/mir-packs/proofs.tersus
-    dev/mir-packs/numbers.tersus
+    lib/mir/pack/body.tersus
+    lib/mir/pack/expand.tersus
+    lib/mir/pack/numbers.tersus
+    lib/mir/pack/proofs.tersus
+    lib/mir/copies/calls.tersus
+    lib/mir/copies/finish.tersus
+    lib/mir/copies/finishPack.tersus
+    lib/mir/copies/finishPackProofs.tersus
+    lib/mir/copies/finishProofs.tersus
+    lib/mir/copies/frame.tersus
+    lib/mir/copies/keys.tersus
+    lib/mir/copies/proofs.tersus
+    lib/mir/copies/transform.tersus
+    lib/mir/copies/types.tersus
+    lib/mir/copies/worklist.tersus
+    dev/mir-copies/probe.tersus
+    dev/mir-copies-fused/audit.tersus
+    dev/mir-copies-fused/driver.tersus
+    lib/mir/link/fused.tersus
+    lib/mir/link/profile.tersus
+    lib/mir/instances/complete.tersus
+    lib/mir/instances/names.tersus
     lib/mir/emit/emit.tersus
     lib/mir/emit/types.tersus
     lib/mir/emit/values.tersus
@@ -157,6 +175,7 @@ library
       Lowering
       Mir
       MirCopies
+      MirCopiesNameProfile
       MirData
       MirEval
       MirHousekeeping
@@ -164,7 +183,6 @@ library
       MirMono
       MirMoves
       MirOwnershipData
-      MirPacks
       MirPass
       Modules
       Native
@@ -335,7 +353,9 @@ test-suite tersus-test
   main-is: TestTersus.hs
   other-modules:
       Differential
+      MirCopiesOracle
       MirMonoOracle
+      MirPacksOracle
       TestArrays
       TestAstData
       TestBasics
@@ -366,6 +386,9 @@ test-suite tersus-test
       TestLibraryShapes
       TestLink
       TestMirCopies
+      TestMirCopiesFused
+      TestMirCopiesFusedHarness
+      TestMirCopiesParity
       TestMirData
       TestMirEmit
       TestMirErase

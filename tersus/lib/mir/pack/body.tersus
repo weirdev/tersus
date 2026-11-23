@@ -3,7 +3,7 @@ import data::ast::ast { AstNode };
 import mir::full::full { FullBlock, FullFunction, FullRecord };
 import mir::full::records { envStart, envEnd };
 import mir::full::tokens { appendTokens, decimalText, integerAt, intToken, name, numberAt, operandEnd, operandsEnd, sliceTokens, stepsEnd, textAt, word, wordIs };
-import mir::pack::numbers { decimalAdd, decimalSub, decimalMul, decimalCmp, decimalFits };
+import mir::pack::numbers { decimalAdd, decimalSub, decimalMul, decimalCmp, decimalFits, decimalInvariantError };
 import mir::pack::proofs { proofDefineName, rangeGhosts, sliceGhosts };
 
 enum RowKind { Local, Operand, Block };
@@ -19,6 +19,7 @@ fn operandIsLocal(row: &List<Token>, at: Int, local: Int) -> Bool ~ {
 };
 fn operandSites(sites: List<RowSite>, row: &List<Token>, start: Int, count: Int, named: Bool) -> List<RowSite> ~ {
     at = start;
+    if count < 0 { return sites; };
     for i in 0..count {
         if named { at = at + 1; };
         end = operandEnd(row, at);
@@ -29,8 +30,9 @@ fn operandSites(sites: List<RowSite>, row: &List<Token>, start: Int, count: Int,
     return sites;
 };
 fn stepSites(sites: List<RowSite>, row: &List<Token>, p: Int) -> List<RowSite> ~ {
-    at = p + 1;
-    for i in 0..numberAt(row, p) {
+    at = p + 1; count = numberAt(row, p);
+    if count < 0 { return sites; };
+    for i in 0..count {
         if wordIs(row, at, "field") { at = at + 3; } else {
             if !wordIs(row, at, "index") { return sites; };
             end = operandEnd(row, at + 1);
@@ -164,8 +166,9 @@ fn usesPack(fun: &FullFunction, pack: Int) -> Bool ~ {
 };
 
 fn paramsOf(fun: &FullFunction) -> HashSet<Int> ~ {
-    params = HashSet::new();
-    for i in 0..numberAt(&fun.header, 3) { params = params.insert(integerAt(&fun.header, i + 4).value); };
+    params = HashSet::new(); count = numberAt(&fun.header, 3);
+    if count < 0 { return params; };
+    for i in 0..count { params = params.insert(integerAt(&fun.header, i + 4).value); };
     return params;
 };
 fn borrowedLocals(fun: &FullFunction) -> HashSet<Int> ~ {
@@ -242,7 +245,8 @@ fn evaluateAssign(known: &HashMap<Int,List<Token>>, row: &List<Token>, pack: Int
     return [];
 };
 fn emptyConstants() -> HashMap<Int, List<Token>> ~ { return HashMap::new(); };
-fn constantsOf(fun: &FullFunction, pack: Int, count: Int) -> HashMap<Int,List<Token>> ~ {
+struct PackConstants { values: HashMap<Int,List<Token>>, error: String };
+fn constantsOf(fun: &FullFunction, pack: Int, count: Int) -> PackConstants ~ {
     params = paramsOf(fun); borrowed = borrowedLocals(fun); counts = assignmentsOf(fun);
     candidates = [];
     for block in &fun.blocks {
@@ -262,11 +266,14 @@ fn constantsOf(fun: &FullFunction, pack: Int, count: Int) -> HashMap<Int,List<To
             id = integerAt(row, 1).value;
             if !HashMap::contains(&known, id) {
                 value = evaluateAssign(&known, row, pack, count);
+                if wordIs(&value, 1, "int") && textAt(&value, 2) = "" {
+                    return PackConstants { values: known, error: decimalInvariantError() };
+                };
                 if size(value) > 0 { known = HashMap::insert(known, id, value); changed = true; };
             };
         };
     };
-    return known;
+    return PackConstants { values: known, error: "" };
 };
 
 struct PackBinding { block: Int, name: String, index: String };
@@ -322,11 +329,12 @@ fn elementTypesOf(fun: &FullFunction, packType: &String) -> HashMap<Int,String> 
 };
 struct PackCut { rows: List<List<Token>>, place: String };
 fn cutPlaces(rows: &List<List<Token>>, arena: &List<AstNode>) -> PackCut ~ {
-    kept = []; place = ""; prefix = "$pack read at ";
+    kept = []; place = ""; prefix = "$pack read at "; from = size(prefix.bytes);
     for row in rows {
         mark = proofDefineName(arena, row);
-        if mark.ok && mark.value.startsWith(&prefix) {
-            place = " at line ".concat(mark.value.slice(size(prefix.bytes), size(mark.value.bytes)));
+        to = size(mark.value.bytes);
+        if mark.ok && from <= to && mark.value.startsWith(&prefix) {
+            place = " at line ".concat(mark.value.slice(from, to));
         } else { kept = push(kept, clone(row)); };
     };
     return PackCut { rows: kept, place: place };
@@ -336,12 +344,14 @@ fn finishCut(rows: List<List<Token>>, ghosts: &List<List<Token>>) -> List<List<T
     return push(rows, push([], word("return")));
 };
 fn resolveElements(fun: FullFunction, arena: List<AstNode>, pack: Int, packName: &String, packType: &String, elements: &List<Int>) -> PackResolved ~ {
-    count = size(elements); known = constantsOf(&fun, pack, count);
+    count = size(elements); constants = constantsOf(&fun, pack, count);
+    if constants.error != "" { return PackResolved { fun: fun, arena: arena, bindings: [], error: constants.error }; };
+    known = constants.values;
     borrowed = borrowedLocals(&fun); params = paramsOf(&fun); counts = assignmentsOf(&fun);
     types = elementTypesOf(&fun, packType); renames = HashMap::new(); bindings = []; blocks = [];
     for block in &fun.blocks {
         rows = []; bound = []; at = 0;
-        while at < size(block.lines) ~ {
+        while at < size(block.lines) [{ affirm 0 <= at; }] ~ {
             row = get(&block.lines, at); at = at + 1;
             if !wordIs(row, 0, "assign") { rows = push(rows, clone(row)); } else {
                 dest = integerAt(row, 1).value;
@@ -355,8 +365,8 @@ fn resolveElements(fun: FullFunction, arena: List<AstNode>, pack: Int, packName:
                         error = "internal compiler error: an index of the pack of ".concat(textAt(&fun.header, 1)).concat(" is not fixed in a copy");
                         return PackResolved { fun: fun, arena: arena, bindings: [], error: error };
                     };
-                    k = decimalFits(&read.index);
-                    if !k.ok || k.value < 0 || k.value >= count {
+                    k = decimalFits(&read.index); index = k.value;
+                    if !k.ok || index < 0 || index >= count {
                         cut = cutPlaces(&rows, &arena);
                         ghosts = rangeGhosts(arena, packName, count, &cut.place, &read.index);
                         arena = ghosts.arena; rows = finishCut(cut.rows, &ghosts.rows);
@@ -364,7 +374,7 @@ fn resolveElements(fun: FullFunction, arena: List<AstNode>, pack: Int, packName:
                     } else {
                         typeName = HashMap::lookup(&types, dest, "");
                         if typeName != "" { bound = push(bound, PackBinding { block: block.id, name: typeName, index: clone(read.index) }); };
-                        parameter = get(elements, k.value);
+                        parameter = get(elements, index);
                         if read.borrowTail >= 0 {
                             head = push(push(sliceTokens(row, 0, 3), intToken(parameter)), intToken(numberAt(row, 4) - 1));
                             rows = push(rows, appendTokens(head, sliceTokens(row, read.borrowTail, size(row))));
@@ -405,6 +415,7 @@ fn resolveElements(fun: FullFunction, arena: List<AstNode>, pack: Int, packName:
 
 fn firstPackArg(row: &List<Token>, countAt: Int, count: Int, pack: Int) -> Int ~ {
     at = countAt + 1;
+    if count < 0 { return 0 - 1; };
     for i in 0..count {
         if operandIsLocal(row, at, pack) {
             if i + 2 < count { return at; };
@@ -416,7 +427,9 @@ fn firstPackArg(row: &List<Token>, countAt: Int, count: Int, pack: Int) -> Int ~
 };
 fn spreadForwards(fun: FullFunction, arena: List<AstNode>, pack: Int, packName: &String, elements: &List<Int>) -> PackForwarded ~ {
     count = size(elements); countText = String::fromInt(count);
-    known = constantsOf(&fun, pack, count); spreads = HashMap::new(); blocks = [];
+    constants = constantsOf(&fun, pack, count); spreads = HashMap::new(); blocks = [];
+    if constants.error != "" { return PackForwarded { fun: fun, arena: arena, spreads: spreads, error: constants.error }; };
+    known = constants.values;
     for block in &fun.blocks {
         end = size(block.lines) - 1;
         if end < 0 { blocks = push(blocks, clone(block)); } else {
@@ -439,7 +452,13 @@ fn spreadForwards(fun: FullFunction, arena: List<AstNode>, pack: Int, packName: 
                     ghosts = sliceGhosts(arena, packName, count, &cut.place, &lo, &hi);
                     arena = ghosts.arena; rows = finishCut(cut.rows, &ghosts.rows);
                 } else {
-                    low = decimalFits(&lo).value; high = decimalFits(&hi).value; callee = textAt(row, 3);
+                    parsedLo = decimalFits(&lo); parsedHi = decimalFits(&hi);
+                    low = parsedLo.value; high = parsedHi.value;
+                    if !parsedLo.ok || !parsedHi.ok || low < 0 || high < low || high > count {
+                        error = "internal compiler error: the part of the pack of ".concat(textAt(&fun.header, 1)).concat(" a call forwards has inconsistent bounds");
+                        return PackForwarded { fun: fun, arena: arena, spreads: HashMap::new(), error: error };
+                    };
+                    callee = textAt(row, 3);
                     spread = clone(callee).concat(" spread ").concat(&lo).concat(" ").concat(&hi);
                     call = push(push(sliceTokens(row, 0, 3), name(clone(spread))), intToken(n - 3 + high - low));
                     call = appendTokens(call, sliceTokens(row, countAt + 1, at));
