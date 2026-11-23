@@ -1,0 +1,542 @@
+import data::codec::codec { Token, Parsed, indexOf };
+import data::ast::ast { AstNode };
+import mir::full::full { FullBlock, FullFunction, FullRecord };
+import mir::full::tokens { appendTokens, argEnd, integerAt, intToken, intsEnd, name, namesEnd, operandEnd, sliceTokens, textAt, typeEnd, word, wordIs };
+import mir::full::records { EnvEntry, envEntries, envStart, keyOrder, orderEntries, replaceEnv };
+import mir::pack::numbers { decimalAdd, decimalCmp, decimalFits };
+import mir::pack::body { PackBinding, PackSpread, constantsOf, operandConstant, renameRow, resolveElements, rowLocals, spreadForwards, targets, usesPack };
+import mir::pack::proofs { packProofs, proofDefineName, renameInvariantPayload, renameTerminationPayload, renameValidationPayload };
+
+struct PackExpansion {
+    fun: FullFunction, arena: List<AstNode>, blocks: HashMap<Int, HashMap<String, String>>,
+    locals: HashMap<Int, HashMap<String, String>>, spreads: HashMap<String, PackSpread>, error: String
+};
+
+struct PackLoop {
+    header: Int, body: Int, exit: Int, blocks: List<Int>, locals: List<Int>, index: Int,
+    element: Int, elementType: String, lo: Int, hi: Int, taken: Parsed<Int>
+};
+impl Clone for PackLoop { };
+
+struct ExpansionState {
+    fun: FullFunction, arena: List<AstNode>, nextBlock: Int, nextLocal: Int,
+    blocks: HashMap<Int, HashMap<String, String>>, locals: HashMap<Int, HashMap<String, String>>,
+    loops: List<PackLoop>, error: String
+};
+
+fn packInt(row: &List<Token>, p: Int) -> Int ~ { return integerAt(row, p).value; };
+fn packLoopIntList(row: &List<Token>, p: Int) -> List<Int> ~ {
+    out = [];
+    for i in 0..packInt(row, p) { out = push(out, packInt(row, p + 1 + i)); };
+    return out;
+};
+
+fn packLoops(row: &List<Token>) -> List<PackLoop> ~ {
+    at = namesEnd(row, namesEnd(row, namesEnd(row, 2)));
+    count = packInt(row, at); at = at + 1; out = [];
+    for i in 0..count {
+        bs = at + 3; ls = intsEnd(row, bs); tail = intsEnd(row, ls);
+        out = push(out, PackLoop {
+            header: packInt(row, at), body: packInt(row, at + 1), exit: packInt(row, at + 2),
+            blocks: packLoopIntList(row, bs), locals: packLoopIntList(row, ls),
+            index: packInt(row, tail), element: packInt(row, tail + 1), elementType: textAt(row, tail + 2),
+            lo: packInt(row, tail + 3), hi: packInt(row, tail + 4), taken: integerAt(row, tail + 5)
+        });
+        at = tail + 6;
+    };
+    return out;
+};
+
+fn headerTypes(header: &List<Token>) -> Int ~ {
+    ret = intsEnd(header, 3) + 1;
+    if wordIs(header, ret, "some") { ret = typeEnd(header, ret + 1); } else { ret = ret + 1; };
+    return namesEnd(header, ret + 1) + 1;
+};
+fn spreadIDs(header: &List<Token>, at: Int, pack: Int, elements: &List<Int>) -> List<Token> ~ {
+    items = []; count = 0;
+    for id in packLoopIntList(header, at) {
+        if id = pack {
+            for e in elements { items = push(items, intToken(e)); count = count + 1; };
+        } else { items = push(items, intToken(id)); count = count + 1; };
+    };
+    return appendTokens(push([], intToken(count)), &items);
+};
+fn expandHeader(row: &List<Token>, pack: Int, packType: &String, elements: &List<Int>) -> List<Token> ~ {
+    at = headerTypes(row); borrowed = namesEnd(row, at) + 1;
+    types = []; count = 0;
+    for i in at + 1..borrowed - 1 {
+        if textAt(row, i) != packType { types = push(types, clone(get(row, i))); count = count + 1; };
+    };
+    out = appendTokens(sliceTokens(row, 0, 3), spreadIDs(row, 3, pack, elements));
+    out = push(appendTokens(out, sliceTokens(row, intsEnd(row, 3), at)), intToken(count));
+    out = push(appendTokens(out, &types), word("borrowed"));
+    out = appendTokens(out, spreadIDs(row, borrowed, pack, elements));
+    return appendTokens(out, sliceTokens(row, intsEnd(row, borrowed), size(row)));
+};
+fn localTypeStart(row: &List<Token>) -> Int ~ { if wordIs(row, 2, "some") { return 4; }; return 3; };
+fn freshElement(id: Int, k: Int, packName: &String, packType: &String) -> FullRecord ~ {
+    idText = String::fromInt(id); index = String::fromInt(k);
+    row = push(push(push(push(push(push([], word("local")), intToken(id)), word("some")), name(clone(packName).concat(" ").concat(&index))), word("param")), name(clone(packType).concat("#").concat(&index)));
+    return FullRecord { name: idText, tokens: row };
+};
+fn orderedBlocks(blocks: List<FullBlock>) -> List<FullBlock> ~ {
+    keys = []; for b in &blocks { keys = push(keys, String::fromInt(b.id)); };
+    out = []; for i in keyOrder(&keys, true) { out = push(out, clone(get(&blocks, i))); };
+    return out;
+};
+fn orderedRecords(records: List<FullRecord>) -> List<FullRecord> ~ {
+    keys = []; for r in &records { keys = push(keys, clone(r.name)); };
+    out = []; for i in keyOrder(&keys, true) { out = push(out, clone(get(&records, i))); };
+    return out;
+};
+fn orderedFunction(fun: FullFunction) -> FullFunction ~ {
+    return FullFunction { blocks: orderedBlocks(fun.blocks), loops: orderedRecords(fun.loops), locals: orderedRecords(fun.locals), ..fun };
+};
+fn blockTable(blocks: &List<FullBlock>) -> HashMap<Int, FullBlock> ~ {
+    out = HashMap::new(); for b in blocks { out = HashMap::insert(out, b.id, clone(b)); }; return out;
+};
+fn lastRow(b: &FullBlock) -> List<Token> ~ { return clone(get(&b.lines, size(b.lines) - 1)); };
+fn reached(blocks: &List<FullBlock>) -> HashSet<Int> ~ {
+    table = blockTable(blocks); todo = push([], 0); seen = HashSet::new(); i = 0;
+    while i < size(todo) ~ {
+        b = get(todo, i); i = i + 1;
+        if !HashSet::contains(&seen, b) && HashMap::contains(&table, b) {
+            seen = HashSet::insert(seen, b);
+            for next in targets(lastRow(HashMap::lookupRef(&table, b))) { todo = push(todo, next); };
+        };
+    };
+    return seen;
+};
+fn isMarker(row: &List<Token>) -> Bool ~ { return wordIs(row, 0, "ghost") && wordIs(row, 1, "function"); };
+fn prune(fun: FullFunction, requireBody: Bool) -> FullFunction ~ {
+    seen = reached(&fun.blocks); markers = [];
+    for b in &fun.blocks {
+        if !HashSet::contains(&seen, b.id) {
+            for row in &b.lines { if isMarker(row) { markers = push(markers, clone(row)); }; };
+        };
+    };
+    bs = [];
+    for b in fun.blocks {
+        if HashSet::contains(&seen, b.id) {
+            if b.id = 0 {
+                lines = clone(markers); for row in b.lines { lines = push(lines, clone(row)); };
+                bs = push(bs, FullBlock { id: b.id, lines: lines });
+            } else { bs = push(bs, clone(b)); };
+        };
+    };
+    specs = [];
+    for row in fun.loops {
+        h = packInt(&row.tokens, 1); keep = HashSet::contains(&seen, h) && (!requireBody || HashSet::contains(&seen, packInt(&row.tokens, 3)));
+        if keep { specs = push(specs, clone(row)); };
+    };
+    return FullFunction { blocks: bs, loops: specs, ..fun };
+};
+fn foldGuards(fun: FullFunction, pack: Int, count: Int) -> FullFunction ~ {
+    known = constantsOf(&fun, pack, count); bs = [];
+    for b in fun.blocks {
+        row = lastRow(&b); out = clone(b);
+        if wordIs(&row, 0, "switch") {
+            end = operandEnd(&row, 1); value = operandConstant(&known, sliceTokens(&row, 1, end));
+            if wordIs(&value, 1, "bool") {
+                at = end; if wordIs(&value, 2, "false") { at = at + 1; };
+                idx = size(out.lines) - 1;
+                out = FullBlock { id: out.id, lines: set(out.lines, idx, push(push([], word("goto")), intToken(packInt(&row, at)))) };
+            };
+        };
+        bs = push(bs, out);
+    };
+    return FullFunction { blocks: bs, ..fun };
+};
+fn lookupIndexes(ids: &HashMap<Int, HashMap<String, String>>, id: Int) -> HashMap<String, String> ~ {
+    return HashMap::lookup(ids, id, HashMap::new());
+};
+fn inContext(inner: &HashMap<String, String>, outer: &HashMap<String, String>) -> Bool ~ {
+    for e in HashMap::entries(outer) {
+        if HashMap::lookup(inner, &e.key, "") != e.value { return false; };
+    };
+    return true;
+};
+fn withinPack(k: &String, count: Int) -> Bool ~ {
+    p = decimalFits(k); return p.ok && p.value >= 0 && p.value < count;
+};
+fn packElementName(packName: &String, k: Int) -> String ~ { return clone(packName).concat(" ").concat(String::fromInt(k)); };
+fn rowPackOperand(row: &List<Token>, pack: Int) -> Bool ~ {
+    return (wordIs(row, 0, "copy") || wordIs(row, 0, "move")) && packInt(row, 1) = pack;
+};
+fn copyLocalRow(l: Int) -> List<Token> ~ { return push(push([], word("copy")), intToken(l)); };
+fn spreadEnv(row: List<Token>, pack: Int, packName: &String, elements: &List<Int>) -> List<Token> ~ {
+    at = envStart(&row); if at < 0 { return row; };
+    kept = []; found = false; names = HashSet::new();
+    for e in envEntries(&row, at) {
+        if rowPackOperand(&e.value, pack) { found = true; } else { names = HashSet::insert(names, clone(e.name)); kept = push(kept, clone(e)); };
+    };
+    if !found { return row; };
+    k = 0;
+    for l in elements {
+        n = packElementName(packName, k); k = k + 1;
+        if !HashSet::contains(&names, &n) { kept = push(kept, EnvEntry { name: n, value: copyLocalRow(l) }); };
+    };
+    return replaceEnv(&row, orderEntries(kept));
+};
+fn forgetEnv(row: List<Token>, gone: &HashSet<Int>) -> List<Token> ~ {
+    at = envStart(&row); if at < 0 { return row; };
+    kept = []; changed = false;
+    for e in envEntries(&row, at) {
+        if (wordIs(&e.value, 0, "copy") || wordIs(&e.value, 0, "move")) && HashSet::contains(gone, packInt(&e.value, 1)) { changed = true; }
+        else { kept = push(kept, clone(e)); };
+    };
+    if !changed { return row; };
+    return replaceEnv(&row, &kept);
+};
+fn transformEnvs(fun: FullFunction, pack: Int, packName: &String, elements: &List<Int>, gone: &HashSet<Int>, spread: Bool) -> FullFunction ~ {
+    env = expEnv(fun.env, pack, packName, elements, gone, spread);
+    specs = []; for r in fun.loops { specs = push(specs, FullRecord { name: clone(r.name), tokens: expEnv(clone(r.tokens), pack, packName, elements, gone, spread) }); };
+    bs = [];
+    for b in fun.blocks {
+        rows = []; for row in b.lines { rows = push(rows, expEnv(clone(row), pack, packName, elements, gone, spread)); };
+        bs = push(bs, FullBlock { id: b.id, lines: rows });
+    };
+    return FullFunction { env: env, loops: specs, blocks: bs, ..fun };
+};
+fn expEnv(row: List<Token>, pack: Int, packName: &String, elements: &List<Int>, gone: &HashSet<Int>, spread: Bool) -> List<Token> ~ {
+    if spread { return spreadEnv(row, pack, packName, elements); }; return forgetEnv(row, gone);
+};
+fn markUsed(used: HashSet<Int>, row: &List<Token>) -> HashSet<Int> ~ {
+    for l in rowLocals(row, true) { used = HashSet::insert(used, l); }; return used;
+};
+fn dropUnused(fun: FullFunction) -> FullFunction ~ {
+    used = HashSet::insert(HashSet::new(), 0);
+    for l in packLoopIntList(&fun.header, 3) { used = HashSet::insert(used, l); };
+    used = markUsed(used, &fun.env);
+    for r in &fun.loops { used = markUsed(used, &r.tokens); };
+    for b in &fun.blocks { for row in &b.lines { used = markUsed(used, row); }; };
+    kept = []; for r in fun.locals { if HashSet::contains(&used, packInt(&r.tokens, 1)) { kept = push(kept, clone(r)); }; };
+    return FullFunction { locals: kept, ..fun };
+};
+fn mentionedParams(row: &List<Token>, at: Int) -> List<String> ~ {
+    kind = textAt(row, at);
+    if kind = "param" { return push([], textAt(row, at + 1)); };
+    if kind = "list" || kind = "box" || kind = "array" || kind = "addr" || kind = "block" || kind = "uninit" || kind = "ref" || kind = "mutref" { return mentionedParams(row, at + 1); };
+    names = [];
+    if kind = "fn" {
+        p = at + 2; count = packInt(row, at + 1);
+        for i in 0..count + 1 { for n in mentionedParams(row, p) { names = push(names, clone(n)); }; p = typeEnd(row, p); };
+    };
+    if kind = "named" {
+        p = at + 3;
+        for i in 0..packInt(row, at + 2) {
+            if wordIs(row, p, "type") { for n in mentionedParams(row, p + 1) { names = push(names, clone(n)); }; };
+            p = argEnd(row, p);
+        };
+    };
+    return names;
+};
+fn packFailure(fun: FullFunction, arena: List<AstNode>, error: String) -> PackExpansion ~ {
+    return PackExpansion { fun: fun, arena: arena, blocks: HashMap::new(), locals: HashMap::new(), spreads: HashMap::new(), error: error };
+};
+fn expandPack(bounded: &FullRecord, packType: &String, count: Int, fun: FullFunction, arena: List<AstNode>) -> PackExpansion ~ {
+    funName = textAt(&fun.header, 1); ice = "internal compiler error: ";
+    params = packLoopIntList(&fun.header, 3); matches = 0; pack = 0; packName = "args"; nextLocal = 0; nextBlock = 0;
+    for r in &fun.locals {
+        id = packInt(&r.tokens, 1); at = localTypeStart(&r.tokens);
+        if id > nextLocal { nextLocal = id; };
+        if wordIs(&r.tokens, at, "param") && textAt(&r.tokens, at + 1) = packType {
+            for p in &params { if p = id { matches = matches + 1; pack = id; if at = 4 { packName = textAt(&r.tokens, 3); }; }; };
+        };
+    };
+    if matches != 1 { return packFailure(fun, arena, ice.concat(&funName).concat(" has no pack parameter of ").concat(packType)); };
+    for b in &fun.blocks { if b.id > nextBlock { nextBlock = b.id; }; };
+    nextLocal = nextLocal + 1; nextBlock = nextBlock + 1; es = []; ls = fun.locals;
+    for k in 0..count {
+        id = nextLocal + k; es = push(es, id); ls = push(ls, freshElement(id, k, &packName, packType));
+    };
+    header = expandHeader(&fun.header, pack, packType, &es);
+    loops = packLoops(&bounded.tokens); specs = [];
+    for r in fun.loops {
+        keep = true; id = packInt(&r.tokens, 1);
+        for l in &loops { if l.header = id { keep = false; }; };
+        if keep { specs = push(specs, clone(r)); };
+    };
+    fun = orderedFunction(FullFunction { header: header, locals: ls, loops: specs, ..fun });
+    st = unrollAll(ExpansionState { fun: fun, arena: arena, nextBlock: nextBlock, nextLocal: nextLocal + count, blocks: HashMap::new(), locals: HashMap::new(), loops: loops, error: "" }, pack, &es);
+    if st.error != "" { return packFailure(st.fun, st.arena, st.error); };
+    er = resolveElements(st.fun, st.arena, pack, &packName, packType, &es);
+    if er.error != "" { return packFailure(er.fun, er.arena, er.error); };
+    fw = spreadForwards(prune(orderedFunction(er.fun), false), er.arena, pack, &packName, &es);
+    if fw.error != "" { return packFailure(fw.fun, fw.arena, fw.error); };
+    fun = prune(orderedFunction(fw.fun), false);
+    known = constantsOf(&fun, pack, count);
+    pr = packProofs(fun, fw.arena, &known, &packName, packType, count);
+    if pr.error != "" { return packFailure(pr.fun, pr.arena, pr.error); };
+    fun = dropUnused(transformEnvs(pr.fun, pack, &packName, &es, HashSet::new(), true));
+    if usesPack(&fun, pack) { return packFailure(fun, pr.arena, ice.concat("the pack ").concat(&packName).concat(" of ").concat(&funName).concat(" is used as a value in a copy")); };
+    blocks = HashMap::new(); locals = HashMap::new(); gone = HashSet::new(); prefix = clone(packType).concat("@");
+    for b in &fun.blocks {
+        own = lookupIndexes(&st.blocks, b.id); out = clone(own);
+        for e in &er.bindings {
+            if inContext(&own, lookupIndexes(&st.blocks, e.block)) && !HashMap::contains(&own, &e.name) { out = HashMap::insert(out, clone(e.name), clone(e.index)); };
+        };
+        if size(out.entries()) > 0 { blocks = HashMap::insert(blocks, b.id, out); };
+    };
+    for r in &fun.locals {
+        l = packInt(&r.tokens, 1); own = lookupIndexes(&st.locals, l); out = clone(own);
+        names = mentionedParams(&r.tokens, localTypeStart(&r.tokens));
+        for e in &er.bindings {
+            if indexOf(&names, &e.name) >= 0 && inContext(&own, lookupIndexes(&st.blocks, e.block)) && !HashMap::contains(&own, &e.name) { out = HashMap::insert(out, clone(e.name), clone(e.index)); };
+        };
+        for entry in out.entries() { if !withinPack(&entry.value, count) { out = HashMap::remove(out, &entry.key); }; };
+        for n in names { if n.startsWith(&prefix) && !HashMap::contains(&out, &n) { gone = HashSet::insert(gone, l); }; };
+        if size(out.entries()) > 0 { locals = HashMap::insert(locals, l, out); };
+    };
+    fun = dropUnused(transformEnvs(fun, pack, &packName, &es, &gone, false));
+    kept = HashMap::new(); decls = [];
+    for r in fun.locals {
+        l = packInt(&r.tokens, 1);
+        if HashSet::contains(&gone, l) { return packFailure(FullFunction { locals: [], ..fun }, pr.arena, ice.concat("a copy of ").concat(&funName).concat(" uses _").concat(String::fromInt(l)).concat(", of the type of an element no argument gives")); };
+        // The local index map is taken before the pack declaration is dropped.
+        if HashMap::contains(&locals, l) { kept = HashMap::insert(kept, l, lookupIndexes(&locals, l)); };
+        if l != pack { decls = push(decls, clone(r)); };
+    };
+    return PackExpansion { fun: FullFunction { locals: decls, ..fun }, arena: pr.arena, blocks: blocks, locals: kept, spreads: fw.spreads, error: "" };
+};
+
+fn intIndex(xs: &List<Int>, k: Int) -> Int ~ {
+    p = 0; for x in xs { if x = k { return p; }; p = p + 1; }; return -1;
+};
+fn intSet(xs: &List<Int>) -> HashSet<Int> ~ {
+    out = HashSet::new(); for x in xs { out = HashSet::insert(out, x); }; return out;
+};
+fn unrollAll(st: ExpansionState, pack: Int, elements: &List<Int>) -> ExpansionState ~ {
+    more = true;
+    while more ~ {
+        fnp = prune(foldGuards(st.fun, pack, size(elements)), true);
+        seen = reached(&fnp.blocks); ls = [];
+        for l in st.loops { if HashSet::contains(&seen, l.header) { ls = push(ls, clone(l)); }; };
+        st = ExpansionState { fun: fnp, loops: ls, ..st };
+        if size(st.loops) = 0 { return st; };
+        chosen = -1; p = 0;
+        for l in &st.loops {
+            nested = false;
+            for other in &st.loops { if other.header != l.header && intIndex(&other.blocks, l.header) >= 0 { nested = true; }; };
+            if !nested && chosen < 0 { chosen = p; }; p = p + 1;
+        };
+        if chosen < 0 { return ExpansionState { error: "internal compiler error: the loops over the pack of ".concat(textAt(&st.fun.header, 1)).concat(" are not nested"), ..st }; };
+        loop = clone(get(&st.loops, chosen));
+        st = unrollOne(st, &loop, pack, elements);
+        if st.error != "" { more = false; };
+    };
+    return st;
+};
+
+fn localTable(rs: &List<FullRecord>) -> HashMap<Int, FullRecord> ~ {
+    out = HashMap::new(); for r in rs { out = HashMap::insert(out, packInt(&r.tokens, 1), clone(r)); }; return out;
+};
+fn consecutiveMap(xs: &List<Int>, first: Int) -> HashMap<Int, Int> ~ {
+    out = HashMap::new(); n = first;
+    for id in xs { out = HashMap::insert(out, id, n); n = n + 1; };
+    return out;
+};
+fn mapIds(xs: &List<Int>, table: &HashMap<Int, Int>) -> List<Int> ~ {
+    out = []; for id in xs { out = push(out, HashMap::lookup(table, id, id)); }; return out;
+};
+fn moveLoop(l: &PackLoop, bs: &HashMap<Int, Int>, ls: &HashMap<Int, Int>) -> PackLoop ~ {
+    taken = clone(l.taken);
+    if taken.ok { taken = Parsed<Int> { value: HashMap::lookup(ls, taken.value, taken.value), ..taken }; };
+    return PackLoop {
+        header: HashMap::lookup(bs, l.header, l.header), body: HashMap::lookup(bs, l.body, l.body), exit: HashMap::lookup(bs, l.exit, l.exit),
+        blocks: mapIds(&l.blocks, bs), locals: mapIds(&l.locals, ls), index: HashMap::lookup(ls, l.index, l.index),
+        element: HashMap::lookup(ls, l.element, l.element), elementType: clone(l.elementType),
+        lo: HashMap::lookup(ls, l.lo, l.lo), hi: HashMap::lookup(ls, l.hi, l.hi), taken: taken
+    };
+};
+fn intIntersection(a: &HashSet<Int>, b: &HashSet<Int>) -> HashSet<Int> ~ {
+    out = HashSet::new(); for k in HashSet::elements(a) { if HashSet::contains(b, k) { out = HashSet::insert(out, k); }; }; return out;
+};
+fn emptyPredecessors() -> HashMap<Int, List<Int>> ~ { return HashMap::new(); };
+fn dominators(loop: &PackLoop, table: &HashMap<Int, FullBlock>) -> HashMap<Int, HashSet<Int>> ~ {
+    body = intSet(&loop.blocks); predecessors = emptyPredecessors(); doms = HashMap::new();
+    for b in &loop.blocks {
+        d = clone(body); if b = loop.body { d = HashSet::insert(HashSet::new(), b); };
+        doms = HashMap::insert(doms, b, d);
+        if HashMap::contains(table, b) {
+            for next in targets(lastRow(HashMap::lookupRef(table, b))) {
+                if HashSet::contains(&body, next) {
+                    ps = HashMap::lookup(&predecessors, next, []);
+                    predecessors = HashMap::insert(predecessors, next, push(ps, b));
+                };
+            };
+        };
+    };
+    changed = true;
+    while changed ~ {
+        changed = false; next = HashMap::new();
+        for b in &loop.blocks {
+            d = HashSet::new(); ps = HashMap::lookup(&predecessors, b, []);
+            if b != loop.body && size(ps) > 0 {
+                d = clone(body);
+                for p in ps { d = intIntersection(&d, HashMap::lookupRef(&doms, p)); };
+            };
+            d = HashSet::insert(d, b);
+            old = HashMap::lookupRef(&doms, b);
+            if size(d.elements()) != size(HashSet::elements(old)) { changed = true; };
+            next = HashMap::insert(next, b, d);
+        };
+        doms = next;
+    };
+    return doms;
+};
+struct LoopDefine { name: String, position: Int };
+impl Clone for LoopDefine { };
+struct LoopProofs {
+    defines: HashMap<Int, List<LoopDefine>>, names: HashSet<String>, doms: HashMap<Int, HashSet<Int>>
+};
+fn loopProofNames(loop: &PackLoop, table: &HashMap<Int, FullBlock>, arena: &List<AstNode>) -> LoopProofs ~ {
+    names = HashSet::new(); defines = HashMap::new();
+    for b in &loop.blocks {
+        ds = []; i = 0;
+        if HashMap::contains(table, b) {
+            blk = HashMap::lookupRef(table, b);
+            for row in &(*blk).lines {
+                def = proofDefineName(arena, row);
+                if def.ok && !def.value.startsWith("$pack read at ") { names = HashSet::insert(names, clone(def.value)); ds = push(ds, LoopDefine { name: def.value, position: i }); };
+                i = i + 1;
+            };
+        };
+        defines = HashMap::insert(defines, b, ds);
+    };
+    return LoopProofs { defines: defines, names: names, doms: dominators(loop, table) };
+};
+fn iterationNames(names: &HashSet<String>, value: &String) -> HashMap<String, String> ~ {
+    out = HashMap::new();
+    for n in HashSet::elements(names) { renamed = clone(n).concat(" in iteration ").concat(value); out = HashMap::insert(out, clone(n), renamed); };
+    return out;
+};
+fn visibleNames(proofs: &LoopProofs, names: &HashMap<String, String>, block: Int, position: Int) -> HashMap<String, String> ~ {
+    out = HashMap::new(); doms = HashMap::lookup(&proofs.doms, block, HashSet::new());
+    for d in doms.elements() {
+        for def in HashMap::lookupRef(&proofs.defines, d) {
+            if d != block || def.position < position { v = HashMap::lookup(names, &def.name, ""); out = HashMap::insert(out, clone(def.name), v); };
+        };
+    };
+    return out;
+};
+struct ClonedBlock { arena: List<AstNode>, block: FullBlock };
+struct ClonedSpec { arena: List<AstNode>, spec: FullRecord };
+fn freshBlock(b: &FullBlock, arena: List<AstNode>, loop: &PackLoop, bm: &HashMap<Int, Int>, rowBlocks: &HashMap<Int, Int>, lm: &HashMap<Int, Int>, value: &String, inRange: Bool, proofs: &LoopProofs, names: &HashMap<String, String>) -> ClonedBlock ~ {
+    rows = []; p = 0;
+    for row in &b.lines {
+        if !isMarker(row) && !(inRange && wordIs(row, 0, "assign") && packInt(row, 1) = loop.element) {
+            renamed = renameRow(row, lm, rowBlocks, loop.index, value);
+            if wordIs(row, 0, "ghost") && wordIs(row, 1, "validation") {
+                at = size(renamed) - 1; id = packInt(&renamed, at);
+                result = renameValidationPayload(arena, id, names, visibleNames(proofs, names, b.id, p));
+                arena = result.arena; renamed = set(renamed, at, intToken(result.id));
+            };
+            rows = push(rows, renamed);
+        };
+        p = p + 1;
+    };
+    return ClonedBlock { arena: arena, block: FullBlock { id: HashMap::lookup(bm, b.id, b.id), lines: rows } };
+};
+fn freshSpec(r: &FullRecord, arena: List<AstNode>, loop: &PackLoop, bm: &HashMap<Int, Int>, lm: &HashMap<Int, Int>, value: &String, uses: &HashMap<String, String>) -> ClonedSpec ~ {
+    h = packInt(&r.tokens, 1); mapped = HashMap::lookup(bm, h, h); b = packInt(&r.tokens, 3);
+    row = renameRow(&r.tokens, lm, HashMap::new(), loop.index, value);
+    row = set(row, 1, intToken(mapped)); row = set(row, 3, intToken(HashMap::lookup(bm, b, b)));
+    result = renameInvariantPayload(arena, packInt(&row, 5), uses);
+    arena = result.arena; row = set(row, 5, intToken(result.id));
+    if !wordIs(&row, 7, "none") {
+        term = renameTerminationPayload(clone(arena), packInt(&row, 7), uses);
+        arena = term.arena; row = set(row, 7, intToken(term.id));
+    };
+    return ClonedSpec { arena: arena, spec: FullRecord { name: String::fromInt(mapped), tokens: row } };
+};
+fn freshLocal(r: &FullRecord, id: Int) -> FullRecord ~ {
+    return FullRecord { name: String::fromInt(id), tokens: set(clone(r.tokens), 1, intToken(id)) };
+};
+fn unrollOne(st: ExpansionState, loop: &PackLoop, pack: Int, elements: &List<Int>) -> ExpansionState ~ {
+    count = size(elements);
+    known = constantsOf(&st.fun, pack, count);
+    lo = HashMap::lookup(&known, loop.lo, []); hi = HashMap::lookup(&known, loop.hi, []);
+    if !wordIs(&lo, 1, "int") || !wordIs(&hi, 1, "int") {
+        return ExpansionState { error: "internal compiler error: a bound of a loop over the pack of ".concat(textAt(&st.fun.header, 1)).concat(" is not fixed in a copy"), ..st };
+    };
+    vt = textAt(&lo, 2); end = textAt(&hi, 2);
+    table = blockTable(&st.fun.blocks); decls = localTable(&st.fun.locals);
+    body = intSet(&loop.blocks); ids = push([], loop.element);
+    for l in &loop.locals { ids = push(ids, l); };
+    dropped = intSet(&ids);
+    if loop.taken.ok { dropped = HashSet::insert(dropped, loop.taken.value); };
+    if HashMap::contains(&table, loop.header) {
+        hdr = HashMap::lookupRef(&table, loop.header);
+        for row in &(*hdr).lines { if wordIs(row, 0, "assign") { dropped = HashSet::insert(dropped, packInt(row, 1)); }; };
+    };
+    markers = [];
+    for b in &loop.blocks {
+        if HashMap::contains(&table, b) {
+            bb = HashMap::lookupRef(&table, b);
+            for row in &(*bb).lines { if isMarker(row) { markers = push(markers, clone(row)); }; };
+        };
+    };
+    proofNames = loopProofNames(loop, &table, &st.arena);
+    nb = st.nextBlock; nl = st.nextLocal;
+    off = intIndex(&loop.blocks, loop.body); entry = loop.exit;
+    if decimalCmp(&vt, &end) < 0 { entry = nb + off; };
+    arena = st.arena; blocks = []; locals = []; specs = []; inner = []; blockIndexes = clone(st.blocks); localIndexes = clone(st.locals);
+    for b in &loop.blocks { blockIndexes = HashMap::remove(blockIndexes, b); };
+    for l in dropped.elements() { localIndexes = HashMap::remove(localIndexes, l); };
+    while decimalCmp(&vt, &end) < 0 ~ {
+        bm = consecutiveMap(&loop.blocks, nb); lm = consecutiveMap(&ids, nl);
+        nextValue = decimalAdd(&vt, "1"); next = loop.exit;
+        if decimalCmp(&nextValue, &end) < 0 { next = nb + size(loop.blocks) + off; };
+        rowBlocks = HashMap::insert(clone(bm), loop.header, next);
+        inRange = withinPack(&vt, count);
+        if inRange { lm = HashMap::insert(lm, loop.element, get(elements, decimalFits(&vt).value)); };
+        names = iterationNames(&proofNames.names, &vt);
+        for id in &loop.blocks {
+            to = HashMap::lookup(&bm, id, id);
+            ix = HashMap::insert(lookupIndexes(&st.blocks, id), clone(loop.elementType), clone(vt));
+            blockIndexes = HashMap::insert(blockIndexes, to, ix);
+            if HashMap::contains(&table, id) {
+                result = freshBlock(HashMap::lookupRef(&table, id), clone(arena), loop, &bm, &rowBlocks, &lm, &vt, inRange, &proofNames, &names);
+                arena = result.arena; blocks = push(blocks, result.block);
+            };
+        };
+        for id in &ids {
+            if !(id = loop.element && inRange) {
+                to = HashMap::lookup(&lm, id, id);
+                ix = HashMap::insert(lookupIndexes(&st.locals, id), clone(loop.elementType), clone(vt));
+                localIndexes = HashMap::insert(localIndexes, to, ix);
+                if HashMap::contains(&decls, id) { locals = push(locals, freshLocal(HashMap::lookupRef(&decls, id), to)); };
+            };
+        };
+        for r in &st.fun.loops {
+            h = packInt(&r.tokens, 1);
+            if HashSet::contains(&body, h) {
+                result = freshSpec(r, clone(arena), loop, &bm, &lm, &vt, visibleNames(&proofNames, &names, h, 0));
+                arena = result.arena; specs = push(specs, result.spec);
+            };
+        };
+        for l in &st.loops { if l.header != loop.header && HashSet::contains(&body, l.header) { inner = push(inner, moveLoop(l, &bm, &lm)); }; };
+        nb = nb + size(loop.blocks); nl = nl + size(ids); vt = nextValue;
+    };
+    redirect = HashMap::insert(HashMap::new(), loop.header, entry);
+    for b in st.fun.blocks {
+        if b.id != loop.header && !HashSet::contains(&body, b.id) {
+            rows = []; term = lastRow(&b);
+            for p in 0..size(b.lines) - 1 {
+                row = get(&b.lines, p);
+                if !(loop.taken.ok && wordIs(row, 0, "assign") && packInt(row, 1) = loop.taken.value) { rows = push(rows, clone(row)); };
+            };
+            if intIndex(targets(&term), loop.header) >= 0 { for row in &markers { rows = push(rows, clone(row)); }; };
+            rows = push(rows, renameRow(&term, HashMap::new(), &redirect, 0, ""));
+            blocks = push(blocks, FullBlock { id: b.id, lines: rows });
+        };
+    };
+    for r in st.fun.locals { if !HashSet::contains(&dropped, packInt(&r.tokens, 1)) { locals = push(locals, clone(r)); }; };
+    for r in st.fun.loops { if !HashSet::contains(&body, packInt(&r.tokens, 1)) { specs = push(specs, clone(r)); }; };
+    loops = [];
+    for l in st.loops { if l.header != loop.header && !HashSet::contains(&body, l.header) { loops = push(loops, clone(l)); }; };
+    for l in inner { loops = push(loops, clone(l)); };
+    return ExpansionState { fun: orderedFunction(FullFunction { blocks: blocks, locals: locals, loops: specs, ..st.fun }), arena: arena,
+        nextBlock: nb, nextLocal: nl, blocks: blockIndexes, locals: localIndexes, loops: loops, error: "" };
+};
