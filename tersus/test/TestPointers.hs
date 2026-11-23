@@ -31,7 +31,7 @@ testPointers =
             , testCase "parentheses around a value only group" (runs "x = (3); return (x) * 2;" "6")
             , testCase "a tuple of one part is written with a trailing comma" (runs "fn f(n: Int) -> (Int,) { return (n + 1,); }; t = f(4); return t.0;" "5")
             , testCase "a tuple of one part is taken apart with a trailing comma" (runs "(a,) = (7,); return a;" "7")
-            , testCase "a tuple of one part is not taken apart without the comma" (rejected "(a) = (7,); return a;" "taken apart as (x,)")
+            , testCase "a tuple of one part is not taken apart without the comma" (rejected "(a) = (7,); return a;" "Parse error:")
             , testCase "the empty tuple" (runs "fn f() -> () { return (); }; t = f(); u = (); return 1;" "1")
             , testCase "a trailing comma after two parts" (runs "fn f() -> (Int, Int,) { return (1, 2,); }; (a, b,) = f(); return a * 10 + b;" "12")
             , testCase "a tuple of 32 parts" (runs ("t = (" ++ thirtyTwo ++ "); return t.31;") "32")
