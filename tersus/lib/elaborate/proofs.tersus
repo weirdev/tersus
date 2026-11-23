@@ -312,7 +312,7 @@ fn inferProofHead(st: St, funct: Int, args: &List<Int>) -> St ~ {
     fp = proofOf(st, funct);
     if fp is AstProof::ATerm {
         name = nameText(&st.nodes, (fp as AstProof::ATerm).n);
-        if !shadowedByFunction(st, &name) && !HashMap::contains(&st.fns, &name) && HashMap::contains(&st.ghostNames, &name) {
+        if !shadowedByFunction(st, &name) && !HashMap::contains(&st.fns, &name) && !HashMap::contains(&st.templates, &name) && HashMap::contains(&st.ghostNames, &name) {
             return ghostProof(st, funct, name, HashMap::lookup(&st.ghostNames, &name, 0 - 1), args);
         };
         if !inScope(st, &name) && !HashMap::contains(&st.fns, &name) && name = "whole" {
