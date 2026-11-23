@@ -1,6 +1,6 @@
 module TestPointers (testPointers) where
 
-import Data.List (isInfixOf)
+import Data.List (intercalate, isInfixOf)
 
 import Cli (Command (..), runSource)
 import Pipeline (assumptionsOf)
@@ -13,6 +13,8 @@ import Utils
 -- runs `examples/addresses.tersus` (TestNative), and both emitters write the same IR for it (TestMirEmit).
 testPointers :: Test
 testPointers =
+    let thirtyTwo = intercalate ", " (map show [1 .. 32 :: Int])
+     in
     TestList
         "testPointers"
         [ TestList
@@ -25,7 +27,16 @@ testPointers =
             , testCase "a tuple in a tuple" (runs "t = (1, (2, 3)); return t.1.1;" "3")
             , testCase "the contract of a part" (valid "fn f(n: Int) -> (Int, Int) [{ }] [{ affirm return.0 = n; affirm return.1 = n + 1; }] { return (n, n + 1); }; (a, b) = f(4); affirm b = a + 1; return b;")
             , testCase "a part used after it was moved" (rejected "(a, b) = (push([], 1), push([], 2)); c = a; return size(a);" "a was moved")
-            , testCase "a tuple of one part" (rejected "fn f(t: (Int)) -> Int { return 0; }; return 0;" "a tuple type has two parts or more")
+            , testCase "parentheses around a type only group" (runs "fn f(t: (Int)) -> (Int) { return t + 1; }; return f(4);" "5")
+            , testCase "parentheses around a value only group" (runs "x = (3); return (x) * 2;" "6")
+            , testCase "a tuple of one part is written with a trailing comma" (runs "fn f(n: Int) -> (Int,) { return (n + 1,); }; t = f(4); return t.0;" "5")
+            , testCase "a tuple of one part is taken apart with a trailing comma" (runs "(a,) = (7,); return a;" "7")
+            , testCase "a tuple of one part is not taken apart without the comma" (rejected "(a) = (7,); return a;" "taken apart as (x,)")
+            , testCase "the empty tuple" (runs "fn f() -> () { return (); }; t = f(); u = (); return 1;" "1")
+            , testCase "a trailing comma after two parts" (runs "fn f() -> (Int, Int,) { return (1, 2,); }; (a, b,) = f(); return a * 10 + b;" "12")
+            , testCase "a tuple of 32 parts" (runs ("t = (" ++ thirtyTwo ++ "); return t.31;") "32")
+            , testCase "a tuple of 33 parts is refused" (rejected ("t = (" ++ thirtyTwo ++ ", 33); return 0;") "at most 32 parts")
+            , testCase "a contract on a one-part tuple" (valid "fn f(n: Int) -> (Int,) [{ }] [{ affirm return.0 = n; }] { return (n,); }; (a,) = f(4); affirm a = 4; return a;")
             , testCase "the name of the struct of tuples is the language's" (rejected "struct Tuple2<A, B> { x: A, y: B }; return 0;" "builtin type")
             ]
         , TestList
