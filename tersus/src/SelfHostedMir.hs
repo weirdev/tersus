@@ -3909,8 +3909,8 @@ genericClauses rules assumeMode env0 clauses b0 next0 = do
         (more, b') <- contractSteps rules True env [ProofAssert proof] b
         pure (more : chunks, b', env, next)
 
-encodeFunction :: Bool -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
-encodeFunction physical types invariants functions rules allowCalls fn
+encodeFunction :: Bool -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> (Set.Set Name, Set.Set Name) -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
+encodeFunction physical types invariants functions (worldReaders, inputReaders) rules allowCalls fn
     | any (\(M.Local n) -> n < 0) (Map.keys (M.fnLocals fn)) = Nothing
     | length (M.fnParams fn) /= length (nub (M.fnParams fn)) = Nothing
     | M.Local 0 `elem` M.fnParams fn = Nothing
@@ -3925,7 +3925,7 @@ encodeFunction physical types invariants functions rules allowCalls fn
     -- in every other program, is not one it may use)
     | physical && any logicalContainerUse (concatMap M.blockStatements (Map.elems (M.fnBlocks fn))) = Nothing
     | otherwise = do
-        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildCopy = isCopyName (M.fnName fn), buildGeneric = Map.member genericKey (M.specEnv (M.fnSpec fn)), buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
+        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildCopy = isCopyName (M.fnName fn), buildGeneric = Map.member genericKey (M.specEnv (M.fnSpec fn)), buildFunctions = functions, buildRules = rules, buildReaders = worldReaders, buildInputReaders = inputReaders}) (M.fnParams fn)
         (paramFacts, withTypes) <- foldM addType ([], start) (M.fnParams fn)
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
         (requires0, withRequires0) <- contractSteps rules True (M.specEnv spec) (M.specRequires spec) withSizes
@@ -4108,7 +4108,8 @@ encodeMono physical program
             invariants = M.progInvariants program
             types = M.progTypes program
         rules' <- maybe (Left "an axiom or proof rule") Right (collectRules program)
-        let encodeOne fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v)) (encodeFunction physical types invariants functions rules' True fn)
+        let effects = (M.readersOfInput program, inputReadersOf functions)
+            encodeOne fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v)) (encodeFunction physical types invariants functions effects rules' True fn)
         conversions <- fmap (Set.toAscList . Set.fromList . concat) (traverse fnConversions allFunctions)
         case indirectCycle functions (M.progMain program) conversions of
             Just name -> Left ("potential recursion through a function value in " ++ name)

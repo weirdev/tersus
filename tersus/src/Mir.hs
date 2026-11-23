@@ -29,7 +29,7 @@ module Mir
     , completeErasedInstances
     , readersOfInput
     , worldReadersBy
-    , intrinsicDispatchKey
+    , closedDispatch
     , companionOf
     , functionsNamed
     , slotsOf
@@ -693,33 +693,28 @@ companionOf name = do
 readersOfInput :: Program -> Set.Set Name
 readersOfInput = worldReadersBy readsWorldOp . progFunctions
 
--- The copy pass records an intrinsic dispatch implementation in the stub's proof environment.
-intrinsicDispatchKey :: Name
-intrinsicDispatchKey = "$intrinsicDispatch"
+-- Only the copy pass can tell an empty set of runtime dispatches from a
+-- stub whose runtime targets have not been collected.
+closedDispatch :: Set.Set Name -> Env
+closedDispatch targets = Map.fromAscList
+    ((dispatchComplete, Const (CInt 0)) : [(dispatchPrefix ++ name, Const (CFn name)) | name <- Set.toAscList targets])
+
+dispatchComplete, dispatchPrefix :: Name
+dispatchComplete = "$dispatch"
+dispatchPrefix = "$dispatch "
 
 worldReadersBy :: (ListOp -> Bool) -> Map Name Function -> Set.Set Name
-worldReadersBy readsOp fs = grow (Set.fromList [name | (name, fn) <- functions, unknownDispatch name || any reads (Map.elems (fnBlocks fn))])
+worldReadersBy readsOp fs = grow (Set.fromList [name | (name, fn) <- functions, unknownDispatch fn || any reads (Map.elems (fnBlocks fn))])
   where
     functions = Map.toList fs
-    implementations = Map.fromListWith Set.union
-        [ ((trait, methodName method), Set.singleton name)
-        | name <- Map.keys fs, check <- name : maybe [] pure (companionOf name)
-        , Just (trait, owner, method) <- [parseImplCheckName check], owner /= "$Self" ]
-    methodName = takeWhile (`notElem` "<[#")
-    dispatch name = case parseImplCheckName name of
-        Just (trait, "$Self", method) -> Just (trait, methodName method)
-        _ -> Nothing
-    targets name key = Map.findWithDefault Set.empty key implementations `Set.union` intrinsic
-      where
-        intrinsic = case Map.lookup name fs >>= Map.lookup intrinsicDispatchKey . specEnv . fnSpec of
-            Just (Const (CFn helper)) | Map.member helper fs -> Set.singleton helper
-            _ -> Set.empty
-    -- Use only the implementations of this linked program; another link's
-    -- generic proof is rebuilt from that program's effect graph.
-    unknownDispatch name = case dispatch name of
-        Just key@(trait, _) -> any (`isPrefixOf` trait) ["Fn$", "FnMut$", "FnOnce$"] || Set.null (targets name key)
-        Nothing -> False
-    dependencies name fn = Set.union (functionsNamed fn) (maybe Set.empty (targets name) (dispatch name))
+    targets fn = Set.fromList [n | (key, Const (CFn n)) <- Map.toList (specEnv (fnSpec fn)), dispatchPrefix `isPrefixOf` key]
+    unknownDispatch fn = case parseImplCheckName (fnName fn) of
+        Just (trait, "$Self", _) ->
+            any (`isPrefixOf` trait) ["Fn$", "FnMut$", "FnOnce$"]
+                || Map.notMember dispatchComplete (specEnv (fnSpec fn))
+                || not (Set.isSubsetOf (targets fn) (Map.keysSet fs))
+        _ -> False
+    dependencies fn = functionsNamed fn `Set.union` targets fn
     reads (BasicBlock stmts term) = indirect term || any readsStatement stmts
     indirect (Call (Const (CFn _)) _ _ _) = False
     indirect Call{} = True
@@ -730,7 +725,7 @@ worldReadersBy readsOp fs = grow (Set.fromList [name | (name, fn) <- functions, 
         AssignRef _ _ (ListOp op _) -> readsOp op
         _ -> False
     grow known =
-        let more = Set.fromList [name | (name, fn) <- functions, not (Set.member name known), not (Set.null (Set.intersection (dependencies name fn) known))]
+        let more = Set.fromList [name | (name, fn) <- functions, not (Set.member name known), not (Set.null (Set.intersection (dependencies fn) known))]
          in if Set.null more then known else grow (Set.union known more)
 
 -- The functions of the program that a function names as values or callees in its statements (not those its contracts could name,
