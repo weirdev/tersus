@@ -22,7 +22,7 @@ import GHC.Exts (isTrue#, reallyUnsafePtrEquality#)
 import AstData (readMirPayloadBytes, writeMirPayloadLines)
 import Mir
 import qualified Syntax as S
-import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable)
+import Types (Arg (..), Name, Rel (..), Size (..), Type (..), isFunctionSignature, pattern TList, pattern TBox, Variable)
 import Utils
 
 -- The MIR of a program as text that a program can read (`tersus mir --data`): what native code is made from, and nothing else. It is the
@@ -524,6 +524,7 @@ unwritable program =
         TMutRef u -> writable u
         TFn args ret -> all writable (ret : args)
         TFnContract args ret _ -> all writable (ret : args)
+        TBoxedClosure _ signature -> isFunctionSignature signature && writable signature
         TForall _ _ u -> writable u
         _ -> True
 

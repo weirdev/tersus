@@ -104,6 +104,7 @@ isCopyType copies program = go (0 :: Int)
             TBool -> True
             TFn{} -> True
             TFnContract{} -> True
+            TBoxedClosure{} -> False
             TAddr _ -> True
             TUninit t -> not (ownsHeap program t) && go (depth + 1) t
             TArrayOf t _ -> go (depth + 1) t
@@ -1326,6 +1327,7 @@ pointeeTypes cx = fmap nub . go Set.empty
         TWord _ _ -> Just []
         TFn _ _ -> Just []
         TFnContract _ _ _ -> Just []
+        TBoxedClosure{} -> Nothing
         TNamed base args ->
             let name = instanceName base args
              in if name `Set.member` seen then Just [] else case Map.lookup name types of
@@ -1534,6 +1536,7 @@ referenceReach query program = go query Set.empty
         TParam _ -> False
         TFn _ _ -> False
         TFnContract _ _ _ -> False
+        TBoxedClosure{} -> True
         TForall _ _ _ -> False
         TAddr _ -> False
         TInt -> False

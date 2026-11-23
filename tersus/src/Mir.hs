@@ -364,6 +364,7 @@ completeInstancesWith erased program
         TMutRef t -> namedArgs t
         TFn args ret -> concatMap namedArgs (ret : args)
         TFnContract args ret _ -> concatMap namedArgs (ret : args)
+        TBoxedClosure _ signature -> namedArgs signature
         TForall _ _ t -> namedArgs t
         _ -> []
     go types _ [] = types
@@ -399,6 +400,7 @@ completeInstancesWith erased program
         TMutRef t -> typeNames t
         TFn args ret -> concatMap typeNames (ret : args)
         TFnContract args ret _ -> concatMap typeNames (ret : args)
+        TBoxedClosure _ signature -> typeNames signature
         TForall _ _ t -> typeNames t
         _ -> []
     rvalueNames rv = case rv of

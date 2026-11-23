@@ -611,11 +611,16 @@ contractFnType =
             [FnClause [FnWord "affirm", FnWord "return", FnWord "gt", FnWord "0"]]
         )
 
+boxedType :: Type
+boxedType = TNamed "Box" [ArgType (TBoxedClosure False (TFn [TBoxedClosure True contractFnType] TInt))]
+
 contractFnAst :: TestResult
 contractFnAst =
     firstFailure
         [ roundTrip [StructDef "Callback" [] [("f", contractFnType)] []]
         , roundTrip [Assign "g" (Ascribed (Var "f") contractFnType)]
+        , roundTrip [StructDef "Callbacks" [] [("g", boxedType)] []]
+        , refused (replaceOnce "closure fn 1" "closure int" (dataParsed [StructDef "Callbacks" [] [("g", boxedType)] []]))
         , case readInterface (interfaceText) of
             Error e -> Just e
             Ok back
@@ -630,7 +635,7 @@ contractFnAst =
         ModuleInterface
             { ifModule = ModuleId "pkg" (Just "m")
             , ifTypes = Map.empty
-            , ifCtors = Map.fromList [("Callback", ("Callback", [("f", contractFnType)]))]
+            , ifCtors = Map.fromList [("Callback", ("Callback", [("f", contractFnType), ("g", boxedType)]))]
             , ifGenerics = Map.empty
             , ifInvariants = Map.empty
             , ifTraits = Map.empty
@@ -689,6 +694,11 @@ testAstReader :: Test
 testAstReader = TestList "testAstReader"
     [ TestCase "interpreted round trip" (interpreted small [])
     , TestCase "interpreted contract function type round trip" (interpreted [StructDef "Callback" [] [("f", contractFnType)] []] [])
+    , TestCase "interpreted boxed closure type round trip" (interpreted [StructDef "Callbacks" [] [("g", boxedType)] []] [])
+    , TestCase "native boxed closure type round trip" (withAstReader $ \exe -> do
+        let fixture = [StructDef "Callbacks" [] [("g", boxedType)] []]
+        (code, output, errors) <- runExecutableBytes exe [] (dataParsed fixture)
+        pure (firstFailure [testAssertEq code ExitSuccess, testAssertEq errors "", checkOutput fixture [] output]))
     , TestCase "interpreted UTF-8 names" (interpreted [Assign "café" (Var "λ\NUL\n\\\"")] [])
     , TestCase "interpreted exact printed byte count" (interpreted small ["count"])
     , TestCase "interpreted semantic mutation" (interpreted small ["mutate"])

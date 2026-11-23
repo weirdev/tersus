@@ -8,6 +8,7 @@ import qualified Data.Map.Strict as Map
 
 import Data.Char (isAlphaNum, isDigit, isLower, isUpper)
 import Data.List (intercalate, stripPrefix)
+import Utils (encodeUtf8)
 
 protocolRoles :: [Name]
 protocolRoles = ["Box", "Clone", "Copy", "Deref", "Drop", "Eq", "List"]
@@ -230,9 +231,33 @@ data Type = TInt | TByte | TBool
     | -- A reference that may update its referent (REFERENCES.md): as a parameter it is lent exclusively, as a local it is
       -- made by `&mut place`. It is never a result, a field or an element in stages 1 to 3 (escaping references are stage 4).
       TMutRef Type
-    | -- A function type carrying a contract (last, so the constructors before it keep their order everywhere order is observed)
+    | -- A function type carrying a contract
       TFnContract [Type] Type FnContract
+    | TBoxedClosure Bool Type
     deriving (Show, Eq, Ord, Read)
+
+boxedClosureName :: Bool -> String
+boxedClosureName mutable = if mutable then "ClosureMut" else "Closure"
+
+isFunctionSignature :: Type -> Bool
+isFunctionSignature TFn{} = True
+isFunctionSignature TFnContract{} = True
+isFunctionSignature _ = False
+
+containsBoxedClosure :: Type -> Bool
+containsBoxedClosure ty = case ty of
+    TBoxedClosure{} -> True
+    TFn args result -> any containsBoxedClosure (result : args)
+    TFnContract args result _ -> any containsBoxedClosure (result : args)
+    TNamed _ args -> any containsBoxedClosure [t | ArgType t <- args]
+    TArrayOf t _ -> containsBoxedClosure t
+    TForall _ _ t -> containsBoxedClosure t
+    TRef t -> containsBoxedClosure t
+    TMutRef t -> containsBoxedClosure t
+    TBlock t -> containsBoxedClosure t
+    TAddr t -> containsBoxedClosure t
+    TUninit t -> containsBoxedClosure t
+    _ -> False
 
 -- The size argument of a type: a constant, or `?`, a size that the type does not say. A type with a `?` is unsized: its size is
 -- known only to something that holds a pointer to it and carries the size along (a Box, later), so it cannot be held by value.
@@ -262,6 +287,61 @@ isTypeName name = case name of
     c : _ -> isUpper c
     [] -> False
 
+typeTokens :: Type -> [String]
+typeTokens ty = case ty of
+    TInt -> ["int"]
+    TByte -> ["byte"]
+    TWord signed bits -> [(if signed then "i" else "u") ++ show bits]
+    TBool -> ["bool"]
+    -- (a list and a Box are named types, in the data as in the checker, so the programs that read the data see
+    -- the struct a native list or Box is; the `list` and `box` tokens are only read, for data written before)
+    TNamed base args -> ["named", quoteWireName base, show (length args)] ++ concatMap argTokens args
+    TArrayOf t s -> "array" : typeTokens t ++ sizeTokens s
+    TAddr t -> "addr" : typeTokens t
+    TUninit t -> "uninit" : typeTokens t
+    TBlock t -> "block" : typeTokens t
+    TFn args ret -> ["fn", show (length args)] ++ concatMap typeTokens (args ++ [ret])
+    TBoxedClosure mutable signature -> (if mutable then "closuremut" else "closure") : typeTokens signature
+    TFnContract args ret contract ->
+        ["fnc", show (length args)] ++ concatMap typeTokens (args ++ [ret])
+            ++ [show (length (fnParamNames contract))] ++ map quoteWireName (fnParamNames contract)
+            ++ clauseListTokens (fnRequires contract) ++ clauseListTokens (fnEnsures contract)
+      where
+        clauseListTokens clauses = show (length clauses) : concatMap clauseTokens clauses
+        clauseTokens (FnClause tokens) = show (length tokens) : concatMap tokenTokens tokens
+        tokenTokens (FnWord w) = ["w", w]
+        tokenTokens (FnName n) = ["q", quoteWireName n]
+    TVariant n -> ["variant", quoteWireName n]
+    TVar i -> ["var", show i]
+    TForall sizes types t -> ["forall", show (length sizes)] ++ map quoteWireName sizes ++ [show (length types)] ++ map quoteWireName types ++ typeTokens t
+    TParam n -> ["param", quoteWireName n]
+    TRef t -> "ref" : typeTokens t
+    TMutRef t -> "mutref" : typeTokens t
+
+argTokens :: Arg -> [String]
+argTokens (ArgSize s) = "size" : sizeTokens s
+argTokens (ArgType ty) = "type" : typeTokens ty
+
+sizeTokens :: Size -> [String]
+sizeTokens s = case s of
+    SizeConst n -> ["c", show n]
+    SizeAny -> ["any"]
+    SizeParam n -> ["p", quoteWireName n]
+    SizeVar i -> ["v", show i]
+
+
+quoteWireName :: String -> String
+quoteWireName name = '"' : concatMap byteText (encodeUtf8 name) ++ "\""
+  where
+    byteText c
+        | n >= 32 && n < 127 && c /= '"' && c /= '\\' = [c]
+        | otherwise = ['\\', 'x', hexDigit (n `div` 16), hexDigit (n `mod` 16)]
+      where
+        n = fromEnum c
+    hexDigit d = "0123456789ABCDEF" !! d
+
+-- Reading
+
 -- The type that a struct with parameters is for a list of sizes and types (`Packet<4>`, `Vec<Int, 3>`, and `Vec<'T, n>` in a function that has
 -- the type T and the size n) is a struct of its own, carrying its arguments structurally: `TNamed "Vec" [ArgType TInt, ArgSize (SizeConst 3)]`.
 -- Everything after the checker sees an ordinary struct; the base and arguments are how the checker and MirMono find the declaration again.
@@ -272,7 +352,9 @@ instanceName base args = base ++ "<" ++ intercalate ", " (map renderArg args) ++
 
 renderArg :: Arg -> String
 renderArg (ArgSize size) = renderSizeForName size
-renderArg (ArgType ty) = renderTypeForName ty
+renderArg (ArgType ty)
+    | containsBoxedClosure ty = boxedTypeKey ty
+    | otherwise = renderTypeForName ty
 
 renderSizeForName :: Size -> String
 renderSizeForName (SizeConst n) = show n
@@ -283,6 +365,7 @@ renderSizeForName (SizeVar n) = "_" ++ show n
 -- A type as the rendered name of an instance writes it (a type parameter has a ' before it, so that it is not a struct, and an unknown has a ?)
 renderTypeForName :: Type -> String
 renderTypeForName ty = case ty of
+    TBoxedClosure{} -> boxedTypeKey ty
     TInt -> "Int"
     TByte -> "Byte"
     TBool -> "Bool"
@@ -311,6 +394,15 @@ renderTypeForName ty = case ty of
     TParam name -> '\'' : name
     TVar n -> '?' : show n
     TForall _ _ t -> renderTypeForName t
+
+boxedTypeKey :: Type -> Name
+boxedTypeKey ty = "@boxed:" ++ concatMap hexByte (encodeUtf8 (unwords (typeTokens ty)))
+
+hexByte :: Char -> String
+hexByte c = [digit (n `div` 16), digit (n `mod` 16)]
+  where
+    n = fromEnum c
+    digit i = "0123456789ABCDEF" !! i
 
 bareLower :: Name -> Bool
 bareLower name = case name of
@@ -380,6 +472,7 @@ mentionsParameter ty = case ty of
     TArrayOf t size -> mentionsParameter t || sizeParam size
     TFn args ret -> any mentionsParameter (ret : args)
     TFnContract args ret _ -> any mentionsParameter (ret : args)
+    TBoxedClosure _ signature -> mentionsParameter signature
     TNamed _ args -> any argParameter args
     _ -> False
   where
@@ -407,6 +500,7 @@ substitute sizes types = go
         TMutRef t -> TMutRef (go t)
         TFn args ret -> TFn (map go args) (go ret)
         TFnContract args ret contract -> TFnContract (map go args) (go ret) contract
+        TBoxedClosure mutable signature -> TBoxedClosure mutable (go signature)
         TParam name | Just t <- lookup name types -> t
         TForall ss ts t -> TForall ss ts (substitute [(n, s) | (n, s) <- sizes, n `notElem` ss] [(n, u) | (n, u) <- types, n `notElem` ts] t)
         TNamed base args -> TNamed base (map arg args)

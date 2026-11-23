@@ -47,6 +47,7 @@ enum Type {
     TUninit { inner: Box<Type> },
     TWord { signed: Bool, bits: Int },
     TFnContract { args: List<Type>, ret: Box<Type>, contract: Box<FnContract> },
+    TBoxedClosure { mutable: Bool, signature: Box<Type>, key: String },
 };
 
 impl Clone for Type { };
@@ -391,6 +392,7 @@ fn renderTypeForName(t: &Type, fuel: Int) -> String [{ affirm fuel >= 0; }] [{ }
             r = catStrings(r, renderFnClauses(c.requires, fuel));
             r = catStrings(r, renderFnClauses(c.ensures, fuel));
         },
+        Type::TBoxedClosure { key: key } => { r = clone(key); },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
             if isBareLowerName(name) { r = catStrings("`", clone(name)); } else { r = clone(name); };
         },
@@ -457,7 +459,10 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
                 if w2.value != "type" { return bad; };
                 a = typeAt(ts, w2.pos);
                 if !a.ok { return bad; };
-                parts = push(parts, renderTypeForName(a.value, size(ts)));
+                part = "";
+                if boxedClosureInSpan(ts, w2.pos, a.pos) { part = boxedClosureKey(ts, w2.pos, a.pos); }
+                else { part = renderTypeForName(a.value, size(ts)); };
+                parts = push(parts, part);
                 p = a.pos;
             };
             affirm argStart <= p;
@@ -503,6 +508,14 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
         r = typeAt(ts, p);
         if !r.ok { return bad; };
         return done(Type::TFn { args: args, ret: Box::new(r.value) }, r.pos);
+    };
+    if kw = "closure" || kw = "closuremut" {
+        if next >= size(ts) { return bad; };
+        if !isWord(ts, next, "fn") && !isWord(ts, next, "fnc") { return bad; };
+        signature = typeAt(ts, next);
+        if !signature.ok { return bad; };
+        key = boxedClosureKey(ts, pos, signature.pos);
+        return done(Type::TBoxedClosure { mutable: kw = "closuremut", signature: Box::new(signature.value), key: key }, signature.pos);
     };
     if kw = "fnc" {
         c = countAt(ts, next);
@@ -553,6 +566,31 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
     return bad;
 };
 
+fn boxedClosureInTokens(ts: &List<Token>) -> Bool ~ {
+    end = 0;
+    for i in 0..size(ts) {
+        if i >= end && i < size(ts) {
+            tok = &get(ts, i);
+            if !(*tok).quoted {
+                if (*tok).text = "closure" || (*tok).text = "closuremut" { return true; };
+                if (*tok).text = "fnc" {
+                    t = typeAt(ts, i);
+                    if t.ok {
+                        if boxedClosureInSpan(ts, i, t.pos) { return true; };
+                        end = t.pos;
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn boxedClosureInRows(rows: &List<List<Token>>) -> Bool ~ {
+    for row in rows { if boxedClosureInTokens(row) { return true; }; };
+    return false;
+};
+
 fn hexDigit(d: Int) -> Byte [{ affirm d >= 0; affirm d <= 15; }] [{ }] {
     if d < 10 { return toByte(48 + d); };
     return toByte(55 + d);
@@ -580,6 +618,49 @@ fn quoteName(name: &String) -> String [{ }] [{ }] {
         };
     };
     return String { bytes: push(bytes, toByte(34)) };
+};
+
+fn boxedClosureInSpan(ts: &List<Token>, lo: Int, hi: Int) -> Bool [{ }] [{ }] {
+    payload = false;
+    if lo < 0 || hi < lo || hi > size(ts) { return false; };
+    for i in lo..hi {
+        if i >= 0 && i < size(ts) {
+            tok = get(ts, i);
+            if !tok.quoted && !payload && (tok.text = "closure" || tok.text = "closuremut") { return true; };
+            payload = !tok.quoted && !payload && tok.text = "w";
+        };
+    };
+    return false;
+};
+
+// Only a clause marker can introduce an opaque bare word in a checked type span.
+fn boxedClosureKey(ts: &List<Token>, lo: Int, hi: Int) -> String [{ }] [{ }] {
+    prefix = "@boxed:";
+    bytes = clone(prefix.bytes);
+    if lo < 0 || hi < lo || hi > size(ts) { return prefix; };
+    payload = false;
+    for i in lo..hi {
+        if i >= 0 && i < size(ts) {
+            if i > lo { bytes = push(push(bytes, toByte(50)), toByte(48)); };
+            tok = get(ts, i);
+            rendered = clone(tok.text);
+            if tok.quoted { rendered = quoteName(&tok.text); } else {
+                if !payload {
+                    if tok.text = "list" { rendered = "named \"List\" 1 type"; };
+                    if tok.text = "box" { rendered = "named \"Box\" 1 type"; };
+                    n = parseInt(&tok.text);
+                    if n.ok { rendered = String::fromInt(n.value); };
+                };
+            };
+            payload = !tok.quoted && !payload && tok.text = "w";
+            for b in &rendered.bytes {
+                c = toInt(b);
+                bytes = push(bytes, hexDigit(c / 16));
+                bytes = push(bytes, hexDigit(c % 16));
+            };
+        };
+    };
+    return String { bytes: bytes };
 };
 
 fn printName(name: &String) -> Int [{ }] [{ }] {
@@ -673,6 +754,10 @@ fn printTypeWith(t: &Type, listTokens: Bool) -> Int ~ {
             n = n + printNames(&c.names);
             n = n + printFnClauses(&c.requires);
             n = n + printFnClauses(&c.ensures);
+        },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => {
+            tag = " closure"; if mutable { tag = " closuremut"; };
+            n = tag.print() + printTypeWith(Box::unbox(signature), listTokens);
         },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
             n = " named".print() + printName(base) + printInt(argc);

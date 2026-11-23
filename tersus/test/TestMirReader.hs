@@ -30,6 +30,8 @@ testMirReader =
             , TestCase "names that are not ASCII" (interpreted "naïve = 3; café = naïve + 1; return café;")
             , TestCase "a contract function type round trips" (interpretedText contractFnText)
             , TestCase "a malformed contract function type is refused" (refusedText malformedContractFnText)
+            , TestCase "nested boxed closure types round trip" (interpretedText boxedClosureText)
+            , TestCase "a boxed closure around a non-function type is refused" (refusedText (boxedMirText "closure int"))
             ]
         , TestParallel
             "every example and program, natively"
@@ -88,6 +90,20 @@ malformedContractFnText =
         , "end"
         ]
 
+boxedClosureText :: String
+boxedClosureText = boxedMirText "named \"Box\" 1 type closure fn 1 closuremut fnc 0 int 0 1 3 w list w 0007 w closure 0 int"
+
+boxedMirText :: String -> String
+boxedMirText ty = unlines
+    [ "tersus-mir 1"
+    , "struct \"Callbacks\" 1 \"f\" " ++ ty
+    , "main \"m\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"
+    , "local 0 some \"g\" " ++ ty
+    , "block 0"
+    , "return"
+    , "end"
+    ]
+
 interpretedText :: String -> IO TestResult
 interpretedText text = do
     reader <- bootstrapFromFile "lib/mir/mir_reader/mir_reader.tersus"
@@ -109,7 +125,7 @@ refusedText text = do
             Error _ -> Nothing
             Ok ((output, errors), _)
                 | not (null errors) && not (sameText output text) -> Nothing
-                | otherwise -> Just "a malformed contract function type was read as MIR data"
+                | otherwise -> Just "a malformed type was read as MIR data"
 
 -- One of the compiler's own programs (the reader, the emitter, the MIR checker and eraser) as an executable, built as the host builds
 -- them: lowered and owned without being validated (MirHousekeeping.ownedProgramOf), since whether each validates is testExamples' to

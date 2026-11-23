@@ -1,6 +1,6 @@
 module TestDataCodec (testDataCodec) where
 
-import Data.List (sort)
+import Data.List (nub, sort)
 import qualified Modules as Mod
 import qualified PackageCompile
 import PreludeSource (toolPackageFiles, parserPackageFiles)
@@ -13,7 +13,7 @@ import Hash (fingerprint)
 import DataCodec (parseLine, tokenize, typeP, typeTokens)
 import MirEval (fromMirValue, runProgramEnv, RunEnv (..), Outcome (..))
 import Syntax (Value (..))
-import Types (FnClause (..), FnClauseToken (..), FnContract (..), Type (..))
+import Types (Arg (..), FnClause (..), FnClauseToken (..), FnContract (..), Type (..), instanceName)
 import TestHarness
 import Utils
 
@@ -94,6 +94,11 @@ haskellContractTypes =
         , testAssertEq (parsedType "fn 2 int bool int") (Ok (TFn [TInt, TBool] TInt))
         , testAssertEq (parsedType (unwords (typeTokens contractFnType))) (Ok contractFnType)
         , testAssertEq (take 1 (typeTokens contractFnType)) ["fnc"]
+        , testAssertEq (parsedType (unwords (typeTokens boxedType))) (Ok boxedType)
+        , testAssertEq (parsedType "closure fn 0 int") (Ok (TBoxedClosure False (TFn [] TInt)))
+        , refused "closure int"
+        , refused "closuremut closure fn 0 int"
+        , refused "closure fnc 0 int 0 0"
         , refused "fnc 1 int int 2 \"x\" \"y\" 0 0"
         , refused "fnc 2 int int int 2 \"x\" \"x\" 0 0"
         , refused "fnc 1 int int 1 \"x\" 1 0 0"
@@ -102,6 +107,7 @@ haskellContractTypes =
         , refused "fnc 1 int int 1 \"x\" 0"
         ]
   where
+    boxedType = TNamed "Box" [ArgType (TBoxedClosure True (TFn [TBoxedClosure False contractFnType] TInt))]
     refused text = case parsedType text of
         Error _ -> Nothing
         Ok ty -> Just ("accepted a malformed contract function type: " ++ show ty)
@@ -124,6 +130,29 @@ tersusContractTypes = codecRun (unlines
         , testAssertEq (outStderr outcome) ""
         ])
 
+boxedKeyParity :: IO TestResult
+boxedKeyParity = codecRun (unlines
+    ([ "import data::codec::codec { tokenize, typeAt, renderTypeForName };" ] ++ concatMap probe spellings))
+    (\outcome -> firstFailure
+        [ testAssertEq (lines (outStdout outcome)) (expected ++ [expected !! 1])
+        , testAssertEq (outStderr outcome) ""
+        , testAssertEq (length (nub expected)) 7
+        ])
+  where
+    thin = TFn [] TInt
+    clause = FnClause [FnWord "list", FnWord "0007", FnWord "w", FnName "é"]
+    contracted ins outs = TFnContract [] TInt (FnContract [] ins outs)
+    owner = TBoxedClosure False
+    enclosing ins outs = TFnContract [owner thin] TInt (FnContract [""] ins outs)
+    forms = [ TNamed "Closure" [ArgType thin], owner thin, owner (contracted [] [])
+            , owner (contracted [clause] []), owner (contracted [] [clause])
+            , enclosing [clause] [], enclosing [] [clause]]
+    expected = map (\ty -> instanceName "Holder" [ArgType ty]) forms
+    wrapped = map (\ty -> unwords (typeTokens (TNamed "Holder" [ArgType ty]))) forms
+    spellings = wrapped ++ ["named \"Holder\" 01 type closure fn 00 int"]
+    probe text = ["ts = tokenize(" ++ show text ++ "); t = typeAt(ts.value, 0);"
+                 ,"if !t.ok { return 1; }; n = renderTypeForName(t.value, 100).print(); writeByte(toByte(10));"]
+
 firstFailure :: [TestResult] -> TestResult
 firstFailure results = case [err | Just err <- results] of
     err : _ -> Just err
@@ -131,7 +160,8 @@ firstFailure results = case [err | Just err <- results] of
 
 testDataCodec :: Test
 testDataCodec = TestList "testDataCodec"
-    [ TestList "canonical shared imports" [testCase entry (sharing entry) | entry <- entries]
+    [ TestCase "boxed closure keys agree and distinguish nominal, plain and contracted signatures" boxedKeyParity
+    , TestList "canonical shared imports" [testCase entry (sharing entry) | entry <- entries]
     , TestCase "parser cache covers the complete package snapshot" $ do
         producer <- MirHousekeeping.emitterKey
         actual <- TersusParser.parserKey

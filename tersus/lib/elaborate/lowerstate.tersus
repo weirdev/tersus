@@ -467,6 +467,7 @@ fn fromCodecTy(ls: LowSt, t: &Type) -> LowSt ~ {
         Type::TBox { inner: e } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); name = clone(ls.boxName); return namedType(ls, name, push([], ls.ty)); },
         Type::TArray { elem: e, size: s } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); return arrayType(ls, ls.ty, clone(s)); },
         Type::TFn { args: args, ret: r } => { return fromCodecFn(ls, args, r, ""); },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { return lfail(ls, "boxed closure types are not supported in lowering"); },
         Type::TFnContract { args: args, ret: r, contract: contract } => {
             c = Box::unbox(clone(contract));
             return fromCodecFn(ls, args, r, fnContractSuffix(&c));

@@ -3,7 +3,7 @@ import mir::emit::values { Gen };
 import mir::emit::functions { emitBody, emitFunction, externDeclaration, failedFn };
 import mir::emit::helpers { cloneFunctions, dropFunctions, printFunctions };
 import mir::support::support { noStrings, showInt, renderType, isAggregate };
-import data::codec::codec { Type, Token, Parsed, tokenize, isWord };
+import data::codec::codec { Type, Token, Parsed, tokenize, isWord, boxedClosureInRows };
 import data::reader::reader { readRecord, readRecords, tokenizeMir };
 import mir::reader::reader { TypeDecl, Function, Program, programAt, readLines, storageProblemIn };
 import mir::ownership::ownership { isOwnershipRequest, runOwnership };
@@ -281,6 +281,10 @@ mode = String::arg(0, 100);
 read = readEmitterInput();
 if !read.ok {
     "the input is not the MIR as data: a bad name\n".printError();
+    return 1;
+};
+if !isLinkRequest(&read.value) && boxedClosureInRows(&read.value) {
+    "boxed closure types are not supported by the runtime MIR ABI\n".printError();
     return 1;
 };
 if isLinkRequest(read.value) {

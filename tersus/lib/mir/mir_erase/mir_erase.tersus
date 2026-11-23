@@ -1,5 +1,5 @@
 import mir::support::support { Layout, showInt, joinWith, beforeAngle, renderSize, lookupDecl, sizedArray, declaredName, roundUp, wordLayout, simpleLayout };
-import data::codec::codec { Token, Size, Type, quoted, parseInt };
+import data::codec::codec { Token, Size, Type, quoted, parseInt, boxedClosureInRows };
 
 // The ghosts of a program, erased by a program in Tersus. The host runs this on every program (MirHousekeeping) after validation and before anything else. It is checked against the erasure it replaced by TestMirErase.
 // It reads the MIR as data before its ghosts are erased (`tersus mir --ghost-data`, version 2 of the data in MirData: the types
@@ -323,6 +323,7 @@ fn typeText(t: &Type) -> String ~ {
             for a in args { parts = push(parts, typeText(a)); };
             r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(typeText(Box::unbox(ret)));
         },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { r = "unsupported boxed closure type"; },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             parts = [];
             for a in args { parts = push(parts, typeText(a)); };
@@ -695,6 +696,7 @@ fn plainRendered(t: &Type) -> String ~ {
             for a in args { parts = push(parts, plainRendered(a)); };
             r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(plainRendered(Box::unbox(ret)));
         },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { r = "unsupported boxed closure type"; },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             parts = [];
             for a in args { parts = push(parts, plainRendered(a)); };
@@ -742,6 +744,7 @@ fn plainType(t: &Type) -> Type ~ {
             for a in args { na = push(na, plainType(a)); };
             r = Type::TFn { args: na, ret: Box::new(plainType(Box::unbox(ret))) };
         },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             na = [];
             for a in args { na = push(na, plainType(a)); };
@@ -983,6 +986,7 @@ fn knownLayoutAt(types: &List<TypeDecl>, t: &Type, depth: Int) -> Bool ~ {
         Type::TByte => { },
         Type::TBool => { },
         Type::TFn { args: args, ret: ret } => { },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { r = false; },
         Type::TFnContract { args: args, ret: ret, contract: contract } => { },
         Type::TVariant { name: name } => { },
         Type::TVar { n: n } => { },
@@ -1053,6 +1057,10 @@ fn castProblem(p: &Program, indexes: &List<HashMap<Int, LocalInfo>>, entryIndex:
 read = readLines();
 if !read.ok {
     "the input is not the MIR as data: a bad name\n".printError();
+    return 1;
+};
+if boxedClosureInRows(&read.value) {
+    "boxed closure types are not supported by the runtime MIR ABI\n".printError();
     return 1;
 };
 program = ghostProgramAt(read.value);

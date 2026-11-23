@@ -1611,6 +1611,8 @@ astTypeP = word >>= \w -> case w of
     "ref" -> TRef <$> astTypeP
     "mutref" -> TMutRef <$> astTypeP
     "fn" -> countP >>= \n -> TFn <$> replicateM n astTypeP <*> astTypeP
+    "closure" -> boxedClosureP False astTypeP
+    "closuremut" -> boxedClosureP True astTypeP
     "fnc" -> do
         n <- countP
         args <- replicateM n astTypeP

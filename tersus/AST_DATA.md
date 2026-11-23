@@ -253,6 +253,15 @@ cycle); the Tersus codec mirrors it as `Type::TFnContract` with an
 `FnContract` of token lists. No writer emits `fnc` for a plain `TFn`; its
 encoding is unchanged.
 
+`closure <signature>` and `closuremut <signature>` are distinct boxed-closure
+type tags. The immediate signature must start with `fn` or `fnc`. Its argument
+and result types can contain boxed types in turn, including inside named type
+arguments. AST and interface codecs preserve both tags and all nested contract
+tokens. Their internal instance keys use the full canonical wire spelling, so
+contracts that print the same way and ordinary nominal `Closure` types cannot
+collide with boxed owners. The source grammar and elaborator do not produce
+boxed closures yet.
+
 For source function types, the parser emits one token list per relational
 `affirm` (splitting a conjunction as it does for function declarations). Each
 list is one prefix proof term expressed in the existing `w` and `q` tokens:

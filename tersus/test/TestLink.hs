@@ -227,6 +227,9 @@ testLinkNative = TestList "testLinkNative"
     ([TestCase label $ checkLinked expected <$> nativeMerge units | (label, units, expected) <- linkCases]
     ++ [ TestCase "production Link validates only used compiler-library bounded templates" libraryBoundedRetention
        , testCase "pinned Link preserves nested contract types and their exact clause tokens" contractTypesThroughLink
+       , testCase "pinned Link preserves boxed closures, nested signatures and opaque clauses" (contractTypesThroughLinkWith boxedCallback)
+       , TestCase "pinned Mono refuses boxed closure types before specialization" boxedMonoRefusal
+       , testCase "pinned Link prune refuses boxed closure signature dependencies" boxedPruneRefusal
        , TestCase "actual prepared compiler/helper/generic inputs" realInputChecks
        , TestCase "native pruning preserves the entry and reachable program structure on actual owned MIR" $ do
             seed <- cachedSeed
@@ -374,7 +377,13 @@ copiesForUnits units program =
     library = Set.fromList [name | (ModuleId "tersuslib" _, unit) <- units, name <- Map.keys (M.progBounded unit)]
 
 contractTypesThroughLink :: TestResult
-contractTypesThroughLink = inspect (ProductionLink.linkPrograms [(unitA, library), (unitB, root)]) $ \linkedProgram ->
+contractTypesThroughLink = contractTypesThroughLinkWith id
+
+boxedCallback :: Type -> Type
+boxedCallback signature = TNamed "Box" [ArgType (TBoxedClosure False (TFn [TBoxedClosure True signature] TInt))]
+
+contractTypesThroughLinkWith :: (Type -> Type) -> TestResult
+contractTypesThroughLinkWith wrap = inspect (ProductionLink.linkPrograms [(unitA, library), (unitB, root)]) $ \linkedProgram ->
     firstFailure
         [ testAssertEq (Map.lookup "Callback" (M.progTypes linkedProgram)) (Just declaration)
         , testAssertEq (M.fnReturns =<< Map.lookup "callback" (M.progFunctions linkedProgram)) (Just callbackType)
@@ -382,7 +391,7 @@ contractTypesThroughLink = inspect (ProductionLink.linkPrograms [(unitA, library
         ]
   where
     contract = FnContract ["x"] [FnClause [FnWord "list", FnWord "0007", FnName "x"]] [FnClause [FnWord "box"]]
-    callbackType = TFnContract [TInt] (TFnContract [TInt] TInt contract) contract
+    callbackType = wrap (TFnContract [TInt] (TFnContract [TInt] TInt contract) contract)
     declaration = M.StructDecl [("callback", callbackType)]
     f = (function "callback" 0)
         { M.fnReturns = Just callbackType
@@ -390,6 +399,41 @@ contractTypesThroughLink = inspect (ProductionLink.linkPrograms [(unitA, library
         }
     library = empty{M.progFunctions = Map.singleton "callback" f, M.progTypes = Map.singleton "Callback" declaration}
     root = empty{M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl callbackType Nothing)}}
+
+boxedPruneRefusal :: TestResult
+boxedPruneRefusal = testAssertErrorContains "cannot prune MIR3 with boxed closure types" (ProductionLink.pruneProgram program)
+  where
+    child = TNamed "Child" [ArgType TInt]
+    ty = boxedCallback (TFn [] child)
+    program = empty
+        { M.progTypes = Map.singleton "Child<Int>" (M.StructDecl [("value", TInt)])
+        , M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl ty Nothing)}
+        }
+
+boxedMonoRefusal :: IO TestResult
+boxedMonoRefusal = do
+    seed <- cachedSeed
+    case (seed, MirData.writeLowered (asUnit opaque), MirData.writeLowered (asUnit boxed)) of
+        (Ok emitter, Ok old, Ok new) -> do
+            (_, oldOut, oldErrors) <- Native.runWithInputFull emitter ("pass mono\n" ++ old)
+            (_, out, newErrors) <- Native.runWithInputFull emitter ("pass mono\n" ++ new)
+            (_, combined, combinedErrors) <- Native.runWithInputFull emitter ("pass mono-ownership\n" ++ new)
+            pure (firstFailure
+                [ testAssertEq oldErrors ""
+                , testAssertEq (mapResult M.lowProgram (readLowered oldOut)) (Ok opaque)
+                , testAssertEq out "1\n"
+                , testAssertEq combined "1\n"
+                , testAssertEq newErrors "boxed closure types are not supported by the runtime MIR ABI\n"
+                , testAssertEq combinedErrors newErrors
+                ])
+        (Error e, _, _) -> pure (Just e)
+        (_, Error e, _) -> pure (Just e)
+        (_, _, Error e) -> pure (Just e)
+  where
+    contract = FnContract [] [FnClause [FnWord "closure", FnWord "closuremut", FnWord "0007"]] []
+    wrap ty = empty{M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl ty Nothing)}}
+    opaque = wrap (TFnContract [] TInt contract)
+    boxed = wrap (TFnContract [] (boxedCallback (TFn [] TInt)) contract)
 
 libraryBoundedRetention :: IO TestResult
 libraryBoundedRetention = do

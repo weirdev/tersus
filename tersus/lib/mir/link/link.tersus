@@ -1,4 +1,4 @@
-import data::codec::codec { Token };
+import data::codec::codec { Token, boxedClosureInRows };
 import mir::full::full { FullProgram, fullAt, printFull };
 import mir::full::tokens { integerAt, textAt, wordIs, quotedAt };
 import mir::full::read { recordAt };
@@ -39,7 +39,10 @@ fn runLink(lines: &List<List<Token>>) -> Bool ~ {
     if size(command) != 1 { return linkError("the linking request has no operation"); };
     p = fullAt(takeRows(lines, 2, size(lines))); if !p.ok { return linkError("the linking request contains unreadable MIR3"); };
     program = p.value;
-    if wordIs(&command, 0, "prune") { program = pruneProgram(program); } else {
+    if wordIs(&command, 0, "prune") {
+        if boxedClosureInRows(lines) { return linkError("cannot prune MIR3 with boxed closure types"); };
+        program = pruneProgram(program);
+    } else {
         if wordIs(&command, 0, "environments") { program = completeSpecEnvs(program); } else { return linkError("the linking request has no operation"); };
     };
     printFull(&program); return true;
