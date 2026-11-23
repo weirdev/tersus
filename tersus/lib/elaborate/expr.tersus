@@ -767,12 +767,12 @@ fn inferCallDispatch(st: St, funct: Int, args: &List<Int>) -> St ~ {
         if size(fname.bytes) > 1 && get(fname.bytes, 0) = toByte(46) && size(args) > 0 {
             return methodCall(st, funct, fname.slice(1, size(fname.bytes)), args);
         };
-        if HashMap::contains(&st.ghostNames, &fname) && !inScope(st, &fname) && !HashMap::contains(&st.fns, &fname) {
+        if HashMap::contains(&st.ghostNames, &fname) && !inScope(st, &fname) && !HashMap::contains(&st.fns, &fname) && !HashMap::contains(&st.templates, &fname) {
             index = HashMap::lookup(&st.ghostNames, &fname, 0 - 1);
             key = builtinKindAt(st, index);
             if !isAddressKey(&key) { return ghostExpr(st, fname, index, key, funct, args); };
         };
-        if HashMap::contains(&st.pointer, &fname) && !inScope(st, &fname) && !HashMap::contains(&st.fns, &fname) {
+        if HashMap::contains(&st.pointer, &fname) && !inScope(st, &fname) && !HashMap::contains(&st.fns, &fname) && !HashMap::contains(&st.templates, &fname) {
             return pointerCall(st, fname, HashMap::lookup(&st.pointer, &fname, 0 - 1), args);
         };
         if size(fname.bytes) > 0 && get(fname.bytes, 0) = toByte(60) {

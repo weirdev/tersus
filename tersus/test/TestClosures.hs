@@ -96,6 +96,8 @@ testClosures =
                 , testCase "a ~ closure with contracts" (runs "n = 1; f = fn(x: Int) -> Int [{ affirm n > 0; }] [{ }] ~ => x + n; return f(2);" 3)
                 , testCase "the clone of a ~ closure ends" (valid "fn go() -> Int [{ }] [{ }] { n = 1; f = fn() -> Int ~ => n; g = f.clone(); return 0; }; return go();")
                 , testCase "a ~ impl through a bound makes the copy ~" (rejected "trait Step { fn step(self: &Self) -> Int [{ }] [{ }]; }; struct Spin { n: Int }; impl Step for Spin { fn step(self: &Self) -> Int [{ }] [{ }] ~ { return self.step(); }; }; fn go<S: Step>(s: &S) -> Int [{ }] [{ }] { return s.step(); }; fn f() -> Int [{ }] [{ }] { s = Spin { n: 0 }; return go(&s); }; return 0;" "it may diverge, and f may not")
+                , testCase "a closure given to a function with bounds named like a permission builtin" (runs "fn start<F: FnOnce() -> Int>(f: F) -> Int { return f(); }; return start(fn() -> Int => 3);" 3)
+                , testCase "a closure forwarded by a function with bounds named like a permission builtin" (valid "fn once<U, F: FnOnce() -> U>(f: F) -> U { return f(); }; fn count<V, F: FnOnce() -> V>(f: F) -> V { return once(f); }; n = 2; return count(fn() -> Int => n);")
                 , testCase "a closure over a type parameter of the enclosing function" (runs "fn countOf<T>(xs: &List<T>, n: Int) -> Int { f = fn() -> Int => size(xs) + n; return f(); }; return countOf(push(push([], 1), 2), 10);" 12)
                 , TestCase "many functions with lets and fn parameters" $ do
                     let defs = concat [ "fn f" ++ show i ++ "(fn: &List<Int>) -> Int { let a = size(fn); let b = a + " ++ show i ++ "; return b; }; " | i <- [1 .. 40 :: Integer] ]
