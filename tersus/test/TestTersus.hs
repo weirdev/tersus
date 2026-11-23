@@ -47,6 +47,7 @@ import TestBytes
 import TestConnectives
 import TestMirData
 import TestLink
+import TestMirPacks (testMirPacks)
 import TestMirOwnership
 import TestMirMono
 import TestMirMonoOwnership
@@ -218,6 +219,7 @@ originalGroups =
     , testMirData
     , testLink
     , testLinkNative
+    , testMirPacks
     , testMirLowered
     , testMirOwnership
     , testMirMono
