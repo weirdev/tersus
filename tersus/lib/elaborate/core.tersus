@@ -82,8 +82,8 @@ fn ensureInstance(st: St, t: Int) -> St ~ {
     x = tyAt(st, t);
     if x.kind != 4 { return st; };
     name = rawInstanceName(st, t);
-    if HashMap::contains(&st.ctors, &name) || size(x.args) = 0 { return st; };
     tuple = isTuple(&x.name);
+    if HashMap::contains(&st.ctors, &name) || (size(x.args) = 0 && !tuple) { return st; };
     st = genericOf(st, &x.name);
     if !st.ok { return st; };
     g = clone(st.gen);
