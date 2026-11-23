@@ -1696,22 +1696,25 @@ fn typeInner(sourceText: &Input, st: St, allowContract: Bool) -> Res<Type> ~ {
         s2 = St { pos: s2.pos + 1, ..s2 };
         s2 = skipWs(sourceText, s2);
         parts = [];
-        loop = true;
+        // (a trailing comma makes one part a tuple: plain parentheses only group)
+        trailing = false;
+        loop = byteAt(sourceText, s2, s2.pos) != 41;
         while loop ~ {
             part = tuplePartType(sourceText, s2); Res { st: resultPartspartState, v: resultPartspartValue, ok: resultPartspartOk } = part;
             if !resultPartspartOk { return Res<Type> { st: resultPartspartState, v: resultPartspartValue, ok: resultPartspartOk }; };
             s2 = resultPartspartState;
             parts = push(parts, resultPartspartValue);
             s2 = skipWs(sourceText, s2);
-            if byteAt(sourceText, s2, s2.pos) = 44 { s2 = St { pos: s2.pos + 1, ..s2 }; s2 = skipWs(sourceText, s2); } else { loop = false; };
+            trailing = false;
+            if byteAt(sourceText, s2, s2.pos) = 44 {
+                s2 = St { pos: s2.pos + 1, ..s2 }; s2 = skipWs(sourceText, s2); trailing = true;
+                if byteAt(sourceText, s2, s2.pos) = 41 { loop = false; };
+            } else { loop = false; };
         };
         if byteAt(sourceText, s2, s2.pos) != 41 { return fail( s2, Type::TInt, "expected )"); };
         s2 = St { pos: s2.pos + 1, ..s2 };
-        if size(parts) = 1 {
-            part = typeAtOr(&parts, 0);
-            if part is Type::TFnContract { return ok(s2, part); };
-        };
-        if size(parts) < 2 { return fail( s2, Type::TInt, "a tuple type has two parts or more"); };
+        if size(parts) = 1 && !trailing { return ok(s2, typeAtOr(&parts, 0)); };
+        if size(parts) > 32 { return fail( s2, Type::TInt, "a tuple type has at most 32 parts"); };
         args = [];
         for p in parts { args = push(args, ArgV { isSize: false, size: Size::SAny, ty: clone(p) }); };
         return ok( s2, namedTypeOf(catStrings("Tuple", String::fromInt(size(parts))), args));
@@ -2605,19 +2608,25 @@ fn parensExpr(sourceText: &Input, st: St) -> Res<Int> ~ {
     s = St { pos: s.pos + 1, ..s };
     s = skipWs(sourceText, s);
     parts = [];
-    loop = true;
+    trailing = false;
+    loop = byteAt(sourceText, s, s.pos) != 41;
     while loop ~ {
         e = expression(sourceText, s); Res { st: resultPartseState, v: resultPartseValue, ok: resultPartseOk } = e;
         if !resultPartseOk { return Res<Int> { st: resultPartseState, v: resultPartseValue, ok: resultPartseOk }; };
         s = resultPartseState;
         parts = push(parts, resultPartseValue);
         s = skipWs(sourceText, s);
-        if byteAt(sourceText, s, s.pos) = 44 { s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); } else { loop = false; };
+        trailing = false;
+        if byteAt(sourceText, s, s.pos) = 44 {
+            s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); trailing = true;
+            if byteAt(sourceText, s, s.pos) = 41 { loop = false; };
+        } else { loop = false; };
     };
     if byteAt(sourceText, s, s.pos) != 41 { return fail( s, 0, "expected )"); };
     s = St { pos: s.pos + 1, ..s };
     s = skipWs(sourceText, s);
-    if size(parts) = 1 { return ok( s, get(parts, 0)); };
+    if size(parts) = 1 { if !trailing { return ok( s, get(parts, 0)); }; };
+    if size(parts) > 32 { return fail( s, 0, "a tuple has at most 32 parts"); };
     fields = [];
     i = 0;
     while i < size(parts) ~ { fields = push(fields, String::fromInt(i)); i = i + 1; };
@@ -6082,6 +6091,7 @@ fn tryTupleAssign(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     s = St { pos: s.pos + 1, ..s };
     s = skipWs(sourceText, s);
     names = [];
+    trailing = false;
     loop = true;
     while loop ~ {
         v = parseVariable(sourceText, s); Res { st: resultPartsvState, v: resultPartsvValue, ok: resultPartsvOk } = v;
@@ -6089,7 +6099,11 @@ fn tryTupleAssign(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
         s = resultPartsvState;
         names = push(names, resultPartsvValue);
         s = skipWs(sourceText, s);
-        if byteAt(sourceText, s, s.pos) = 44 { s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); } else { loop = false; };
+        trailing = false;
+        if byteAt(sourceText, s, s.pos) = 44 {
+            s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); trailing = true;
+            if byteAt(sourceText, s, s.pos) = 41 { loop = false; };
+        } else { loop = false; };
     };
     if byteAt(sourceText, s, s.pos) != 41 { return Res<List<Int>> { st: restore(s, save), v: [], ok: false }; };
     s = St { pos: s.pos + 1, ..s };
@@ -6097,7 +6111,8 @@ fn tryTupleAssign(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     if byteAt(sourceText, s, s.pos) != 61 || byteAt(sourceText, s, s.pos + 1) = 61 { return Res<List<Int>> { st: restore(s, save), v: [], ok: false }; };
     s = St { pos: s.pos + 1, ..s };
     s = skipWs(sourceText, s);
-    if size(names) < 2 { return fail( s, [], "a tuple is taken apart into two names or more"); };
+    if size(names) = 1 { if !trailing { return fail( s, [], "a tuple of one part is taken apart as (x,) = ...; (x) = ... is x = ..."); }; };
+    if size(names) > 32 { return fail( s, [], "a tuple has at most 32 parts"); };
     if hasDupStrings(names) { return fail( s, [], "a tuple is taken apart into a name twice"); };
     e = expression(sourceText, s); Res { st: resultPartseState, v: resultPartseValue, ok: resultPartseOk } = e;
     if !resultPartseOk { return Res<List<Int>> { st: resultPartseState, v: [], ok: false }; };
@@ -6325,19 +6340,19 @@ fn isBuiltinTypeName(name: &String) -> Bool ~ {
 };
 
 fn isTupleBase(name: &String) -> Bool ~ {
-    // TupleN for 2 <= N <= 16, no leading zero
+    // TupleN for 0 <= N <= 32, no leading zero
     if size(name.bytes) <= 5 { return false; };
     if strSlice(name, 0, 5) != "Tuple" { return false; };
     digits = strSlice(name, 5, size(name.bytes));
     if size(digits.bytes) = 0 { return false; };
-    if get(&digits.bytes, 0) = toByte(48) { return false; };
+    if size(digits.bytes) > 1 { if get(&digits.bytes, 0) = toByte(48) { return false; }; };
     n = 0;
     for i in 0..size(digits.bytes) {
         c = toInt(get(&digits.bytes, i));
         if c < 48 || c > 57 { return false; };
         n = n * 10 + c - 48;
     };
-    return n >= 2 && n <= 16;
+    return n >= 0 && n <= 32;
 };
 
 fn fieldsNodes(st: St, names: &List<String>, tys: &List<Type>) -> Res<Int> ~ {

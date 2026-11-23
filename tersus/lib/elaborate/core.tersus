@@ -2,23 +2,24 @@ import data::codec::codec { catStrings };
 import elaborate::builtins { substitute };
 import elaborate::state { CtorInfo, Generic, St, TE, Ty, addTy, expect, fail, freshSize, freshVar, indexIn, instanceName, intText, isSize, isTypeName, joinWith, kindOf, namedTy, nth, protocolName, rawInstanceName, render, resolve, tyAt, typeError, typesChanged, unify, withTy, zonk };
 
-// Types.tupleGeneric: TupleN for N from 2 to 16 is a struct with parameters T0..T(N-1) and fields 0..N-1
+// Types.tupleGeneric: TupleN for N from 0 to 32 is a struct with parameters T0..T(N-1) and fields 0..N-1; -1 for any other name
 fn tupleArity(base: &String) -> Int ~ {
     n = size(base.bytes);
-    if n < 6 || !base.startsWith("Tuple") { return 0; };
+    if n < 6 || !base.startsWith("Tuple") { return 0 - 1; };
     digits = base.slice(5, n);
-    if size(digits.bytes) = 0 || get(digits.bytes, 0) = toByte(48) { return 0; };
+    if size(digits.bytes) = 0 { return 0 - 1; };
+    if size(digits.bytes) > 1 { if get(digits.bytes, 0) = toByte(48) { return 0 - 1; }; };
     value = 0;
     for b in &digits.bytes {
         c = toInt(b);
-        if c < 48 || c > 57 || value > 100 { return 0; };
+        if c < 48 || c > 57 || value > 100 { return 0 - 1; };
         value = value * 10 + (c - 48);
     };
-    if value < 2 || value > 16 { return 0; };
+    if value > 32 { return 0 - 1; };
     return value;
 };
 
-fn isTuple(base: &String) -> Bool ~ { return tupleArity(base) > 0; };
+fn isTuple(base: &String) -> Bool ~ { return tupleArity(base) >= 0; };
 
 // The declaration of a struct with parameters, the program's or a tuple's, in st.gen (st.ok false when there is none)
 fn genericOf(st: St, base: &String) -> St ~ {
@@ -27,7 +28,7 @@ fn genericOf(st: St, base: &String) -> St ~ {
         return St { gen: g, ok: true, ..st };
     };
     n = tupleArity(base);
-    if n <= 0 { return St { ok: false, ..st }; };
+    if n < 0 { return St { ok: false, ..st }; };
     params = [];
     names = [];
     types = [];

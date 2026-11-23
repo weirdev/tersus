@@ -87,7 +87,7 @@ fn monoTuple(base: &String) -> FullRecord [{ }] [{ }] ~ {
     bad = FullRecord { name: "", tokens: [] };
     if size(base.bytes) < 6 || base.slice(0, 5) != "Tuple" { return bad; };
     n = parseInt(base.slice(5, size(base.bytes)));
-    if !n.ok || n.value < 2 || n.value > 16 || String::fromInt(n.value) != base.slice(5, size(base.bytes)) { return bad; };
+    if !n.ok || n.value < 0 || n.value > 32 || String::fromInt(n.value) != base.slice(5, size(base.bytes)) { return bad; };
     out = push(push([], full::tokens::word("generic")), full::tokens::name(clone(base)));
     out = push(out, full::tokens::word(String::fromInt(n.value)));
     for i in 0..n.value { out = push(out, full::tokens::name("T".concat(String::fromInt(i)))); };
