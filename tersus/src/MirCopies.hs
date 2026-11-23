@@ -84,7 +84,7 @@ makeCopiesWith library program
     | Map.null (progBounded program) && Map.null (progInstances program) = Ok program
     | otherwise = case run of
         Left e -> Error e
-        Right (rootsDone, mainDone, made, used) -> Ok (divergingCopies (finish program named used intrinsicStubs rootsDone mainDone made))
+        Right (rootsDone, mainDone, made, used) -> Ok (divergingCopies (finish program named used (dispatchOf rootsDone mainDone made) (map fst rootsDone) (fst mainDone) (map copyOf made)))
   where
     generics = progBounded program
     lifted = Set.fromList (concatMap boundedLifted (Map.elems generics))
@@ -96,14 +96,11 @@ makeCopiesWith library program
     -- references are. The library's justification of the builtins a copy runs for a Box of an array of a size is one where a
     -- copy has such a Box.)
     always = Set.fromList [f | f <- Map.keys generics, not (isStubName f), Set.notMember f library]
-    -- A sized Box's Sequence calls can inline, leaving no named impl in the linked effect graph.
-    intrinsicStubs = Map.fromList
-        [ (stubName trait method, helper)
-        | (callee, marker) <- Map.toList (progInstances program), marker == (libraryBuiltin, [])
-        , Just (_, trait, method) <- [boundCallParts callee]
-        , Just helper <- [lookup method sizedBoxedJustification]
-        , Set.member helper library ]
-    sizedBoxedUsed made = Set.fromList [f | any (any (sizedBoxed . localType) . Map.elems . fnLocals) [copy | (_, copy, _) <- made], (_, f) <- sizedBoxedJustification, Map.member f generics]
+    -- A sized Box's Sequence calls can inline, so retain the bodies that justify the primitives.
+    sizedBoxedUsed made = Set.fromList [f | any sizedBoxedCopy made, f <- sizedBoxedJustification, Map.member f generics]
+    sizedBoxedCopy (_, (copy, _), _) = any (sizedBoxed . localType) (Map.elems (fnLocals copy))
+    dispatchOf rootsDone mainDone made = Map.unionsWith Set.union (map snd (mainDone : rootsDone ++ concat [copy : liftedCopies | (_, copy, liftedCopies) <- made]))
+    copyOf (name, copy, liftedCopies) = (name, fst copy, map fst liftedCopies)
     sizedBoxed t = case t of
         TBox (TArrayOf _ size) -> size /= SizeAny
         TRef inner -> sizedBoxed inner
@@ -144,15 +141,18 @@ data Cx = Cx
 -- A queued copy and the copies around it (its chain, for the growth refusal)
 type Need = (Key, [(Name, Int)])
 
-transformAll :: Cx -> [Function] -> Either String ([Function], [Need])
+type DispatchEdges = Map Name (Set.Set Name)
+type Transformed = (Function, DispatchEdges)
+
+transformAll :: Cx -> [Function] -> Either String ([Transformed], [Need])
 transformAll cx fns = do
     results <- mapM (transformFunction cx) fns
     Right (map fst results, concatMap snd results)
 
 -- The copies made, in the order they were made: each with the function with bounds it is a copy of, and its lifted copies
-type Made = (Name, Function, [Function])
+type Made f = (Name, f, [f])
 
-build :: Program -> Map Key Name -> [Need] -> Map Key Name -> [Made] -> Either String [Made]
+build :: Program -> Map Key Name -> [Need] -> Map Key Name -> [Made Transformed] -> Either String [Made Transformed]
 build _ _ [] _ made = Right made
 build program named ((key@(f, tys, sizes), chain) : rest) done made
     | Map.member key done = build program named rest done made
@@ -185,8 +185,8 @@ build program named ((key@(f, tys, sizes), chain) : rest) done made
                 cx = Cx program' named typeArgs (zip (boundedSizes bounded) sizes) liftedNames name (chain ++ [(f, bigness)]) Map.empty Map.empty blockTypes localTypes
             (copy, needs) <- transformFunction cx body
             liftedCopies <- mapM (\l -> maybe (Left ("internal compiler error: " ++ f ++ " lifts " ++ l ++ ", which the program does not have")) (transformFunction cx) (Map.lookup l (progFunctions program))) (boundedLifted bounded)
-            frameRefusal program f name body copy
-            mapM_ (\(g, c) -> frameRefusal program f name g c) (zip [g | l <- boundedLifted bounded, Just g <- [Map.lookup l (progFunctions program)]] (map fst liftedCopies))
+            frameRefusal program f name body (fst copy)
+            mapM_ (\(g, c) -> frameRefusal program f name g c) (zip [g | l <- boundedLifted bounded, Just g <- [Map.lookup l (progFunctions program)]] (map (fst . fst) liftedCopies))
             -- (the check of an impl function against its trait is made with each copy of it, as the trait's contract is
             -- met by each copy)
             let companion = [((c, tys, sizes), chain ++ [(f, bigness)]) | Just c <- [companionOf f], Map.member c (progBounded program)]
@@ -280,7 +280,7 @@ typeWords program ty = case ty of
         Nothing -> 1
 
 -- The state of the copying of one function: the copies it needs and the locals it adds
-data CS = CS {csNeeds :: [Need], csNext :: Int, csLocals :: [(Local, LocalDecl)], csNextBlock :: Int}
+data CS = CS {csNeeds :: [Need], csNext :: Int, csLocals :: [(Local, LocalDecl)], csNextBlock :: Int, csDispatch :: DispatchEdges}
 
 newtype C a = C {runC :: CS -> Either String (a, CS)}
 
@@ -318,7 +318,7 @@ data Target = Named Name [Operand] | Inline Inline
 -- builtin
 data Inline = InlineCopy | InlineEq | InlineBuiltin BuiltinFunct ListOp
 
-transformFunction :: Cx -> Function -> Either String (Function, [Need])
+transformFunction :: Cx -> Function -> Either String (Transformed, [Need])
 transformFunction cx0 fn = do
     -- (a function lifted out of the body has the copy's types and bounded sizes, but not those its own parameters hide)
     let lifted = Map.member (fnName fn) (cxLifted cx0)
@@ -331,7 +331,7 @@ transformFunction cx0 fn = do
         locals = Map.mapWithKey (\l d -> d{localType = localType' l d}) (fnLocals fn)
         sizeLocals = drop (length (fnParams fn) - length (fnSizeParams fn)) (fnParams fn)
         constants = Map.fromList [(l, c) | (l, n) <- zip sizeLocals (fnSizeParams fn), Just c <- [lookup n (cxSizes cx)]]
-        start = CS [] (1 + maximum (0 : [i | Local i <- Map.keys locals])) [] (1 + maximum (0 : [i | BlockId i <- Map.keys (fnBlocks fn)]))
+        start = CS [] (1 + maximum (0 : [i | Local i <- Map.keys locals])) [] (1 + maximum (0 : [i | BlockId i <- Map.keys (fnBlocks fn)])) Map.empty
         fn0 = fn{fnLocals = locals, fnReturns = fmap types (fnReturns fn)}
     (fn', st) <- runC (transformBody cx constants fn0) start
     let name = if null (cxCopy cx) then fnName fn else Map.findWithDefault (cxCopy cx) (fnName fn) (cxLifted cx)
@@ -348,12 +348,13 @@ transformFunction cx0 fn = do
         opaque = if null (cxCopy cx) then [] else [l | (l, d) <- Map.toList (fnLocals fn), filled (localType d)]
         spec'' = (fnSpec fn'){specEnv = Map.union (Map.fromList [(opaqueKey l, Copy l) | l <- opaque]) (specEnv (fnSpec fn'))}
     Right
-        ( fn'
-            { fnName = name
-            , fnSpec = spec''
-            , fnTypeParams = if null (cxCopy cx) then fnTypeParams fn else [p | p <- fnTypeParams fn, p `notElem` map fst (cxTypes cx)]
-            , fnLocals = Map.union (fnLocals fn') (Map.fromList (csLocals st))
-            }
+        ( ( fn'
+                { fnName = name
+                , fnSpec = spec''
+                , fnTypeParams = if null (cxCopy cx) then fnTypeParams fn else [p | p <- fnTypeParams fn, p `notElem` map fst (cxTypes cx)]
+                , fnLocals = Map.union (fnLocals fn') (Map.fromList (csLocals st))
+                }
+            , csDispatch st )
         , reverse (csNeeds st)
         )
 
@@ -429,7 +430,12 @@ target :: Cx -> Map Local Integer -> Function -> Name -> [Operand] -> Maybe Loca
 target cx constants fn name args dest
     | Just l <- Map.lookup name (cxLifted cx) = return (Named l [])
     | Just (p, trait, function) <- boundCallParts name = case lookup p (cxTypes cx) of
-        Just t -> resolveBound cx constants fn (Map.lookup name (progInstances (cxProgram cx)) == Just (libraryBuiltin, [])) trait function t args dest
+        Just t -> do
+            resolved <- resolveBound cx constants fn (Map.lookup name (progInstances (cxProgram cx)) == Just (libraryBuiltin, [])) trait function t args dest
+            case resolved of
+                Named callee _ -> C (\s -> Right ((), s{csDispatch = Map.insertWith Set.union (stubName trait function) (Set.singleton callee) (csDispatch s)}))
+                Inline _ -> pure ()
+            pure resolved
         Nothing -> failC ("internal compiler error: " ++ name ++ " is a call through a bound of " ++ p ++ ", which " ++ shown ++ " has no type for")
     | Just (f, args0) <- Map.lookup name (progInstances (cxProgram cx)) = case concreteKey (cxProgram cx) f (map (argIn cx) args0) of
         Just key -> (\n -> Named n []) <$> copyNamed cx key
@@ -993,8 +999,8 @@ divergingCopies program = program{progFunctions = Map.map mark functions}
         | isCopyName (fnName f) && not (diverges f) && fnName f `Set.member` diverging = f{fnSpec = (fnSpec f){specTermination = Just MayDiverge}}
         | otherwise = f
 
-finish :: Program -> Map Key Name -> Set.Set Name -> Map Name Name -> [Function] -> Function -> [Made] -> Program
-finish program named used intrinsicStubs roots main' made =
+finish :: Program -> Map Key Name -> Set.Set Name -> DispatchEdges -> [Function] -> Function -> [Made Function] -> Program
+finish program named used dispatch roots main' made =
     completeInstances
         program
             { progTypes = Map.filterWithKey (\name _ -> not (derived name)) (progTypes program)
@@ -1079,17 +1085,19 @@ finish program named used intrinsicStubs roots main' made =
         | otherwise = n
     -- (a generic body's proofs name the functions there are, as a copy's do: a name an environment gives a copy or a bound
     -- is the function it stands for, and the environment keeps the functions there are, the stubs and generic bodies included)
-    completeGeneric fn = markIntrinsic (mapEnvs (\e -> Map.union (Map.filterWithKey (\k o -> not (instanceKey k) && case o of Const (CFn n) -> n `Set.member` names; _ -> True) e) copyEnv) (proofsNamed instanceKey fn))
-    markIntrinsic fn
-        | Just helper <- Map.lookup (fnName fn) intrinsicStubs, Set.member helper kept =
-            fn{fnSpec = (fnSpec fn){specEnv = Map.insert intrinsicDispatchKey (Const (CFn helper)) (specEnv (fnSpec fn))}}
+    completeGeneric fn = markDispatch (mapEnvs (\e -> Map.union (Map.filterWithKey (\k o -> not (instanceKey k) && case o of Const (CFn n) -> n `Set.member` names; _ -> True) e) copyEnv) (proofsNamed instanceKey fn))
+    markDispatch fn
+        | isStubName (fnName fn) =
+            fn{fnSpec = (fnSpec fn){specEnv = Map.union witnesses (specEnv (fnSpec fn))}}
         | otherwise = fn
+      where
+        witnesses = closedDispatch (Map.findWithDefault Set.empty (fnName fn) dispatch)
     instanceKey k = Map.member k (progInstances program) || isJust (boundCallParts k)
 
 -- The prelude's functions whose bodies are the builtins a copy runs for the library's Sequence on a Box of an array of a
 -- size (resolveBound), with Sequence's contracts
-sizedBoxedJustification :: [(Name, Name)]
-sizedBoxedJustification = [("size", "sizedBoxedSize"), ("get", "sizedBoxedGet"), ("set", "sizedBoxedSet")]
+sizedBoxedJustification :: [Name]
+sizedBoxedJustification = ["sizedBoxedSize", "sizedBoxedGet", "sizedBoxedSet"]
 
 -- The marks of a function the validator checks generically and of a copy it does not check (no name a program writes has `$`)
 genericKey, coveredKey :: Name

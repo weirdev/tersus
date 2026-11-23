@@ -579,6 +579,8 @@ testCallsUseContracts =
               parseValidProgramHelper chainOfFunctions
             , pipelineValid (ordinaryTraitCallback "")
             , pipelineRejected (ordinaryTraitCallback "affirm a = b; ") "Could not prove: a = b"
+            , pipelineValid (linkedTraitEffects "")
+            , pipelineRejected (linkedTraitEffects "return through(Reader { n: 0 });") "Could not prove: a = b"
             , pipelineRejected joinedCallbackCycle "potential recursion through a function value"
             , parseValidateFailProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; g = id; x = g(3); affirm x = 3;" "Could not prove: x = 3"
             ]
@@ -649,6 +651,17 @@ ordinaryTraitCallback affirmation =
         ++ "impl Next for Reader { fn next(self: &Self) -> Int { f = self.callback; return f(); }; }; "
         ++ "fn twice<T: Next>(r: &T) -> Int { a = Next::next(r); b = Next::next(r); " ++ affirmation ++ "return a; }; "
         ++ "fn read() -> Int { return readByte(); }; r = Reader { callback: read }; return twice(&r);"
+
+linkedTraitEffects :: String -> String
+linkedTraitEffects impureCall =
+    "trait Next { fn next(self: &Self) -> Int; }; "
+        ++ "struct Fixed { n: Int }; struct Reader { n: Int }; "
+        ++ "impl Next for Fixed { fn next(self: &Self) -> Int { return self.n; }; }; "
+        ++ "fn read() -> Int { return readByte(); }; "
+        ++ "impl Next for Reader { fn next(self: &Self) -> Int { return read(); }; }; "
+        ++ "fn twice<T: Next>(r: &T) -> Int { a = Next::next(r); b = Next::next(r); affirm a = b; return a; }; "
+        ++ "fn through<T: Next>(r: &T) -> Int { return twice(r); }; "
+        ++ "n = through(Fixed { n: 1 }); " ++ impureCall ++ " return 0;"
 
 joinedCallbackCycle :: String
 joinedCallbackCycle =
