@@ -150,7 +150,7 @@ exampleExpectations =
     , ("examples/functions.tersus", ((ExpectReturn (VInt 21))))
     , ("examples/closures.tersus", ((ExpectReturn (VInt 21130122))))
     , ("examples/higher_order.tersus", ((ExpectReturn (VInt 187971457))))
-    , ("examples/threads.tersus", ((ExpectReturn (VInt 499500))))
+    , ("examples/threads.tersus", ((ExpectReturn (VInt 499510))))
     , ("examples/booleans.tersus", ((ExpectReturn (VBool True))))
     , ("examples/proofs.tersus", ExpectValid)
     , ("examples/rewrites.tersus", ExpectValid)

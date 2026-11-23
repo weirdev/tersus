@@ -166,6 +166,7 @@ library
       MirOwnershipData
       MirPacks
       MirPass
+      MirThreads
       Modules
       Native
       PackageCompile

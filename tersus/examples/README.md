@@ -23,7 +23,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `functions.tersus` | `fn` definitions, multiple arguments, and a function that calls `first`/`last` under an input contract | returns `21` |
 | `closures.tersus` | Closures: captures copied, borrowed and moved (`move fn`), an updating closure through an `FnMut` bound, types taken from the bound, a capture-only contract proved at creation, and a closure called directly | returns `21130122` |
 | `higher_order.tersus` | Higher-order library functions: `map`/`filter`/`fold`/`any`/`all`/`find`/`sortBy` over lists, the `mapArray`/`sortArrayBy`/`foldArray` array forms, and the `hashMap`/`hashSet` `ForEach`/`Fold`/`RetainIf` free functions with closures | returns `187971457` |
-| `threads.tersus` | Threads: a sum split across four threads, each part a closure started with `Thread::spawn` and joined | returns `499500` |
+| `threads.tersus` | Threads: a sum split across four threads, each part a closure started with `Thread::spawn` and joined, and a `ScopedThread` that borrows a list | returns `499510` |
 | `booleans.tersus` | `true`/`false` literals and relations such as `x < 6` producing booleans | returns `true` |
 | `proofs.tersus` | `affirm`, `define`, and the `eval`, `eqToGtZero`, and `eqToLtPlus1` rewrites | validates |
 | `rewrites.tersus` | The primitive `refl` and `evalAll` rewrites | validates |

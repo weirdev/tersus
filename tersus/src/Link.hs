@@ -10,7 +10,7 @@ import qualified Data.Set as Set
 import DataCodec (quote)
 import qualified Mir as M
 import MirCopies (makeCopiesWith)
-import MirMoves (checkSpawns)
+import MirMoves (checkSpawns, markNativeSpawns)
 import MirPass (programData, runPassWith)
 import PackageData (ModuleId (..))
 import Seed (cachedSeed)
@@ -26,8 +26,15 @@ linkPrograms units = flatResultMap unitData units `bindResult` \parts ->
         -- (a copy the call cannot have is refused as the elaborator refuses a call)
         case makeCopiesWith library (M.completeInstances program) of
             Error e -> Error ("Validation failed: " ++ e)
-            Ok copied -> checkSpawns library copied
+            Ok copied -> mapResult (markNativeSpawns threadLibrary) (checkSpawns library copied)
   where
+    threadLibrary = Set.fromList
+        [ name
+        | (ModuleId "tersuslib" (Just "thread"), program) <- units
+        , name <- Map.keys (M.progBounded program)
+        , all (Map.notMember name . M.progBounded . snd) otherUnits
+        ]
+    otherUnits = filter ((/= ModuleId "tersuslib" (Just "thread")) . fst) units
     library = Set.fromList [name | (ModuleId "tersuslib" _, program) <- units, name <- Map.keys (M.progBounded program)]
     unitData (ModuleId pkg modu, program) = programData program `bindResult` \text ->
         Ok ("unit " ++ quote pkg ++ " " ++ maybe "none" (\name -> "some " ++ quote name) modu

@@ -1,5 +1,6 @@
 // Threads: a sum split across four threads. Each part is a closure started with Thread::spawn, which shares nothing with
-// the program that starts it; a Thread is linear, so each one is joined.
+// the program that starts it; a Thread is linear, so each one is joined. A ScopedThread is lent a closure that borrows
+// a list, which is not written until the thread is joined. Native code runs them all at the same time.
 fn sumRange(lo: Int, hi: Int) -> Int [{ }] [{ }] {
     s = 0;
     i = lo;
@@ -10,8 +11,18 @@ fn sumRange(lo: Int, hi: Int) -> Int [{ }] [{ }] {
     return s;
 };
 
+fn total(xs: &List<Int>) -> Int [{ }] [{ }] {
+    s = 0;
+    for x in xs { s = s + x; };
+    return s;
+};
+
 a = Thread::spawn(fn() -> Int => sumRange(0, 250));
 b = Thread::spawn(fn() -> Int => sumRange(250, 500));
 c = Thread::spawn(fn() -> Int => sumRange(500, 750));
 d = sumRange(750, 1000);
-return a.join() + b.join() + c.join() + d;
+
+xs = [1, 2, 3, 4];
+f = fn() -> Int => total(&xs);
+h = ScopedThread::spawn(&f);
+return a.join() + b.join() + c.join() + d + h.join();

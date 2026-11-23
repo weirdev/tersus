@@ -16,7 +16,7 @@ import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
 import Control.Exception (IOException, finally, try)
 import Data.Char (isAscii)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile)
 import GHC.IO.Encoding (char8, getFileSystemEncoding, setFileSystemEncoding)
 import System.Exit (ExitCode (..))
@@ -27,6 +27,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess)
 
 import Bootstrap (llvmOfOwned, tersusLlvm)
+import LlvmRuntime (runtimeSource)
 import Cli
 import qualified Mir as M
 import MirEval (MirValue (MInt), renderMirValue, runProgram)
@@ -207,6 +208,13 @@ testNativeIr =
                         pure $ case ir of
                             Error e -> Just e
                             Ok text -> testAssertTrue ("store ptr @\"fn.inc\"" `isInfixOf` text && "call i64 %" `isInfixOf` text)
+        , TestCase "a thread is started with a function of its job and its slot, as the runtime declares it" $
+            withIr "t = Thread::spawn(fn() -> Int => 1); return t.join();" (\ir -> testAssertTrue
+                ( "declare i64 @\"tersus_thread_spawn\"(ptr, i64, i64)" `isInfixOf` ir
+                    && "declare i64 @\"tersus_thread_join\"(i64)" `isInfixOf` ir
+                    && any (\l -> "define internal i64 @\"fn.thread$spawn[" `isPrefixOf` l && "\"(i64 %p.1, i64 %p.2) {" `isSuffixOf` l) (lines ir)
+                    && "int64_t tersus_thread_spawn(int64_t (*entry)(int64_t, int64_t), int64_t job, int64_t slot) {" `isInfixOf` runtimeSource
+                    && "int64_t tersus_thread_join(int64_t handle) {" `isInfixOf` runtimeSource ))
         , TestCase "a function with a size is made for each size it is called with" $
             withIr "fn count<n>(a: Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) + count(#[1]) + count(#[4, 5, 6]);" (\ir -> testAssertTrue ("@\"fn.count<3>\"" `isInfixOf` ir && "@\"fn.count<1>\"" `isInfixOf` ir && not ("@\"fn.count\"" `isInfixOf` ir)))
         , TestCase "an array that a size makes too large for a frame is refused when the size is known" $ do

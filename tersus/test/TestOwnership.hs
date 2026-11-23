@@ -816,6 +816,13 @@ writePlaceAt depth root steps v = do
 
 -- Runs a function from its entry; what it returns is what _0 holds, moved out
 callFunction :: Program -> Function -> [Val] -> M (Maybe Val)
+callFunction program fn args
+    -- (the runtime's threads, MirThreads: the model runs the thread where it is started, and join has nothing left to wait for)
+    | fnName fn == "extern tersus_thread_spawn", [VF entry, job, slot] <- args = do
+        start <- maybe (failM ("no function " ++ entry)) return (Map.lookup entry (progFunctions program))
+        _ <- callFunction program start [job, slot]
+        return (Just (VI 1))
+    | fnName fn == "extern tersus_thread_join" = return (Just (VI 0))
 callFunction program fn args = do
     -- (a parameter that is lent only looks at the value: the function owns nothing of it, and cannot move from it)
     -- (and remembers how it was, so that a change to it while it is lent is found)
@@ -1463,6 +1470,17 @@ stateJoinTests =
             testAssertEq (runOwned owned) (Right (Just (MInt 9)))
             `orElseT` testAssertTrue (any ((== TBool) . localType) (Map.elems (fnLocals (progMain owned))))
 
+-- Programs with threads, whose spawns and joins native code makes calls of the runtime (MirThreads): the job, the slot and
+-- what crosses in them are owned and freed as any memory at an address
+threadPrograms :: [(String, String)]
+threadPrograms =
+    [ ("a list moves into a thread and out", "xs = [1, 2]; t = Thread::spawn(move fn() -> List<Int> { ys = xs; return push(ys, 3); }); zs = t.join(); return size(zs);")
+    , ("a struct of lists comes back from a thread", "struct Pair { a: List<Int>, b: List<Int> }; p = Pair { a: [1, 2], b: [3] }; t = Thread::spawn(move fn() -> Pair { q = p; return Pair { a: push(q.a, 4), b: q.b }; }); r = t.join(); return size(r.a) * 10 + size(r.b);")
+    , ("a thread starts a thread", "fn inner() -> Int { t = Thread::spawn(fn() -> Int => 5); return t.join() + 1; }; t = Thread::spawn(fn() -> Int => inner()); return t.join();")
+    , ("a scoped thread borrows a list", "xs = [1, 2, 3]; f = fn() -> Int => size(xs); h = ScopedThread::spawn(&f); return h.join() + size(xs);")
+    , ("a scoped thread's closure owns a list", "ys = [1, 2, 3]; f = move fn() -> List<Int> { out = []; i = 0; while i < 4 [{ affirm i >= 0; }] shrinks 4 - i { out = push(out, size(ys) + i); i = i + 1; }; return out; }; h = ScopedThread::spawn(&f); l = h.join(); return size(l);")
+    ]
+
 testOwnership :: Test
 testOwnership =
     TestList
@@ -1476,6 +1494,7 @@ testOwnership =
         , TestList "boxed Clone" [TestCase name (onSource name source) | (name, source, _, _) <- boxedClonePrograms]
         , TestList "reference writes" [TestCase name (onSource name source) | (name, source) <- referenceWritePrograms]
         , TestList "lent parts" [TestCase name (onSource name source) | (name, source) <- lentPartPrograms]
+        , TestList "threads" [TestCase name (onSource name source) | (name, source) <- threadPrograms]
         , TestList "without validation" [TestCase name (pure (onLowered name source)) | (name, source) <- unvalidatedPrograms]
         , TestList "the plan" planTests
         , TestList "no copy of a value with a drop" noDropCopyTests

@@ -6,6 +6,10 @@ module MirMoves
     , checkMovesExcluding
     , finishLowered
     , checkSpawns
+    , markNativeSpawns
+    , isNativeSpawn
+    , mayHoldReference
+    , mayHoldUpdate
     , isCopyType
     , stripPositions
     , Role (..)
@@ -1846,27 +1850,52 @@ finishLowered lowered =
   where
     completed = completeInstances (lowProgram lowered)
 
--- A thread shares nothing with the program that starts it (lib/thread.tersus): each copy of the thread library's spawn
--- is refused when the closure it is given, or the Thread it gives, can hold a reference
-checkSpawns :: Set Name -> Program -> Result Program String
-checkSpawns library program
-    | spawn `Set.notMember` library = Ok program
-    | otherwise = case concatMap refusals copies of
-        [] -> Ok program
-        errors -> Error (intercalate "\n" (map ("Move error: " ++) errors))
+-- Only the linker can identify the actual library unit. Keep that fact in the return local's name,
+-- which survives ghost erasure and cannot be set by source code.
+markNativeSpawns :: Set Name -> Program -> Program
+markNativeSpawns library program
+    | not (any (`Set.member` library) spawnNames) = program
+    | otherwise = program{progFunctions = Map.map mark (progFunctions program)}
   where
-    spawn = "<Thread>::spawn"
-    copies = [fn | fn <- Map.elems (progFunctions program), (spawn ++ "[") `isPrefixOf` fnName fn]
-    refusals fn =
-        [ "Thread::spawn is given " ++ describe ty ++ ": a thread cannot hold a reference (capture by value with move fn)"
+    mark fn
+        | any (\name -> name `Set.member` library && (name ++ "[") `isPrefixOf` fnName fn) spawnNames =
+            fn{fnLocals = Map.adjust (\decl -> decl{localName = Just nativeSpawnMarker}) (Local 0) (fnLocals fn)}
+        | otherwise = fn
+
+isNativeSpawn :: Function -> Bool
+isNativeSpawn fn = (Map.lookup (Local 0) (fnLocals fn) >>= localName) == Just nativeSpawnMarker
+
+nativeSpawnMarker :: Variable
+nativeSpawnMarker = "$native thread spawn"
+
+spawnNames :: [Name]
+spawnNames = ["<Thread>::spawn", "<ScopedThread>::spawn"]
+
+-- A thread shares nothing that another thread writes (lib/thread.tersus): each copy of the thread library's Thread::spawn
+-- is refused when the closure it is given, or the Thread it gives, can hold a reference, and each copy of
+-- ScopedThread::spawn when the value it gives can hold a reference or the closure it is lent can hold an update reference
+-- (what it reads through a shared one is frozen by the handle's loan until join)
+checkSpawns :: Set Name -> Program -> Result Program String
+checkSpawns library program = case concatMap refusals copies of
+    [] -> Ok program
+    errors -> Error (intercalate "\n" (map ("Move error: " ++) errors))
+  where
+    copies = [(spawn, fn) | spawn <- spawnNames, spawn `Set.member` library, fn <- Map.elems (progFunctions program), (spawn ++ "[") `isPrefixOf` fnName fn]
+    refusals ("<Thread>::spawn", fn) =
+        [ "Thread::spawn is given " ++ describe mayHoldReference ty ++ ": a thread cannot hold a reference (capture by value with move fn)"
         | [p] <- [fnParams fn], Just d <- [Map.lookup p (fnLocals fn)], let ty = localType d, mayHoldReference program ty ]
             ++ [ "Thread::spawn gives a " ++ renderTypeForName ty ++ ", which can hold a reference, and a thread's result cannot"
                | Just ty <- [fnReturns fn], mayHoldReference program ty ]
-    describe ty = case ty of
+    refusals (_, fn) =
+        [ "ScopedThread::spawn is lent " ++ describe mayHoldUpdate ty ++ " for updating: a scoped thread only reads what it borrows"
+        | [p] <- [fnParams fn], Just d <- [Map.lookup p (fnLocals fn)], let ty = localType d, mayHoldUpdate program ty ]
+            ++ [ "ScopedThread::spawn gives a " ++ renderTypeForName ty ++ ", which can hold a reference, and a thread's result cannot"
+               | Just (TNamed _ (ArgType ty : _)) <- [fnReturns fn], mayHoldReference program ty ]
+    describe holds ty = case ty of
         TNamed base args
             | "$closure$" `isPrefixOf` base
             , Just (StructDecl fields) <- Map.lookup (instanceName base args) (progTypes program) ->
-                case [field | (field, t) <- fields, mayHoldReference program t] of
+                case [field | (field, t) <- fields, holds program t] of
                     [] -> "a closure that can hold a reference"
                     borrowed -> "a closure that borrows " ++ intercalate ", " borrowed
         _ -> "a " ++ renderTypeForName ty ++ ", which can hold a reference"

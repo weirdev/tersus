@@ -73,6 +73,7 @@ import MirData (readProgram, writeProgram, writeProgramWithGhosts)
 import MirPass (programData, runPassWith, runMonoOwnershipPassWith)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (hasLists, lowerLists)
+import MirThreads (lowerThreads)
 import MirOwnershipData (ownershipInput, restoreOwnership)
 import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresent, cachedProgramIfPresentWithArtifacts, parallelBuilds, runWithInput, runWithInputFull)
 import Seed (emitterSeedFile, seedSha256, frontendSeedSha256, parserSeedSha256,
@@ -657,7 +658,7 @@ prepareProgram entry raw = do
 
 ownedContentKey :: String -> String -> [String] -> String
 ownedContentKey producer input flags = fingerprint [show
-    (producer, input, runtimeSource, os, arch, ["-O2", "-Wno-override-module"] ++ flags)]
+    (producer, input, runtimeSource, os, arch, ["-O2", "-Wno-override-module", "-pthread"] ++ flags)]
 
 {-# NOINLINE preparedKeys #-}
 preparedKeys :: MVar (Map.Map (FilePath, String, [String]) String)
@@ -910,8 +911,9 @@ ownedProgramOf source =
 nativeProgram :: Program -> Result Program String
 nativeProgram program = unsafePerformIO (nativeProgramWith listLibrary program)
 
--- The program native code is made of: its writes through places expanded, and each list and Box made of the
--- structs of the given library (the pipeline gives the library it has validated)
+-- The program native code is made of: its writes through places expanded, its threads started on threads of their own
+-- (MirThreads), and each list and Box made of the structs of the given library (the pipeline gives the library it has
+-- validated)
 nativeProgramWith :: IO (Result [(ModuleId, Program)] String) -> Program -> IO (Result Program String)
 nativeProgramWith = nativeProgramUsing ownershipTool
 
@@ -924,7 +926,7 @@ nativeProgramUsing tool library raw = case abiView raw of
             Error e -> pure (Error e)
             Ok () -> do
                 expanded <- ownershipPassWith tool "expand" program
-                case expanded of
+                case mapResult lowerThreads expanded of
                     Error e -> pure (Error e)
                     Ok written
                         | not (hasLists written) -> pure (Ok written)
