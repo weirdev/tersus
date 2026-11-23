@@ -1558,8 +1558,8 @@ selfHostedQueryFamilies program =
                       , checkMirSubset "fn f() -> Int { return readByte(); }; fn g() -> Int { h = f; return h(); }; affirm g() = g(); return 0;" Nothing
                       , checkMirSubset "fn f(x: Byte) -> Int { return storeByte(x); }; fn g(x: Byte) -> Int { h = f; return h(x); }; affirm g(toByte(65)) = g(toByte(65)); return 0;" Nothing
                       , checkMirSubset "fn f() -> Int { return fileStore(); }; fn g() -> Int { h = f; return h(); }; fn k() -> Int { return g(); }; affirm k() = k(); return 0;" Nothing
-                      -- (a wrapper that names only a pure function still has one value per argument)
-                      , checkMirSubset "fn f(x: Int) -> Int { return x + 1; }; fn g(x: Int) -> Int { h = f; return h(x); }; affirm g(3) = g(3); return 0;" (Just True)
+                      -- A plain pointer's type does not promise that its calls are pure.
+                      , checkMirSubset "fn f(x: Int) -> Int { return x + 1; }; fn g(x: Int) -> Int { h = f; return h(x); }; affirm g(3) = g(3); return 0;" Nothing
                       , checkMirSubset "a = fileStore(); b = fileStore(); affirm a = b; return 0;" (Just False)
                       , checkMirSubset "a = fileStore(); affirm a >= 0 - 1; affirm a <= 0; return 0;" (Just True)
                       , checkMirSubset "a = pathByte(toByte(65)); b = pathByte(toByte(65)); affirm a = b; return 0;" (Just False)

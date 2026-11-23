@@ -436,8 +436,8 @@ testCfgValidation =
         , -- A variable of a proof that has the name of a program variable stands for it until the program assigns it again
           parseValidProgramHelper "x = 0; define x = x; x = 1; affirm x = 1;"
         , parseValidateFailProgramHelper "x = 0; define x = x; x = 1; affirm x = 0;" "Could not prove: x = 0"
-        , -- A builtin used as a value keeps its contract
-          parseValidProgramHelper "h = size; x = h([1, 2]); affirm x = 2;"
+        , -- A pointer call uses the contract on its type
+          parseValidProgramHelper "let h: fn(xs: &List<Int>) -> Int [{ }] [{ affirm return = size(xs); }] = size; x = h([1, 2]); affirm x = 2;"
         , parseValidateFailProgramHelper "h = first; x = h([]);" "Funct input validation failed"
         , -- A function that is called is the one that was defined, even when a local has its name later
           parseValidProgramHelper "fn f(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; fn g(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n + 1; }; h = f; { h = g; }; x = f(1); affirm x = 1;"
