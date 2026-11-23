@@ -149,6 +149,7 @@ fn probeType(p: Probe, t: &Type) -> Probe ~ {
             for a in args { p = probeType(p, a); };
             return p;
         },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { return probeType(p, Box::unbox(signature)); },
         Type::TFnContract { args: args, ret: r, contract: contract } => {
             inner = Box::unbox(clone(r)); p = probeType(p, &inner);
             for a in args { p = probeType(p, a); };
@@ -355,6 +356,7 @@ fn typeNamesHave(t: &Type, typeName: &String) -> Bool ~ {
             for a in args { if typeNamesHave(a, typeName) { return true; }; };
             return false;
         },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { return typeNamesHave(Box::unbox(signature), typeName); },
         Type::TFnContract { args: args, ret: r, contract: contract } => {
             inner = Box::unbox(clone(r));
             if typeNamesHave(&inner, typeName) { return true; };

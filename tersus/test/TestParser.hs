@@ -14,7 +14,7 @@ import qualified Compile
 import qualified TersusParser
 import MirHousekeeping (cachedEmitter, validationEntry)
 import Native (availableProcessors)
-import ParsedFile (Decls, ParsedFile, emptyDecls, fileBody, locating)
+import ParsedFile (Decls (..), ParsedFile, emptyDecls, fileBody, locating)
 import qualified FileParserProtocol as File
 import PreludeSource (elaboratePackageFiles, toolPackageFiles, validationPackageFiles)
 import qualified Modules
@@ -544,12 +544,23 @@ wireFunctionTypeContracts = case File.writeFileRequest emptyDecls "" of
         , ("fnc 1 var -1 int 1 \"x\" 0 0", "negative or overflowing")
         ]
 
+boxedDeclarationTransport :: IO TestResult
+boxedDeclarationTransport = do
+    result <- TersusParser.parseFileNative input "return 0;"
+    pure (testAssertEq (fmap (declFieldTypes . snd) result) (Right fields))
+  where
+    contract = FnContract [] [FnClause [FnWord "list", FnWord "0007", FnWord "closure", FnName "x"]] []
+    ty = TNamed "Holder" [ArgType (TBoxedClosure True (TFn [] (TFnContract [] TInt contract)))]
+    fields = Map.singleton "Container" [("callback", ty)]
+    input = emptyDecls{declFieldTypes = fields}
+
 testParser :: Test
 testParser = TestList "testParser"
     [ TestCase "native stdout roundtrip and exact equality" (compareWith seedPlainData tersusPlain "return 1;\n")
     , TestCase "thin function returns keep their declaration contracts byte-for-byte"
         (compareWith seedPlainData tersusPlain "fn thin() -> fn(Int) -> fn(Int) -> Int [{ affirm true; }] [{ affirm true; }] ~ { return 0; };")
     , TestCase "function type contracts survive AST and declaration transport" contractedFunctionTypes
+    , TestCase "native parser preserves opaque clauses in boxed closure declaration transport" boxedDeclarationTransport
     , TestCase "function type contracts reject unsupported proof syntax" rejectFunctionTypeContracts
     , testCase "malformed function type contracts are rejected in declaration transport" wireFunctionTypeContracts
     , TestCase "large located arena exceeds former recursive stack limit" (compareWith seedData tersusData (concat ["x" ++ show i ++ " = " ++ show i ++ ";\n" | i <- [0 :: Int .. 4095]] ++ "return 0;\n"))

@@ -2,7 +2,7 @@ module DataCodec
     ( Token (..), P (..), quote, tokenize, strictTokenize, strictTokenizeBytes, parseLine
     , word, name, expect, integer, int, itemCount, failP, typeTokens, sizeTokens, argTokens
     , strictTokenizeBytesAnyNumber
-    , typeP, sizeP, argP, decimal, checkParamNames, clausesP
+    , typeP, sizeP, argP, decimal, checkParamNames, clausesP, boxedClosureP
     ) where
 
 import Control.Monad (replicateM)
@@ -11,59 +11,9 @@ import Data.List (foldl')
 import Types
 import Utils
 
-typeTokens :: Type -> [String]
-typeTokens ty = case ty of
-    TInt -> ["int"]
-    TByte -> ["byte"]
-    TWord signed bits -> [(if signed then "i" else "u") ++ show bits]
-    TBool -> ["bool"]
-    -- (a list and a Box are named types, in the data as in the checker, so the programs that read the data see
-    -- the struct a native list or Box is; the `list` and `box` tokens are only read, for data written before)
-    TNamed base args -> ["named", quote base, show (length args)] ++ concatMap argTokens args
-    TArrayOf t s -> "array" : typeTokens t ++ sizeTokens s
-    TAddr t -> "addr" : typeTokens t
-    TUninit t -> "uninit" : typeTokens t
-    TBlock t -> "block" : typeTokens t
-    TFn args ret -> ["fn", show (length args)] ++ concatMap typeTokens (args ++ [ret])
-    TFnContract args ret contract ->
-        ["fnc", show (length args)] ++ concatMap typeTokens (args ++ [ret])
-            ++ [show (length (fnParamNames contract))] ++ map quote (fnParamNames contract)
-            ++ clauseListTokens (fnRequires contract) ++ clauseListTokens (fnEnsures contract)
-      where
-        clauseListTokens clauses = show (length clauses) : concatMap clauseTokens clauses
-        clauseTokens (FnClause tokens) = show (length tokens) : concatMap tokenTokens tokens
-        tokenTokens (FnWord w) = ["w", w]
-        tokenTokens (FnName n) = ["q", quote n]
-    TVariant n -> ["variant", quote n]
-    TVar i -> ["var", show i]
-    TForall sizes types t -> ["forall", show (length sizes)] ++ map quote sizes ++ [show (length types)] ++ map quote types ++ typeTokens t
-    TParam n -> ["param", quote n]
-    TRef t -> "ref" : typeTokens t
-    TMutRef t -> "mutref" : typeTokens t
-
-argTokens :: Arg -> [String]
-argTokens (ArgSize s) = "size" : sizeTokens s
-argTokens (ArgType ty) = "type" : typeTokens ty
-
-sizeTokens :: Size -> [String]
-sizeTokens s = case s of
-    SizeConst n -> ["c", show n]
-    SizeAny -> ["any"]
-    SizeParam n -> ["p", quote n]
-    SizeVar i -> ["v", show i]
-
-
 quote :: String -> String
-quote name = '"' : concatMap byteText (encodeUtf8 name) ++ "\""
-  where
-    byteText c
-        | n >= 32 && n < 127 && c /= '"' && c /= '\\' = [c]
-        | otherwise = ['\\', 'x', hexDigit (n `div` 16), hexDigit (n `mod` 16)]
-      where
-        n = fromEnum c
-    hexDigit d = "0123456789ABCDEF" !! d
+quote = quoteWireName
 
--- Reading
 
 data Token = Word String | Str String
     deriving (Eq, Show)
@@ -149,6 +99,8 @@ typeP = word >>= \w -> case w of
     "uninit" -> TUninit <$> typeP
     "block" -> TBlock <$> typeP
     "fn" -> itemCount >>= \n -> replicateM n typeP >>= \args -> TFn args <$> typeP
+    "closure" -> boxedClosureP False typeP
+    "closuremut" -> boxedClosureP True typeP
     "fnc" -> do
         n <- itemCount
         args <- replicateM n typeP
@@ -169,6 +121,13 @@ typeP = word >>= \w -> case w of
     "ref" -> TRef <$> typeP
     "mutref" -> TMutRef <$> typeP
     _ -> failP ("not a type: " ++ w)
+
+boxedClosureP :: Bool -> P Type -> P Type
+boxedClosureP mutable readType = do
+    P $ \ts -> case ts of
+        Word tag : _ | tag == "fn" || tag == "fnc" -> Ok ((), ts)
+        _ -> Error "a boxed closure type needs a function signature"
+    TBoxedClosure mutable <$> readType
 
 checkParamNames :: [String] -> P ()
 checkParamNames names =

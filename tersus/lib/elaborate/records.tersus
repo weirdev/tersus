@@ -80,6 +80,7 @@ fn fromCodec(st: St, t: &Type) -> St ~ {
             st = fromCodec(st, &inner);
             return fnTy(st, params, st.ty);
         },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { return notModelled(st, "boxed closure types"); },
         Type::TFnContract { args: args, ret: r, contract: contract } => {
             params = [];
             for a in args { st = fromCodec(st, a); params = push(params, st.ty); };

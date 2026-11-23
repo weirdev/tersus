@@ -183,6 +183,8 @@ safeTypeP = word >>= \tag -> case tag of
     "uninit" -> TUninit <$> safeTypeP
     "block" -> TBlock <$> safeTypeP
     "fn" -> TFn <$> listP safeTypeP <*> safeTypeP
+    "closure" -> boxedClosureP False safeTypeP
+    "closuremut" -> boxedClosureP True safeTypeP
     "fnc" -> do
         args <- listP safeTypeP
         ret <- safeTypeP

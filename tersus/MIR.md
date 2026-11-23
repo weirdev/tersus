@@ -417,6 +417,17 @@ A local is dropped before an assignment or call overwrites a value it still owns
 
 ## The MIR as data
 
+The MIR2 and MIR3 codecs can round-trip `closure <signature>` and
+`closuremut <signature>`, with signatures encoded as `fn` or `fnc` (see
+[AST_DATA.md](AST_DATA.md)). Native Link reads these tags before contract
+erasure and preserves the opaque `fnc` clause tokens on merge and environment
+completion. Prune refuses these types until it can retain their instantiated
+signature dependencies. This is transport only:
+the runtime ABI, verifier, eraser, native monomorphizer and emitter refuse
+boxed closure types. There is no MIR operation that creates or calls one.
+Generic containers still need a checked ABI mapping that preserves distinct
+pre-erasure instance identities.
+
 The MIR package imports `data::codec::codec` for `Token`, `Parsed`, `Size`,
 `Type`, tokenization, escaping, decimal numbers and size/type read/write helpers.
 AST consumers import that same module; the MIR record schema and program

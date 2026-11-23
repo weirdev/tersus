@@ -2,6 +2,7 @@
 
 module TestMirData (testMirData, testMirLowered, everyRecord, malformedLowered) where
 
+import Control.Applicative ((<|>))
 import Data.Char (isAscii)
 import Data.List (isInfixOf, isPrefixOf, sort)
 import qualified Data.Map.Strict as Map
@@ -26,6 +27,7 @@ import qualified Syntax as S
 import Pipeline (ownedSource, loadFromFilesystem)
 import Types (Arg (..), FnClause (..), FnClauseToken (..), FnContract (..), Size (..), Type (..), pattern TList, pattern TBox)
 import TestHarness
+import ValidatorNative (prepareTexts)
 import TestNative (nativeExamples, validatedPrograms)
 import TestVariadic (variadicPrograms)
 import Utils
@@ -69,6 +71,7 @@ testMirData =
             , testCase "erasure scrubs existing declarations as well as new instances" existingPermissionsAreErased
             ]
         , testCase "a contract function type round trips, and a malformed one is refused" contractFnMir
+        , testCase "the validator rejects boxed closures before specializing hand MIR" boxedValidationRefusal
         , TestList
             "reading"
             [ testCase "a text that is not the MIR" (refused "return 1;" "tersus-mir 1")
@@ -105,13 +108,30 @@ testMirData =
                     []
                     emptySpec
             program = Program (Map.fromList [("Callback", StructDecl [("f", contractFnType)])]) Map.empty mainFn Map.empty Map.empty Map.empty Map.empty
+            boxed = TNamed "Holder" [ArgType (TBoxedClosure True (TFn [TBoxedClosure False contractFnType] TInt))]
+            boxedProgram = program{progTypes = Map.insert "Holder" (StructDecl [("callback", boxed)]) (progTypes program)}
+            boxedText = writeProgramWithGhosts boxedProgram
             text = writeProgram program
             malformed = "tersus-mir 1\nstruct \"P\" 1 \"f\" fnc 1 int int 2 \"x\" \"y\" 0 0\nmain \"m\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0\nend\n"
-         in case (readProgram text, readProgram malformed) of
+         in testAssertEq (readProgram boxedText) (Ok boxedProgram)
+            <|> testAssertEq (mapResult writeProgramWithGhosts (readProgram boxedText)) (Ok boxedText)
+            <|> case (readProgram text, readProgram malformed) of
                 (Ok back, Error _) | back == program && writeProgram back == text -> Nothing
                 (Ok back, Error _) -> Just ("a contract function type changed through MIR data: " ++ show back)
                 (Error e, _) -> Just e
                 (_, Ok _) -> Just "accepted a contract function type whose names do not match its parameters"
+    boxedValidationRefusal = foldr (<|>) Nothing
+        [ testAssertErrorContains "validator does not model yet: boxed closure types" (prepareTexts physical fixture)
+        | physical <- [False, True]
+        , fixture <- [base{progMain = entry{fnLocals = Map.singleton (Local 0) (LocalDecl nested Nothing)}}
+                     , base{progTypes = Map.singleton "Unreachable" (StructDecl [("field", nested)])}
+                     , base{progGenerics = Map.singleton "Unused" (["T"], [("field", nested)])}
+                     , base{progInstances = Map.singleton "Unused<Int>" ("Unused", [ArgType nested])}]
+        ]
+      where
+        Lowered base _ _ _ _ _ _ _ = everyRecord
+        entry = progMain base
+        nested = TAddr (TNamed "Wrapper" [ArgType (TFn [] (TBoxedClosure False (TFn [] TInt)))])
     statements program = concat [stmts | f <- progMain program : Map.elems (progFunctions program), BasicBlock stmts _ <- Map.elems (fnBlocks f)]
     isGhost s = case s of
         Ghost _ _ -> True

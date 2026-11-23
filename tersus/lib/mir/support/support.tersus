@@ -102,6 +102,7 @@ fn renderType(t: &Type) -> String ~ {
             for a in args { parts = push(parts, renderType(a)); };
             r = catStrings(catStrings(catStrings("fn(", joinWith(", ", parts)), ") -> "), renderType(Box::unbox(ret)));
         },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { r = catStrings(catStrings("Closure<", renderType(Box::unbox(signature))), ">"); if mutable { r = catStrings(catStrings("ClosureMut<", renderType(Box::unbox(signature))), ">"); }; },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             parts = noStrings();
             for a in args { parts = push(parts, renderType(a)); };

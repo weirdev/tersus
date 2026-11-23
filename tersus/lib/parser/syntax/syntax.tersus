@@ -1,4 +1,4 @@
-import data::codec::codec { Token, Parsed, Size, Type, FnContract, typeAt, wordOf, hexValue, quoted, catStrings, renderFnClauses, renderTypeForName, printInt, printName, printNames, newLine, printType };
+import data::codec::codec { Token, Parsed, Size, Type, FnContract, typeAt, wordOf, hexValue, quoted, catStrings, renderFnClauses, renderTypeForName, boxedClosureInSpan, boxedClosureKey, printInt, printName, printNames, newLine, printType };
 import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram, printBool, printAst, relationWords };
 import data::arena::arena { reorderArena, nodeChildren };
 import data::unicode::unicode { parserUnicodeAlphaNum, parserUnicodeLetter, parserUnicodeLower, parserUnicodeUpper };
@@ -982,6 +982,11 @@ fn typeTokensOf(t: Type) -> List<Token> ~ {
             for a in args { for x in typeTokensOf(clone(a)) { out = push(out, clone(x)); }; };
             for x in typeTokensOf(Box::unbox(r)) { out = push(out, clone(x)); };
         },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => {
+            tag = "closure"; if mutable { tag = "closuremut"; };
+            out = push([], wordTok(tag));
+            for x in typeTokensOf(Box::unbox(signature)) { out = push(out, clone(x)); };
+        },
         Type::TFnContract { args: args, ret: r, contract: contract } => {
             out = push(push([], wordTok("fnc")), wordTok(String::fromInt(size(args))));
             for a in args { for x in typeTokensOf(clone(a)) { out = push(out, clone(x)); }; };
@@ -1052,6 +1057,7 @@ fn renderTypeName(t: Type) -> String ~ {
             for a in args { if i > 0 { parts = catStrings(parts, ", "); }; parts = catStrings(parts, renderTypeName(clone(a))); i = i + 1; };
             r = cat3(catStrings(parts, ") -> "), renderTypeName(Box::unbox(ret)), "");
         },
+        Type::TBoxedClosure { key: key } => { r = clone(key); },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             c = Box::unbox(contract);
             parts = "fn(";
@@ -1737,6 +1743,7 @@ fn ghostTypeOf(t: Type) -> Bool ~ {
         Type::TArray { elem: e, size: s } => { okGhost = false; },
         Type::TBox { inner: e } => { okGhost = false; },
         Type::TFn { args: a, ret: r } => { okGhost = false; },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { okGhost = false; },
         Type::TFnContract { args: a, ret: r, contract: contract } => { okGhost = false; },
         Type::TNamed { name: n, base: b, argc: c, argTokens: ts } => { okGhost = false; },
         Type::TVariant { name: n } => { okGhost = false; },
@@ -1841,6 +1848,7 @@ fn namedType(sourceText: &Input, st: St) -> Res<Type> ~ {
                     Type::TArray { elem: e, size: z } => { return ok( s, selfTyCopy); },
                     Type::TBox { inner: e } => { return ok( s, selfTyCopy); },
                     Type::TFn { args: a, ret: r } => { return ok( s, selfTyCopy); },
+                    Type::TBoxedClosure { mutable: mutable, signature: signature } => { return ok(s, selfTyCopy); },
                     Type::TFnContract { args: a, ret: r, contract: contract } => { return ok( s, selfTyCopy); },
                     Type::TVariant { name: n } => { return ok( s, selfTyCopy); },
                     Type::TVar { n: n } => { return ok( s, selfTyCopy); },
@@ -4865,6 +4873,7 @@ fn cWordType(t: Type) -> Bool ~ {
         Type::TArray { elem: e, size: s } => { out = false; },
         Type::TBox { inner: e } => { out = false; },
         Type::TFn { args: a, ret: r } => { out = false; },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { out = false; },
         Type::TFnContract { args: a, ret: r, contract: contract } => { out = false; },
         Type::TNamed { name: a, base: b, argc: c, argTokens: d } => { out = false; },
         Type::TVariant { name: a } => { out = false; },
@@ -4889,6 +4898,7 @@ fn matchRefBlock(inner: Type) -> Bool ~ {
         Type::TArray { elem: x, size: s } => { out = false; },
         Type::TBox { inner: x } => { out = false; },
         Type::TFn { args: a, ret: r } => { out = false; },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { out = false; },
         Type::TFnContract { args: a, ret: r, contract: contract } => { out = false; },
         Type::TNamed { name: a, base: b, argc: c, argTokens: d } => { out = false; },
         Type::TVariant { name: a } => { out = false; },
@@ -6667,6 +6677,7 @@ fn collectTypeParams(t: Type, acc: List<String>) -> List<String> ~ {
         Type::TUninit { inner: e } => { out = collectTypeParams(Box::unbox(e), out); },
         Type::TArray { elem: e, size: s } => { out = collectTypeParams(Box::unbox(e), out); },
         Type::TFn { args: a, ret: r } => { for x in a { out = collectTypeParams(clone(x), out); }; out = collectTypeParams(Box::unbox(r), out); },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { out = collectTypeParams(Box::unbox(signature), out); },
         Type::TFnContract { args: a, ret: r, contract: contract } => { for x in a { out = collectTypeParams(clone(x), out); }; out = collectTypeParams(Box::unbox(r), out); },
         Type::TForall { sizes: a, types: b, body: c } => { out = collectTypeParams(Box::unbox(c), out); },
         Type::TInt => { },
@@ -7571,6 +7582,7 @@ fn typeMentionsSelf(t: Type, self: &String) -> Bool ~ {
         Type::TByte => { out = false; },
         Type::TBool => { out = false; },
         Type::TFn { args: a, ret: r } => { out = false; },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { out = false; },
         Type::TFnContract { args: a, ret: r, contract: contract } => { out = false; },
         Type::TVariant { name: a } => { out = false; },
         Type::TVar { n: a } => { out = false; },
@@ -7597,6 +7609,7 @@ fn isSelfType(t: Type, self: &String) -> Bool ~ {
         Type::TArray { elem: e, size: s } => { out = false; },
         Type::TBox { inner: e } => { out = false; },
         Type::TFn { args: a, ret: r } => { out = false; },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { out = false; },
         Type::TFnContract { args: a, ret: r, contract: contract } => { out = false; },
         Type::TVariant { name: a } => { out = false; },
         Type::TVar { n: a } => { out = false; },
@@ -7658,6 +7671,7 @@ fn compareFieldText(st: &St, typeName: &String, n: Int, f: FieldInfo, a: &String
         Type::TArray { elem: e, size: s } => { isListSelf = false; },
         Type::TBox { inner: e } => { isListSelf = false; },
         Type::TFn { args: x, ret: r } => { isListSelf = false; },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { isListSelf = false; },
         Type::TFnContract { args: x, ret: r, contract: contract } => { isListSelf = false; },
         Type::TNamed { name: x, base: y, argc: c, argTokens: d } => { isListSelf = false; },
         Type::TVariant { name: x } => { isListSelf = false; },
@@ -7753,6 +7767,7 @@ fn fieldCloneText(st: &St, typeName: &String, n: Int, f: FieldInfo, src: &String
         Type::TByte => { kind = 0; },
         Type::TBool => { kind = 0; },
         Type::TFn { args: a, ret: r } => { kind = 0; },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => { kind = 0; },
         Type::TFnContract { args: a, ret: r, contract: contract } => { kind = 0; },
         Type::TNamed { name: a, base: b, argc: c, argTokens: d } => { kind = 0; },
         Type::TVariant { name: a } => { kind = 0; },
@@ -8116,6 +8131,7 @@ fn fileRenderTypeForName(t: &Type, fuel: Int) -> String [{ affirm fuel >= 0; }] 
             };
             r = fileCatStrings(fileCatStrings(parts, ") -> "), fileRenderTypeForName(Box::unbox(ret), fuel - 1));
         },
+        Type::TBoxedClosure { key: key } => { r = clone(key); },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             r = renderTypeForName(Type::TFnContract { args: clone(args), ret: clone(ret), contract: clone(contract) }, fuel);
         },
@@ -8184,6 +8200,7 @@ fn fileTypeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; af
         for i in 0..c.value [{ affirm p >= next; affirm p <= size(ts); }] {
             if p >= size(ts) { return bad; };
             argStart = p;
+            preserve = false;
             w2 = fileWordAt(ts, p);
             if !w2.ok { return bad; };
             if w2.pos >= size(ts) { return bad; };
@@ -8196,14 +8213,18 @@ fn fileTypeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; af
                 if w2.value != "type" { return bad; };
                 a = fileTypeAt(ts, w2.pos);
                 if !a.ok { return bad; };
-                parts = push(parts, fileRenderTypeForName(&a.value, size(ts)));
+                preserve = boxedClosureInSpan(ts, w2.pos, a.pos);
+                part = "";
+                if preserve { part = boxedClosureKey(ts, w2.pos, a.pos); }
+                else { part = fileRenderTypeForName(&a.value, size(ts)); };
+                parts = push(parts, part);
                 p = a.pos;
             };
             affirm argStart <= p;
             j = argStart;
             while j < p [{ affirm j >= argStart; affirm j <= p; affirm p <= size(ts); }] shrinks p - j {
                 tok = clone(get(ts, j));
-                if !tok.quoted {
+                if !preserve && !tok.quoted {
                     number = fileParseInt(&tok.text);
                     if number.ok { tok = Token { quoted: false, text: String::fromInt(number.value) }; };
                 };
@@ -8230,7 +8251,7 @@ fn fileTypeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; af
         if !n.ok || n.value < 0 { return bad; };
         return fileDone(Type::TVar { n: n.value }, n.pos);
     };
-    if kw = "fnc" { return typeAt(ts, pos); };
+    if kw = "fnc" || kw = "closure" || kw = "closuremut" { return typeAt(ts, pos); };
     if kw = "fn" {
         c = fileCountAt(ts, next);
         if !c.ok { return bad; };

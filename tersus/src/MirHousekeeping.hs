@@ -127,6 +127,7 @@ abiView program = either Error Ok $ do
     abiType ty = case ty of
         TFn args ret -> signature args ret
         TFnContract args ret _ -> signature args ret
+        TBoxedClosure{} -> Left "boxed closure types are not supported by the runtime MIR ABI"
         TArrayOf inner size -> (`TArrayOf` size) <$> abiType inner
         TForall sizes types inner -> TForall sizes types <$> abiType inner
         TAddr inner -> TAddr <$> abiType inner

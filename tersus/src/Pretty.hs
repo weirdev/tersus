@@ -223,9 +223,15 @@ renderType (TMutRef t) = "&mut " ++ renderType t
 renderType (TParam name) = name
 renderType (TForall sizes types t) = "<" ++ intercalate ", " (types ++ sizes) ++ ">" ++ renderType t
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
+renderType (TBoxedClosure mutable signature) = boxedClosureName mutable ++ "<" ++ renderType signature ++ ">"
 renderType (TFnContract args ret contract) = "fn(" ++ intercalate ", " (zipWith named (fnParamNames contract ++ repeat "") args) ++ ") -> " ++ renderType ret
   where
     named name arg = if null name then renderType arg else name ++ ": " ++ renderType arg
-renderType (TNamed base args) = instanceName base args
+renderType ty@(TNamed base args)
+    | containsBoxedClosure ty = base ++ "<" ++ intercalate ", " (map display args) ++ ">"
+    | otherwise = instanceName base args
+  where
+    display (ArgType t) | containsBoxedClosure t = renderType t
+    display arg = renderArg arg
 renderType (TVariant name) = name
 renderType (TVar _) = "?"

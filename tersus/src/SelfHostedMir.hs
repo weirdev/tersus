@@ -4042,14 +4042,14 @@ encodeLibrary :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer
 encodeLibrary = encodeAs True
 
 encodeAs :: Bool -> M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
-encodeAs physical program = fmap (map (\(name, (blocks, state, entry)) -> (name, (withoutNotes blocks, state, entry)))) (encodeNoted physical (viewFor physical program))
+encodeAs physical program = fmap (map (\(name, (blocks, state, entry)) -> (name, (withoutNotes blocks, state, entry)))) (encodeNoted physical program)
 
 viewFor :: Bool -> M.Program -> M.Program
 viewFor physical program = if physical then program else sourceContainerView program
 
 obligationNote :: Bool -> M.Program -> Name -> Int -> Int -> Maybe String
 obligationNote physical program name blockId stepIndex = do
-    functions <- either (const Nothing) Just (encodeNoted physical (viewFor physical program))
+    functions <- either (const Nothing) Just (encodeNoted physical program)
     (blocks, _, _) <- lookup name functions
     blockList <- listItems blocks
     MData _ fields <- find (\b -> case b of MData _ fs -> lookup "id" fs == Just (MInt (toInteger blockId)); _ -> False) blockList
@@ -4074,8 +4074,18 @@ encodeNoted :: Bool -> M.Program -> Either String [(Name, (MirValue, MirValue, I
 -- makes them for native code after validation there; the validator
 -- written in Tersus is given the same copies, so a call of a generic
 -- function names the copy of it the call decides).
-encodeNoted physical program0 = encodeMono physical withTemplates
+encodeNoted physical raw
+    | any containsBoxedClosure annotations = Left "boxed closure types"
+    | otherwise = encodeMono physical withTemplates
   where
+    program0 = viewFor physical raw
+    annotations =
+        [ty | fn <- M.progMain raw : Map.elems (M.progFunctions raw), ty <- map M.localType (Map.elems (M.fnLocals fn)) ++ maybe [] pure (M.fnReturns fn)]
+        ++ [ty | decl <- Map.elems (M.progTypes raw), ty <- case decl of
+                M.StructDecl fields -> map snd fields
+                M.EnumDecl variants -> map snd (concatMap snd variants)]
+        ++ [ty | (_, fields) <- Map.elems (M.progGenerics raw), (_, ty) <- fields]
+        ++ [ty | (_, args) <- Map.elems (M.progInstances raw), ArgType ty <- args]
     mono = monomorphizeForValidation program0
     -- A contract can name a generic function nothing calls (a method
     -- the contract measures by, like size): monomorphisation keeps
