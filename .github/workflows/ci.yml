@@ -207,6 +207,42 @@ jobs:
           path: ~/.cache/tersus
           key: ${{ steps.tersus-cache.outputs.cache-primary-key }}
 
+  # The association covers the source, so any source or seed change leaves the committed one stale. On master, commit
+  # the one shard 8 just certified for this exact commit. The pin is not hashed into it, so the commit does not stale
+  # itself, and a push made with GITHUB_TOKEN starts no new run.
+  adopt-association:
+    name: Adopt the certified emitter association
+    needs: haskell
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.haskell.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ordinary-emitter-association-${{ github.sha }}
+          path: ${{ runner.temp }}/association
+
+      - name: Commit the association if it changed
+        run: |
+          set -euo pipefail
+          certified="$RUNNER_TEMP/association/emitter-certified.pin"
+          pin=tersus/bootstrap/emitter.sha256
+          test "$(cat "$RUNNER_TEMP/association/emitter-source.txt")" = "$GITHUB_SHA"
+          read -r digest association extra < "$certified" || true
+          read -r pinned _ < "$pin" || true
+          [[ -z ${extra:-} && $digest == "$pinned" && $association =~ ^[0-9a-f]{64}$ ]]
+          if cmp -s "$certified" "$pin"; then echo "The committed association is current."; exit 0; fi
+          master_moved() { git fetch --quiet origin master && [ "$(git rev-parse FETCH_HEAD)" != "$GITHUB_SHA" ]; }
+          if master_moved; then echo "Master moved on; its own run adopts for its source."; exit 0; fi
+          cp "$certified" "$pin"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit --quiet -m "Adopt the ordinary-CI emitter association for ${GITHUB_SHA::12}" -- "$pin"
+          git push origin HEAD:master || { master_moved && echo "Master moved on; its own run adopts for its source."; }
+
   complete:
     name: Haskell build and tests
     needs: haskell
