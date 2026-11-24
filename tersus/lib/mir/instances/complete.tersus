@@ -1,0 +1,222 @@
+import data::codec::codec { Token };
+import mir::instances::names { InstanceNameClasses, instanceNameAt, instanceTypeParam };
+import mir::full::full { FullFunction, FullProgram, FullRecord };
+import mir::full::read { fieldsEnd };
+import mir::full::records { keyOrder };
+import mir::full::tokens { appendTokens, intToken, name, normalizeType, numberAt, operandEnd, sizeEnd, sliceTokens, textAt, typeEnd, word, wordIs };
+import mir::full::write { sortRecords };
+import mir::mono::functions { monoReturn };
+import mir::mono::tokens { MonoBinding, monoForallBody, monoSubstitute };
+import mir::mono::types { monoFields, monoFieldTokens, monoRecordIndex, monoTuple };
+
+fn namedInType(classes: &InstanceNameClasses, ts: &List<Token>, at: Int, out: List<MonoBinding>) -> List<MonoBinding> ~ {
+    if at < 0 || at >= size(ts) { return out; };
+    if wordIs(ts, at, "named") {
+        end = typeEnd(ts, at);
+        out = push(out, MonoBinding { name: instanceNameAt(classes, ts, at), tokens: sliceTokens(ts, at, end) });
+        n = numberAt(ts, at + 2); p = at + 3;
+        if n >= 0 {
+            for i in 0..n {
+                if wordIs(ts, p, "type") {
+                    out = namedInType(classes, ts, p + 1, out); p = typeEnd(ts, p + 1);
+                } else { p = sizeEnd(ts, p + 1); };
+            };
+        };
+        return out;
+    };
+    if wordIs(ts, at, "fn") || wordIs(ts, at, "fnc") {
+        n = numberAt(ts, at + 1); p = at + 2;
+        if n < 0 { return out; };
+        for i in 0..n { p = typeEnd(ts, p); };
+        out = namedInType(classes, ts, p, out);
+        p = at + 2;
+        for i in 0..n { out = namedInType(classes, ts, p, out); p = typeEnd(ts, p); };
+        return out;
+    };
+    if wordIs(ts, at, "forall") { return namedInType(classes, ts, monoForallBody(ts, at), out); };
+    tag = textAt(ts, at);
+    if tag = "list" || tag = "box" || tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "closure" || tag = "closuremut" {
+        return namedInType(classes, ts, at + 1, out);
+    };
+    return out;
+};
+
+// Opaque contract signatures can still spell aliases and sizes noncanonically.
+fn namedInRecordType(classes: &InstanceNameClasses, ts: &List<Token>, at: Int, out: List<MonoBinding>) -> List<MonoBinding> ~ {
+    end = typeEnd(ts, at);
+    if end <= at { return out; };
+    for i in at..end {
+        if wordIs(ts, i, "fnc") {
+            canonical = normalizeType(sliceTokens(ts, at, end));
+            return namedInType(classes, &canonical, 0, out);
+        };
+    };
+    return namedInType(classes, ts, at, out);
+};
+
+fn namedInLocals(classes: &InstanceNameClasses, f: &FullFunction, out: List<MonoBinding>) -> List<MonoBinding> ~ {
+    keys = [];
+    for row in &f.locals { keys = push(keys, clone(row.name)); };
+    for i in keyOrder(&keys, true) {
+        if i >= 0 && i < size(f.locals) {
+            ts = &get(f.locals, i).tokens;
+            start = 3; if wordIs(ts, 2, "some") { start = 4; };
+            out = namedInRecordType(classes, ts, start, out);
+        };
+    };
+    return out;
+};
+
+fn namedInFields(classes: &InstanceNameClasses, ts: &List<Token>, countAt: Int, out: List<MonoBinding>) -> List<MonoBinding> ~ {
+    for field in monoFields(ts, countAt + 1, numberAt(ts, countAt)) { out = namedInRecordType(classes, field.tokens, 0, out); };
+    return out;
+};
+
+fn initialNamed(classes: &InstanceNameClasses, program: &FullProgram) -> List<MonoBinding> ~ {
+    keys = [];
+    for f in &program.functions { keys = push(keys, textAt(f.header, 1)); };
+    order = keyOrder(&keys, false);
+    out = namedInLocals(classes, program.entry, []);
+    for i in &order { if i >= 0 && i < size(program.functions) { out = namedInLocals(classes, get(program.functions, i), out); }; };
+    out = namedInRecordType(classes, monoReturn(program.entry), 0, out);
+    for i in &order { if i >= 0 && i < size(program.functions) { out = namedInRecordType(classes, monoReturn(get(program.functions, i)), 0, out); }; };
+    keys = [];
+    for d in &program.types { keys = push(keys, clone(d.name)); };
+    order = keyOrder(&keys, false);
+    for i in &order {
+        if i >= 0 && i < size(program.types) {
+            ts = &get(program.types, i).tokens;
+            if wordIs(ts, 0, "struct") { out = namedInFields(classes, ts, 2, out); };
+        };
+    };
+    for i in &order {
+        if i >= 0 && i < size(program.types) {
+            ts = &get(program.types, i).tokens; n = numberAt(ts, 2); p = 3;
+            if wordIs(ts, 0, "enum") && n >= 0 {
+                for j in 0..n {
+                    out = namedInFields(classes, ts, p + 1, out); p = fieldsEnd(ts, p + 1);
+                };
+            };
+        };
+    };
+    return out;
+};
+
+fn namesInBody(f: &FullFunction, out: List<String>) -> List<String> ~ {
+    for b in &f.blocks {
+        for row in &b.lines {
+            if wordIs(row, 0, "assign") || wordIs(row, 0, "peek") {
+                if wordIs(row, 2, "makedata") { out = push(out, textAt(row, 3)); };
+                if wordIs(row, 2, "takefield") { out = push(out, textAt(row, 4)); };
+                if wordIs(row, 2, "readfield") || wordIs(row, 2, "isvariant") || wordIs(row, 2, "asvariant") {
+                    out = push(out, textAt(row, operandEnd(row, 3)));
+                };
+                out = constantDataNames(row, out);
+            };
+            if wordIs(row, 0, "switch") || wordIs(row, 0, "call") { out = constantDataNames(row, out); };
+        };
+    };
+    return out;
+};
+
+fn constantDataNames(row: &List<Token>, out: List<String>) -> List<String> ~ {
+    // In these validated runtime rows, only a CData constructor has an unquoted `data` token.
+    for i in 0..size(row) { if wordIs(row, i, "data") { out = push(out, textAt(row, i + 1)); }; };
+    return out;
+};
+
+fn tupleArity(base: &String) -> Int ~ {
+    n = size(base.bytes);
+    if n < 6 || base.slice(0, 5) != "Tuple" || get(base.bytes, 5) = toByte(48) { return 0; };
+    // Haskell reads the suffix as Int, so accumulate modulo 2^64 without overflowing either limb.
+    hi = 0; lo = 0; radix = 4294967296;
+    for i in 5..n {
+        digit = toInt(get(base.bytes, i)) - 48;
+        if digit < 0 || digit > 9 { return 0; };
+        next = lo * 10 + digit;
+        hi = (hi * 10 + next / radix) % radix; lo = next % radix;
+    };
+    if hi != 0 || lo < 2 || lo > 16 { return 0; };
+    return lo;
+};
+
+fn tupleTemplate(base: &String) -> FullRecord ~ {
+    arity = tupleArity(base);
+    if arity = 0 { return FullRecord { name: "", tokens: [] }; };
+    return monoTuple("Tuple".concat(String::fromInt(arity)));
+};
+
+fn instantiateFields(classes: &InstanceNameClasses, generics: &List<FullRecord>, key: &String, ts: &List<Token>) -> FullRecord ~ {
+    bad = FullRecord { name: "", tokens: [] };
+    base = textAt(ts, 1); n = numberAt(ts, 2);
+    if n < 0 { return bad; };
+    i = monoRecordIndex(generics, &base);
+    g = clone(bad);
+    if i >= 0 && i < size(generics) { g = clone(get(generics, i)); }
+    else { g = tupleTemplate(&base); };
+    if numberAt(&g.tokens, 2) != n { return bad; };
+    sizes = []; types = []; p = 3;
+    for j in 0..n {
+        param = textAt(&g.tokens, 3 + j);
+        upper = instanceTypeParam(classes, &param);
+        if upper && wordIs(ts, p, "type") {
+            end = typeEnd(ts, p + 1);
+            types = push(types, MonoBinding { name: param, tokens: sliceTokens(ts, p + 1, end) }); p = end;
+        } else {
+            if upper || !wordIs(ts, p, "size") { return bad; };
+            end = sizeEnd(ts, p + 1);
+            sizes = push(sizes, MonoBinding { name: param, tokens: sliceTokens(ts, p + 1, end) }); p = end;
+        };
+    };
+    fields = [];
+    for f in monoFields(&g.tokens, 4 + n, numberAt(&g.tokens, 3 + n)) {
+        fields = push(fields, MonoBinding { name: clone(f.name), tokens: monoSubstitute(f.tokens, &sizes, &types) });
+    };
+    prefix = push(push([], word("struct")), name(clone(key)));
+    return FullRecord { name: clone(key), tokens: appendTokens(prefix, monoFieldTokens(&fields)) };
+};
+
+fn completeInstances(program: FullProgram) -> FullProgram ~ {
+    return completeInstancesWith(program, InstanceNameClasses { ranges: [], pinned: true });
+};
+
+fn completeInstancesWith(program: FullProgram, classes: &InstanceNameClasses) -> FullProgram ~ {
+    args = HashMap::new(); names = [];
+    for occurrence in initialNamed(classes, &program) {
+        args = args.insert(clone(occurrence.name), clone(occurrence.tokens));
+        names = push(names, clone(occurrence.name));
+    };
+    names = namesInBody(&program.entry, names);
+    for f in &program.functions { names = namesInBody(f, names); };
+    order = keyOrder(&names, false); pending = []; seen = HashSet::new();
+    i = size(order);
+    while i > 0 [{ affirm i <= size(order); }] ~ {
+        i = i - 1; j = get(&order, i);
+        if j >= 0 && j < size(names) {
+            key = get(&names, j);
+            if !seen.contains(key) { pending = push(pending, clone(key)); seen = seen.insert(clone(key)); };
+        };
+    };
+    types = program.types; declared = HashSet::new();
+    for d in &types { declared = declared.insert(clone(d.name)); };
+    while size(pending) > 0 [{ }] ~ {
+        key = clone(last(&pending)); pending = pop(pending);
+        if !declared.contains(&key) {
+            ts = args.lookup(&key, []);
+            if size(ts) > 0 {
+                d = instantiateFields(classes, &program.generics, &key, &ts);
+                if size(d.tokens) > 0 {
+                    found = namedInFields(classes, &d.tokens, 2, []);
+                    declared = declared.insert(key); types = push(types, d);
+                    // Prepend in field order; right-fold insertion makes the first same-key discovery win.
+                    i = size(found);
+                    while i > 0 [{ affirm i <= size(found); }] ~ {
+                        i = i - 1; item = get(&found, i);
+                        pending = push(pending, clone(item.name)); args = args.insert(clone(item.name), clone(item.tokens));
+                    };
+                };
+            };
+        };
+    };
+    return FullProgram { types: sortRecords(types), ..program };
+};

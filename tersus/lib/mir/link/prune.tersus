@@ -2,7 +2,7 @@ import data::codec::codec { Token, catStrings };
 import data::ast::ast { AstNode, AstProof, AstExpression, AstValue, AstValidation, AstRule, AstStatement };
 import data::reader::reader { nodeKind, nodeRefs, nameValue };
 import mir::full::full { FullProgram, FullFunction, FullRecord, FullBlock };
-import mir::full::tokens { appendTokens, integerAt, intsEnd, intToken, name, numberAt, operandEnd, namesEnd, sliceTokens, textAt, typeEnd, wordIs, word, quotedAt };
+import mir::full::tokens { appendTokens, integerAt, intsEnd, intToken, name, numberAt, operandEnd, namesEnd, runtimeRefs, sliceTokens, textAt, typeEnd, wordIs, word, quotedAt };
 import mir::full::records { nodeAt, statementAt, envStart, envEnd, envEntries, envTokens, replaceEnv, EnvEntry };
 import mir::link::merge { rowIndex, fnIndex };
 import mir::full::environments { replaceEnvBase };
@@ -100,11 +100,6 @@ fn payloadRefs(nodes: &List<AstNode>, id: Int, full: Bool) -> List<String> ~ {
     if s is AstStatement::AxiomDef { v = s as AstStatement::AxiomDef; return addTexts(validationsRefs(nodes, v.ins, true), validationsRefs(nodes, v.outs, true)); };
     if s is AstStatement::ProofDef { v = s as AstStatement::ProofDef; return addTexts(addTexts(validationsRefs(nodes, v.ins, true), validationsRefs(nodes, v.outs, true)), validationsRefs(nodes, v.body, true)); };
     return [];
-};
-fn runtimeRefs(ts: &List<Token>) -> List<String> ~ {
-    out = []; i = 0;
-    while i + 1 < size(ts) [{ affirm i >= 0; }] ~ { if wordIs(ts, i, "fn") && quotedAt(ts, i + 1) { out = push(out, textAt(ts, i + 1)); }; i = i + 1; };
-    return out;
 };
 fn functionRefs(p: &FullProgram, f: &FullFunction) -> List<String> ~ {
     out = [];

@@ -1,0 +1,50 @@
+import data::codec::codec { Parsed, Token, utf8Point };
+import mir::full::tokens { integerAt, wordIs };
+import mir::instances::names { InstanceNameClasses, InstanceNameRange };
+
+fn hasNameClass(ranges: &List<InstanceNameRange>, cp: Int) -> Bool ~ {
+    lo = 0; hi = size(ranges);
+    while lo < hi [{ affirm lo >= 0; affirm hi <= size(ranges); }] ~ {
+        mid = lo + (hi - lo) / 2;
+        r = get(ranges, mid);
+        if cp < r.lo { hi = mid; }
+        else { if cp > r.hi { lo = mid + 1; } else { return true; }; };
+    };
+    return false;
+};
+
+fn coversNameText(ranges: &List<InstanceNameRange>, text: &String) -> Bool ~ {
+    i = 0;
+    while i < size(text.bytes) [{ affirm i >= 0; }] ~ {
+        if toInt(get(text.bytes, i)) < 128 { i = i + 1; }
+        else {
+            point = utf8Point(text, i);
+            if !point.ok || point.next <= i || !hasNameClass(ranges, point.value) { return false; };
+            i = point.next;
+        };
+    };
+    return true;
+};
+
+fn parseNameProfile(rows: &List<List<Token>>, at: Int) -> Parsed<InstanceNameClasses> ~ {
+    bad = Parsed<InstanceNameClasses> { value: InstanceNameClasses { ranges: [], pinned: false }, pos: 0, ok: false };
+    end = size(rows);
+    if at < 0 || at > end { return bad; };
+    ranges = [];
+    if at < end {
+        header = get(rows, at); ns = integerAt(&header, 1);
+        if !wordIs(&header, 0, "name-classes") || size(header) != 2 || !ns.ok || ns.value != end - at - 1 { return bad; };
+        prev = 127;
+        for i in at + 1..end {
+            row = get(rows, i); lo = integerAt(&row, 0); hi = integerAt(&row, 1); mask = integerAt(&row, 2);
+            if size(row) != 3 || !lo.ok || !hi.ok || !mask.ok || lo.value <= prev || hi.value < lo.value || hi.value > 1114111 || mask.value < 0 || mask.value > 7 { return bad; };
+            ranges = push(ranges, InstanceNameRange { lo: lo.value, hi: hi.value, mask: mask.value }); prev = hi.value;
+        };
+    };
+    for i in 0..at {
+        for token in get(rows, i) {
+            if !coversNameText(&ranges, &token.text) { return bad; };
+        };
+    };
+    return Parsed<InstanceNameClasses> { value: InstanceNameClasses { ranges: ranges, pinned: false }, pos: end, ok: true };
+};
