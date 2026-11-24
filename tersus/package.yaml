@@ -46,6 +46,7 @@ extra-source-files:
 - lib/mir/mono/tokens.tersus
 - lib/mir/mono/functions.tersus
 - lib/mir/mono/types.tersus
+- lib/mir/validationmono/*.tersus
 - lib/mir/ownership/ownership.tersus
 - lib/mir/ownership/mono.tersus
 - lib/mir/ownership/common.tersus

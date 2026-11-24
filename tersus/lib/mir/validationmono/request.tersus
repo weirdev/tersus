@@ -1,0 +1,31 @@
+import data::codec::codec { Token };
+import mir::full::full { fullAt, printFull };
+import mir::full::tokens { integerAt, wordIs };
+import mir::link::link { takeRows };
+import mir::link::profile { parseNameProfile };
+import mir::validationmono::mono { monomorphizeForValidation };
+
+fn isValidationMonoRequest(rows: &List<List<Token>>) -> Bool ~ {
+    if size(rows) = 0 { return false; };
+    row = get(rows, 0);
+    return size(row) = 2 && wordIs(row, 0, "pass") && wordIs(row, 1, "validation-mono");
+};
+
+fn validationMonoError(message: &String) -> Bool ~ {
+    message.printError(); "\n".printError(); return false;
+};
+
+fn runValidationMono(rows: &List<List<Token>>) -> Bool ~ {
+    if size(rows) < 2 { return validationMonoError("validation mono could not read MIR3"); };
+    header = get(rows, 1); n = integerAt(header, 1);
+    if size(header) != 2 || !wordIs(header, 0, "program") || !n.ok || n.value < 0 || n.value > size(rows) - 2 {
+        return validationMonoError("validation mono could not read MIR3");
+    };
+    stop = 2 + n.value;
+    profile = parseNameProfile(rows, stop);
+    if !profile.ok { return validationMonoError("validation mono could not read the name classes"); };
+    parsed = fullAt(takeRows(rows, 2, stop));
+    if !parsed.ok { return validationMonoError("validation mono could not read MIR3"); };
+    out = monomorphizeForValidation(&profile.value, parsed.value);
+    printFull(&out); return true;
+};

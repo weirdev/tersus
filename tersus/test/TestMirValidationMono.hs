@@ -1,7 +1,7 @@
 module TestMirValidationMono (testMirValidationMono) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
-import Control.Monad (forM)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
@@ -11,24 +11,23 @@ import Compile (lowerSourceUsing)
 import ElaboratorTool (bootstrapLoader)
 import LibPackage (libPackage)
 import qualified Mir as M
-import MirCopiesNameProfile (nameProfilePrefix)
 import MirData (readLowered, writeProgram)
 import MirHousekeeping (ownedWith, ownedContentKey)
 import MirMono (monomorphizeForValidation)
-import MirPass (programData)
+import MirPass (programData, runPassWith, validationMonoRequest)
 import qualified Native
 import PackageCompile (compileModulesUsing, lowerCompiledPackage)
 import PackageData (Snapshot (..), resolverFromFiles)
 import PreludeSource (toolPackageFiles)
 import Seed (cachedSeed, compilerSnapshotHash)
-import SelfHostedMir (encodePrepared, sourceContainerView)
+import SelfHostedMir (encodePrepared)
 import qualified Syntax as S
 import TestHarness
-import TestMirCopiesParity (compareProgram, empty, function, int, profileReader, template, witnessSource)
+import TestMirCopiesParity (compareProgram, empty, function, int, template, witnessSource)
 import TestMirMono (monoFixtures)
 import Types (Arg (..), FnClause (..), FnClauseToken (..), FnContract (..), Size (..), Type (..), instanceName)
 import Utils
-import ValidatorNative (prepareEncodedTexts, prepareTexts)
+import ValidatorNative (prepareEncodedTexts, prepareTexts, prepareValidationWith)
 
 {-# NOINLINE probeCache #-}
 probeCache :: MVar (Maybe (Result FilePath String))
@@ -43,10 +42,8 @@ probe = modifyMVar probeCache $ \saved -> case saved of
 
 buildProbe :: IO (Result FilePath String)
 buildProbe = do
-    modules <- forM ["driver", "mono", "types"] $ \name -> do
-        source <- readFile ("dev/mir-validation-mono/" ++ name ++ ".tersus")
-        pure (prefix ++ name ++ ".tersus", source)
-    let files = toolPackageFiles ++ modules ++ [(prefix ++ "package.tersus", ""), (prefix ++ "profile.tersus", profileReader)]
+    driver <- readFile "dev/mir-validation-mono/driver.tersus"
+    let files = toolPackageFiles ++ [(prefix ++ "package.tersus", ""), (prefix ++ "driver.tersus", driver)]
         snapshot = Snapshot (resolverFromFiles files) (prefix ++ "driver.tersus") False
         source = compileModulesUsing bootstrapLoader libPackage snapshot `bindResult` lowerCompiledPackage
     key <- nativeCacheKey [ownedContentKey compilerSnapshotHash (show files) []]
@@ -74,11 +71,7 @@ runProbe request = do
     exe <- probe
     case exe of
         Error e -> pure (Error e)
-        Ok path -> Ok <$> Native.runWithInputFull path (profile ++ request)
-  where
-    profile = case nameProfilePrefix [request] of
-        "" -> "name-classes 0\n"
-        text -> text
+        Ok path -> Ok <$> Native.runWithInputFull path (validationMonoRequest request)
 
 compareMono :: M.Program -> (M.Program -> TestResult) -> IO TestResult
 compareMono original check = case programData original of
@@ -106,8 +99,8 @@ proofParity = case lowerFixture source of
     Error e -> pure (Just e)
     Ok lowered -> do
         let raw = lowered{M.progMain = inlineArray (M.progMain lowered)}
-        logical <- check False raw (sourceContainerView raw)
-        physical <- check True raw raw
+        logical <- check False raw
+        physical <- check True raw
         pure (logical `orElse` physical `orElse` testAssertTrue (prepareTexts False raw /= prepareTexts True raw))
   where
     source = unlines
@@ -126,10 +119,19 @@ proofParity = case lowerFixture source of
         rewrite b = b{M.blockStatements = filter keep (M.blockStatements b), M.blockTerminator = case M.blockTerminator b of
             M.Call f' args dest next -> M.Call f' (map operand args) dest next
             term -> term}
-    check physical raw input = compareMono input $ \actual ->
-        let templates = Map.filter (\f -> not (null (M.fnSizeParams f) && null (M.fnTypeParams f))) (M.progFunctions input)
-            prepared p = p{M.progFunctions = Map.union (M.progFunctions p) templates, M.progTypes = Map.union (M.progTypes p) (M.progTypes input)}
-            texts = prepareEncodedTexts . encodePrepared physical . prepared
+    check physical raw = do
+        requestsMade <- newIORef (0 :: Int)
+        let pass request = do
+                modifyIORef' requestsMade (+ 1)
+                mapResult ((,) ()) <$> runPassWith probe "the validation monomorphization pass" request
+        result <- prepareValidationWith pass physical raw
+        count <- readIORef requestsMade
+        pure $ testAssertEq count 1 `orElse` case result of
+            Error e -> Just e
+            Ok (Just (), actual) -> compareProofs physical raw actual
+            Ok (Nothing, _) -> Just "the generic fixture did not select the pass"
+    compareProofs physical raw actual =
+        let texts = prepareEncodedTexts . encodePrepared physical
             expected = prepareTexts physical raw
         in case expected of
             Error e -> Just ("fixture must reach validator serialization: " ++ e)
@@ -191,7 +193,7 @@ runtimeRefusal = case programData empty of
     Ok input -> do
         let boxed = unlines [if "assign 0 use " `isPrefixOf` row then "assign 0 packclosure const int 0 const fn \"thunk\"" else row | row <- lines input]
         result <- runProbe boxed
-        pure (testAssertTrue (boxed /= input) `orElse` testAssertEq result (Ok (ExitSuccess, "2\n", "validation mono probe could not read MIR3\n")))
+        pure (testAssertTrue (boxed /= input) `orElse` testAssertEq result (Ok (ExitSuccess, "1\n", "validation mono could not read MIR3\n")))
 
 witnessParity :: IO TestResult
 witnessParity = case lowerFixture witnessSource of
@@ -253,6 +255,15 @@ testMirValidationMono = TestList "testMirValidationMono"
             `orElse` testAssertEq (Map.lookup "Layer5<Int>" (M.progTypes p)) (Just (M.StructDecl [("perm", TBlock TInt)]))
     , TestCase "live proof input bytes in both logical and physical views" proofParity
     , TestCase "live trait witness input through standalone Full" witnessParity
+    , TestCase "preparation does not serialize or acquire a pass without generic functions" $ do
+        let plain = empty{M.progMain = (M.progMain empty){M.fnReturns = Just (TWord True 7)}}
+            forbidden _ = error "no-work validation invoked the pass" :: IO (Result ((), M.Program) String)
+        result <- prepareValidationWith forbidden False plain
+        pure (testAssertEq result (Ok (Nothing, plain)))
+    , TestCase "a native pass refusal is not replaced with Haskell" $ do
+        let refusal _ = pure (Error "validation mono sentinel") :: IO (Result ((), M.Program) String)
+        result <- prepareValidationWith refusal False callbackAndShortSizes
+        pure (testAssertEq result (Error "validation mono sentinel"))
     , TestCase "boxed annotation refusal wins over malformed main" boxedOrdering
     , TestCase "standalone Full explicitly refuses boxed runtime operands" runtimeRefusal
     , TestCase "raw shared environment rewrites hidden locals and preserves inline shadows" (sharedEnvironment True)

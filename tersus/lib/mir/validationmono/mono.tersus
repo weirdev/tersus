@@ -1,6 +1,6 @@
 import data::codec::codec { Token };
 import mir::full::full { FullBlock, FullFunction, FullProgram, FullRecord };
-import mir::full::environments { baseIndex, functionEntry, replaceEnvBase };
+import mir::full::environments { baseIndex, replaceEnvBase };
 import mir::full::read { fieldsEnd };
 import mir::full::records { EnvEntry, entryAt, envEntries, envStart, orderEntries };
 import mir::full::tokens { appendTokens, decimalText, intToken, name, namesEnd, numberAt, operandEnd, sliceTokens, textAt, tokenLine, typeEnd, word, wordIs };
@@ -10,7 +10,7 @@ import mir::instances::names { InstanceNameClasses, instanceNameAt };
 import mir::mono::functions { MonoKey, MonoCall, MonoRedirect, monoArgumentType, monoFunctionIndex, monoKept, monoLocal, monoRenameLine, monoReturn, monoSection, monoSectionTokens };
 import mir::mono::tokens { MonoBinding, monoBind, monoLookup, monoSubstitute };
 import mir::mono::types { monoFields };
-import validationmonoprobe::types { compareKeys, instanceLabel, namedTypes, symbolic, typeMatch };
+import mir::validationmono::types { compareKeys, instanceLabel, namedTypes, symbolic, typeMatch };
 
 struct ValidationInstance { key: MonoKey, function: FullFunction };
 impl Clone for ValidationInstance { };
@@ -115,7 +115,23 @@ fn redirect(classes: &InstanceNameClasses, f: FullFunction, originals: &List<Ful
     return MonoRedirect { function: FullFunction { blocks: blocks, ..f }, needs: needs };
 };
 
-fn renameEnv(ts: &List<Token>, values: &List<MonoBinding>, names: &List<MonoBinding>, shared: &List<List<Token>>) -> List<Token> ~ {
+fn rewritableEnvBases(shared: &List<List<Token>>) -> List<List<EnvEntry>> ~ {
+    index = [];
+    for table in shared {
+        entries = []; at = 2;
+        for i in 0..numberAt(table, 1) {
+            end = operandEnd(table, at + 1);
+            if !wordIs(table, at + 1, "const") || !wordIs(table, at + 2, "fn") {
+                entries = push(entries, EnvEntry { name: textAt(table, at), value: sliceTokens(table, at + 1, end) });
+            };
+            at = end;
+        };
+        index = push(index, entries);
+    };
+    return index;
+};
+
+fn renameEnv(ts: &List<Token>, values: &List<MonoBinding>, names: &List<MonoBinding>, shared: &List<List<EnvEntry>>) -> List<Token> ~ {
     at = envStart(ts); entries = [];
     if at < 0 || at >= size(ts) { return clone(ts); };
     own = envEntries(ts, at);
@@ -124,8 +140,8 @@ fn renameEnv(ts: &List<Token>, values: &List<MonoBinding>, names: &List<MonoBind
     };
     id = baseIndex(ts);
     if id >= 0 && id < size(shared) {
-        for e in envEntries(get(shared, id), 0) {
-            if !functionEntry(e) && entryAt(&own, &e.name) < 0 {
+        for e in get(shared, id) {
+            if entryAt(&own, &e.name) < 0 {
                 value = monoRenameLine(&e.value, values, names);
                 if value != e.value { entries = push(entries, EnvEntry { name: clone(e.name), value: value }); };
             };
@@ -151,7 +167,7 @@ fn specializedHeader(f: &FullFunction, label: String, kept: &List<String>, remov
     return header;
 };
 
-fn instantiate(classes: &InstanceNameClasses, f: FullFunction, key: &MonoKey, shared: &List<List<Token>>) -> FullFunction ~ {
+fn instantiate(classes: &InstanceNameClasses, f: FullFunction, key: &MonoKey, shared: &List<List<EnvEntry>>) -> FullFunction ~ {
     tail = headerTail(&f.header);
     params = monoSection(&f.header, "params"); typeParams = monoSection(&tail, "typeparams"); sizeParams = monoSection(&tail, "sizeparams");
     kept = []; removed = []; types = []; sizes = []; values = [];
@@ -204,7 +220,7 @@ fn identity(key: &MonoKey) -> String ~ {
     return tokenLine(&ts);
 };
 
-fn build(classes: &InstanceNameClasses, originals: &List<FullFunction>, pending: List<MonoKey>, work: Work, shared: &List<List<Token>>) -> Work ~ {
+fn build(classes: &InstanceNameClasses, originals: &List<FullFunction>, pending: List<MonoKey>, work: Work, shared: &List<List<EnvEntry>>) -> Work ~ {
     i = 0;
     while i < size(pending) [{ affirm i >= 0; affirm i <= size(pending); }] ~ {
         key = clone(get(&pending, i)); id = identity(&key);
@@ -285,6 +301,7 @@ fn monomorphizeForValidation(classes: &InstanceNameClasses, p: FullProgram) -> F
     for f in &p.functions { if generic(f) { anyGeneric = true; }; };
     if !anyGeneric { return p; };
     named = originalNames(classes, &p);
+    shared = rewritableEnvBases(&p.shared);
     main = redirect(classes, clone(p.entry), &p.functions);
     pending = main.needs; plain = [];
     for f in &p.functions {
@@ -296,7 +313,7 @@ fn monomorphizeForValidation(classes: &InstanceNameClasses, p: FullProgram) -> F
     };
     originals = p.functions;
     base = FullProgram { entry: main.function, functions: [], ..p };
-    work = build(classes, &originals, pending, Work { seen: HashSet::new(), copies: [] }, &base.shared);
+    work = build(classes, &originals, pending, Work { seen: HashSet::new(), copies: [] }, &shared);
     for round in 0..4 {
         current = completed(classes, FullProgram { functions: winners(classes, &plain, &work.copies, false), ..clone(base) }, &named);
         pending = [];
@@ -306,7 +323,7 @@ fn monomorphizeForValidation(classes: &InstanceNameClasses, p: FullProgram) -> F
             };
         };
         if size(pending) = 0 { return completed(classes, FullProgram { functions: winners(classes, &plain, &work.copies, true), ..base }, &named); };
-        work = build(classes, &originals, pending, work, &base.shared);
+        work = build(classes, &originals, pending, work, &shared);
     };
     return completed(classes, FullProgram { functions: winners(classes, &plain, &work.copies, true), ..base }, &named);
 };

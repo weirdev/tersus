@@ -302,13 +302,21 @@ the Haskell structural-key precedence.
 Without a generic function, the pass preserves the complete original program.
 Otherwise it removes function specifications and ghosts, completes erased
 instances and drops symbolic declarations; program invariants and the remaining
-generic, bounded and instance metadata survive. The validation specialization
-path in `MirMono` retains its contracts, ghosts and cached named-type map.
+generic, bounded and instance metadata survive. This is separate from
+validation specialization, which keeps contracts and ghost statements.
 
 The emitter's `pass mono` entry reads strict, EOF-exact MIR3. The published
 matching seed runs this pass during cold builds; linking and pruning use
 the native `Link` transport. `TestMirMono` compares canonical raw bytes on raw and
 pre-native-stage inputs, and the current host-validator group proves the pass.
+
+Compiled validation uses the emitter's distinct `pass validation-mono` mode
+on its logical or physical MIR3 view before proof encoding, once for a program
+with generic functions and not at all otherwise. The pass keeps permission
+fields, contracts, and ghosts. The host retains the original generic templates
+for their contracts and uses the same prepared view for proof diagnostics.
+`MirMono` remains the pure reference; `TestMirValidationMono` compares the
+outputs and the exact validator inputs.
 
 ## Moves
 
