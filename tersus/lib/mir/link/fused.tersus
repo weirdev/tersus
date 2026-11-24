@@ -1,7 +1,7 @@
 import data::codec::codec { Token };
-import mir::copies::worklist { makeCopiesWith };
+import mir::copies::worklist { makeCopiesWithPolicy };
 import mir::full::full { FullProgram, fullAt, printFull };
-import mir::full::tokens { integerAt, textAt, wordIs };
+import mir::full::tokens { integerAt, textAt, wordIs, quotedAt };
 import mir::instances::complete { completeInstancesWith };
 import mir::instances::names { InstanceNameClasses };
 import mir::link::merge { LinkUnit, linkPrograms };
@@ -21,12 +21,26 @@ fn runFusedUnits(lines: &List<List<Token>>, at: Int, units: &List<LinkUnit>) -> 
     if !profile.ok { return "the linking request has invalid or incomplete name classes"; };
     linked = linkPrograms(units);
     if !linked.ok { return linked.message; };
-    return fusedLinkReply(&profile.value, units, linked.program);
+    command = get(lines, 1);
+    library = HashSet::new(); recording = false;
+    if size(command) = 4 {
+        count = integerAt(command, 2);
+        if !count.ok || count.value < 0 || count.value > size(*units) || !(wordIs(command, 3, "record") || wordIs(command, 3, "validate")) {
+            return "the linking request has invalid library provenance or recording policy";
+        };
+        for i in 0..count.value {
+            for row in &get(units, i).program.bounded { library = library.insert(clone(row.name)); };
+        };
+        recording = wordIs(command, 3, "record");
+    } else {
+        if linked.program.checked || size(command) != 2 { return "the linking request has no explicit library provenance or recording policy"; };
+        library = originalLibraryNames(units);
+    };
+    return fusedLinkReply(&profile.value, &library, recording, linked.program);
 };
-fn fusedLinkReply(classes: &InstanceNameClasses, units: &List<LinkUnit>, merged: FullProgram) -> String ~ {
+fn fusedLinkReply(classes: &InstanceNameClasses, library: &HashSet<String>, recording: Bool, merged: FullProgram) -> String ~ {
     program = completeInstancesWith(merged, classes);
-    library = originalLibraryNames(units);
-    copies = makeCopiesWith(classes, program, &library);
+    copies = makeCopiesWithPolicy(classes, program, library, recording);
     if copies.error != "" { return "Validation failed: ".concat(&copies.error); };
     printFull(&copies.value);
     return "";
@@ -40,10 +54,16 @@ fn standaloneReply(lines: &List<List<Token>>) -> String ~ {
     parsed = fullAt(&rows);
     if !parsed.ok { return "the copies request contains unreadable MIR3"; };
     library = HashSet::new();
-    for i in 2..size(request) { library = library.insert(textAt(request, i)); };
+    start = 2; recording = false;
+    if wordIs(request, 2, "record") { start = 3; recording = true; };
+    if parsed.value.checked && !recording { return "the copies request has no explicit recording policy"; };
+    for i in start..size(request) {
+        if !quotedAt(request, i) { return "the copies request has an invalid library name"; };
+        library = library.insert(textAt(request, i));
+    };
     profile = parseNameProfile(lines, 2 + n.value);
     if !profile.ok { return "the copies request has invalid or incomplete name classes"; };
-    copies = makeCopiesWith(&profile.value, parsed.value, &library);
+    copies = makeCopiesWithPolicy(&profile.value, parsed.value, &library, recording);
     if copies.error != "" { return copies.error; };
     printFull(&copies.value);
     return "";

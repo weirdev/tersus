@@ -12,7 +12,7 @@ import ValidatorNative (validateCompiled)
 import Pipeline (oneMarkerEach)
 import System.Exit (ExitCode(..))
 
-import Data.List (isPrefixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.ByteString.Char8 as B
 import AstData (readMirPayloadBytes, writeMirPayloadLines)
 import qualified Data.Map.Strict as Map
@@ -23,7 +23,7 @@ import MirCopiesOracle (makeCopies, makeCopiesWith, genericKey, coveredKey)
 import qualified Link as ProductionLink
 import qualified Compile
 import qualified MirLists
-import MirData (readLowered, writeLowered)
+import MirData (readCheckedLowered, readLowered, writeLowered)
 import qualified MirData
 import MirEval (RunEnv (..), Outcome (..), MirValue (..), runProgramEnv)
 import MirPass (programData)
@@ -32,11 +32,12 @@ import ElaboratorTool (bootstrapLoader)
 import LibPackage (libPackage)
 import PackageCompile (compileModulesUsing, lowerCompiledPackage, packageLinkInputs)
 import PackageData (ModuleId (..), Snapshot (..), resolverFromFiles)
-import PreludeSource (toolPackageFiles)
+import PreludeSource (nativeHelperName, toolPackageFiles)
 import Hash (fingerprint)
 import TestMirData (everyRecord, malformedLowered)
 import qualified Syntax as S
-import Types (Type (..), Arg (..), Size (..), BuiltinFunct (..), FnContract (..), FnClause (..), FnClauseToken (..), instanceName, boxedTypeKey, pattern TList, pattern TBox)
+import Types (Type (..), Arg (..), Size (..), BuiltinFunct (..), FnContract (..), FnClause (..), FnClauseToken (..), OwnershipFacts (..), instanceName, boxedTypeKey)
+import TestStorage (pattern TList, pattern TBox)
 import TestHarness
 import Utils
 
@@ -86,6 +87,30 @@ nativeLinkTool = modifyMVar nativeToolBox $ \cached -> case cached of
 actualEmitterBox :: MVar (Maybe FilePath)
 actualEmitterBox = unsafePerformIO (newMVar Nothing)
 
+{-# NOINLINE actualEraserBox #-}
+actualEraserBox :: MVar (Maybe (Result FilePath String))
+actualEraserBox = unsafePerformIO (newMVar Nothing)
+
+-- The ghost eraser built from these sources, as the actual Full pass entry is
+actualEraserTool :: IO (Result FilePath String)
+actualEraserTool = modifyMVar actualEraserBox $ \cached -> case cached of
+    Just tool -> pure (cached, tool)
+    Nothing -> do
+        seed <- cachedSeed
+        result <- case seed of
+            Error e -> pure (Error e)
+            Ok emitter -> do
+                owned <- Housekeeping.ownedToolWith emitter Housekeeping.mirEraseEntry
+                case owned of
+                    Error e -> pure (Error e)
+                    Ok program -> do
+                        let input = MirData.writeProgram program
+                            key = Housekeeping.ownedContentKey seedHash input []
+                        Native.cachedProgram "mir-erase-test" key "the actual ghost eraser" $ \output -> do
+                            ir <- Native.runWithInput emitter input
+                            case ir of Error e -> pure (Error e); Ok text -> Native.buildExecutable output text
+        pure (Just result, result)
+
 actualEmitterTool :: IO (Result FilePath String)
 actualEmitterTool = memoizedTestExecutable actualEmitterBox Housekeeping.cachedSourceEmitter
 
@@ -106,7 +131,8 @@ nativeFull input = do
         Ok executable -> do
             (code, out, errors) <- Native.runWithInputFull executable input
             pure $ case code of
-                ExitSuccess | out /= "1\n" && null errors -> readLowered out
+                -- (a native pass writes its unit with the checked records it was given)
+                ExitSuccess | out /= "1\n" && null errors -> readCheckedLowered out
                 _ | not (null errors) -> Error (reverse (dropWhile (== '\n') (reverse (decodeUtf8 errors))))
                 _ -> Error ("native Link tool did not write a unit: " ++ take 80 out)
 
@@ -161,7 +187,7 @@ realInputChecks = do
         (_, Error e) -> pure (Just e)
         (Ok units, Ok prepared) -> do
             captured <- newIORef Nothing
-            let capture inputs = unsafePerformIO (writeIORef captured (Just inputs) >> pure (ProductionLink.linkPrograms inputs))
+            let capture libraries own = unsafePerformIO (writeIORef captured (Just (libraries ++ own)) >> pure (ProductionLink.linkWithLibraries libraries own))
                 aligned = Housekeeping.eraseGhosts prepared `bindResult` Housekeeping.expandRefWrites `bindResult` MirLists.lowerListsWith capture (Ok units)
             helperProgram <- evaluate aligned
             inputs <- readIORef captured
@@ -170,12 +196,12 @@ realInputChecks = do
                 (_, Nothing) -> pure (Just "the real native lowering never called its helper linker")
                 (Ok native, Just actualUnits) -> do
                     compared <- positiveMerge actualUnits (\p -> firstFailure
-                        [ testAssertTrue (Map.member "listNew" (M.progFunctions p))
-                        , testAssertTrue (not (null [() | f <- M.progMain p : Map.elems (M.progFunctions p), b <- Map.elems (M.fnBlocks f), M.Call (M.Const (M.CFn name)) _ _ _ <- [M.blockTerminator b], name `elem` ["listNew", "listPush"]]))
+                        [ testAssertTrue (Map.member (nativeHelperName "listNew") (M.progFunctions p))
+                        , testAssertTrue (not (null [() | f <- M.progMain p : Map.elems (M.progFunctions p), b <- Map.elems (M.fnBlocks f), M.Call (M.Const (M.CFn name)) _ _ _ <- [M.blockTerminator b], name `elem` map nativeHelperName ["listNew", "listPush"]]))
                         ])
                     pure (firstFailure
-                        [ testAssertTrue (any (\(m, _) -> m == ModuleId "tersuslib" (Just "lists")) actualUnits)
-                        , testAssertTrue (Map.member "listNew" (M.progFunctions native))
+                        [ testAssertTrue (any (\(m, _) -> m == ModuleId "std" (Just "lists")) actualUnits)
+                        , testAssertTrue (Map.member (nativeHelperName "listNew") (M.progFunctions native))
                         , compared
                         ])
             genericResult <- case retainedGenericUnits of
@@ -233,7 +259,7 @@ testLinkNative = TestList "testLinkNative"
                             Ok text -> do
                                 actual <- nativeFull ("pass link\nprune\n" ++ text)
                                 pure (firstFailure
-                                    [ testAssertTrue (any (isPrefixOf "listNew") (Map.keys (M.progFunctions p)))
+                                    [ testAssertTrue (any (isPrefixOf (nativeHelperName "listNew")) (Map.keys (M.progFunctions p)))
                                     , inspect (mapResult M.lowProgram actual) (pruneEffects p)
                                     ])
        , TestCase "native prune keeps ghost expression control-flow references" $ do
@@ -292,6 +318,255 @@ testLinkNative = TestList "testLinkNative"
                             (_, answer, diagnostic) <- Native.runWithInputFull executable input
                             pure (firstFailure [testAssertEq answer "1\n", testAssertEq diagnostic "the input is not the MIR as data\n"])) ["", "\n"]
                         pure (firstFailure (suffix : quotes : legacy))
+       , TestCase "actual emitter Full entry keeps checked protocols and ownership exactly, and refuses malformed ones" $ case programData empty of
+            Error e -> pure (Just e)
+            Ok text -> do
+                tool <- actualEmitterTool
+                case tool of
+                    Error e -> pure (Just e)
+                    Ok executable -> do
+                        let environments input = Native.runWithInputFull executable ("pass link\nenvironments\n" ++ input)
+                            -- (the records come after the declarations and before the functions, in their written order)
+                            withRecords rows = unlines (takeWhile (not . isFunctionLine) (lines text) ++ rows ++ dropWhile (not . isFunctionLine) (lines text))
+                            isFunctionLine l = take 9 l == "function " || take 5 l == "main "
+                            protocols = ["protocol \"Box\" \"std$core$types$Box\"", "protocol \"List\" \"std$core$types$List\""]
+                            positive = "owned \"B\" \"std$core$ownership$Copy\" \"std$core$ownership$Drop\" \"<B as std$core$ownership$Drop>::drop\" \"\" \"\" \"\" \"\""
+                            negative = "owned \"A\" \"\" \"\" \"\" \"\" \"\" \"\" \"\""
+                            checked = withRecords (protocols ++ ["ownership 2", negative, positive])
+                            checkedEmpty = withRecords ["ownership 0"]
+                            refused input = do
+                                (_, out, errors) <- environments input
+                                pure (firstFailure [testAssertEq out "1\n", testAssertEq errors "the linking request contains unreadable MIR3\n"])
+                            kept input = do
+                                (status, out, errors) <- environments input
+                                pure (firstFailure [testAssertEq status ExitSuccess, testAssertEq errors "", testAssertEq out input])
+                        positives <- mapM kept [text, checked, checkedEmpty]
+                        -- (written in canonical order whatever order they are read in)
+                        reordered <- environments (withRecords (reverse protocols ++ ["ownership 2", positive, negative]))
+                        refusals <- mapM refused
+                            [ withRecords ["protocol \"Hash\" \"std$prelude$prelude$Hash\""]
+                            , withRecords (protocols ++ [last protocols])
+                            , withRecords ["protocol \"Box\" \"\""]
+                            , withRecords ["ownership 2", negative]
+                            , withRecords ["ownership 1", negative, positive]
+                            , withRecords [negative]
+                            , withRecords ["ownership 0", "ownership 0"]
+                            , withRecords ["ownership 1", "owned \"A\" \"\" \"std$core$ownership$Drop\" \"\" \"\" \"\" \"\" \"\""]
+                            , withRecords ["ownership 1", "owned \"A\" \"\" \"\" \"\" \"\" \"\" \"\""]
+                            , withRecords ["ownership 0", head protocols]
+                            , withRecords ["ownership 2", negative, negative]
+                            ]
+                        -- (a function with bounds' facts of the types its body names, after its bounded record)
+                        bounded <- case programData empty{M.progBounded = Map.singleton "f" (M.BoundedFn [] [] [] [] [])} of
+                            Error e -> pure (Just e)
+                            Ok boundedText -> do
+                                let withFacts rows = unlines (takeWhile (not . isFunctionLine) (lines boundedText) ++ rows ++ dropWhile (not . isFunctionLine) (lines boundedText))
+                                    facts ty = "boundedfacts \"f\" " ++ ty ++ " \"\" \"\" \"\" \"\" \"\" \"\" \"\""
+                                    copyFact = "boundedfacts \"f\" int \"std$core$ownership$Copy\" \"\" \"\" \"\" \"\" \"\" \"\""
+                                    twoTypes = withFacts [copyFact, facts "bool"]
+                                keptFacts <- kept twoTypes
+                                refusedFacts <- mapM refused
+                                    [ withFacts ["boundedfacts \"g\" int \"\" \"\" \"\" \"\" \"\" \"\" \"\""]
+                                    , withFacts [copyFact, facts "int"]
+                                    , withFacts ["boundedfacts \"f\" int \"\" \"std$core$ownership$Drop\" \"\" \"\" \"\" \"\" \"\""]
+                                    , withFacts ["boundedfacts \"f\" \"int\" \"\" \"\" \"\" \"\" \"\" \"\" \"\""]
+                                    , withFacts ["boundedfacts \"f\" int \"\" \"\" \"\" \"\" \"\" \"\""]
+                                    ]
+                                -- (two units that define one function with bounds have its facts alike)
+                                let units parts = "pass link\nmerge " ++ show (length parts) ++ "\n" ++ concat ["unit \"" ++ pkg ++ "\" none " ++ show (length (lines part)) ++ "\n" ++ part | (pkg, part) <- parts]
+                                (_, factsMerged, factsMergeErrors) <- Native.runWithInputFull executable (units [("a", twoTypes), ("b", twoTypes)])
+                                (_, factsClash, factsClashErrors) <- Native.runWithInputFull executable (units [("a", twoTypes), ("b", withFacts [copyFact])])
+                                pure (firstFailure (keptFacts : refusedFacts ++
+                                    [ firstFailure [testAssertEq factsMergeErrors "", testAssertEq factsMerged twoTypes]
+                                    , firstFailure [testAssertEq factsClash "1\n", testAssertEq factsClashErrors "link error: function with bounds f is defined by both module a and module b with different definitions\n"]
+                                    ]))
+                        -- (merging and pruning keep the checked records: units agree on each provider and each owner's facts,
+                        -- and are all checked or none; specializing does not handle them yet, so it refuses them)
+                        let units parts = "pass link\nmerge " ++ show (length parts) ++ "\n" ++ concat ["unit \"" ++ pkg ++ "\" none " ++ show (length (lines part)) ++ "\n" ++ part | (pkg, part) <- parts]
+                            otherProvider = withRecords ["protocol \"Box\" \"other$Box\"", last protocols, "ownership 2", negative, positive]
+                            otherFacts = withRecords (protocols ++ ["ownership 2", "owned \"A\" \"std$core$ownership$Copy\" \"\" \"\" \"\" \"\" \"\" \"\"", positive])
+                        (_, pruneOut, pruneErrors) <- Native.runWithInputFull executable ("pass link\nprune\n" ++ checked)
+                        (_, mergeOut, mergeErrors) <- Native.runWithInputFull executable (units [("app", checked)])
+                        (_, sameOut, sameErrors) <- Native.runWithInputFull executable (units [("a", checked), ("b", checked)])
+                        (_, providerOut, providerErrors) <- Native.runWithInputFull executable (units [("a", checked), ("b", otherProvider)])
+                        (_, factsOut, factsErrors) <- Native.runWithInputFull executable (units [("a", checked), ("b", otherFacts)])
+                        (_, mixedOut, mixedErrors) <- Native.runWithInputFull executable (units [("a", checked), ("b", text)])
+                        (_, monoOut, monoErrors) <- Native.runWithInputFull executable ("pass mono\n" ++ checked)
+                        pure $ firstFailure (positives ++ refusals ++ [bounded] ++
+                            [ case reordered of (status, out, errors) -> firstFailure [testAssertEq status ExitSuccess, testAssertEq errors "", testAssertEq out checked]
+                            , firstFailure [testAssertEq pruneErrors "", testAssertEq pruneOut checked]
+                            , firstFailure [testAssertEq mergeErrors "", testAssertEq mergeOut checked]
+                            , firstFailure [testAssertEq sameErrors "", testAssertEq sameOut checked]
+                            , firstFailure [testAssertEq providerOut "1\n", testAssertEq providerErrors "link error: provider Box is defined by both module a and module b with different definitions\n"]
+                            , firstFailure [testAssertEq factsOut "1\n", testAssertEq factsErrors "link error: ownership facts of a type A is defined by both module a and module b with different definitions\n"]
+                            , firstFailure [testAssertEq mixedOut "1\n", testAssertEq mixedErrors "link error: some modules have checked ownership facts and others do not\n"]
+                            -- (a program with nothing to specialize is given back as it is, its checked records with it)
+                            , firstFailure [testAssertEq monoErrors "", testAssertEq monoOut checked]
+                            ])
+       , TestCase "actual emitter prune keeps the functions a kept type's checked facts name, and no others" $ do
+            let owner = M.StructDecl [("n", TInt)]
+                mainFn = (function "" 0){M.fnLocals = Map.fromList [(M.Local 0, M.LocalDecl TInt Nothing), (M.Local 1, M.LocalDecl (TNamed "T" []) Nothing)]}
+                program = empty{M.progTypes = Map.singleton "T" owner, M.progFunctions = Map.fromList [("dropT", function "dropT" 1), ("unused", function "unused" 2)], M.progMain = mainFn}
+            case programData program of
+                Error e -> pure (Just e)
+                Ok text -> do
+                    tool <- actualEmitterTool
+                    case tool of
+                        Error e -> pure (Just e)
+                        Ok executable -> do
+                            let isFunctionLine l = take 9 l == "function " || take 5 l == "main "
+                                facts = unlines (takeWhile (not . isFunctionLine) (lines text) ++ ["ownership 1", "owned \"T\" \"\" \"std$core$ownership$Drop\" \"dropT\" \"\" \"\" \"\" \"\""] ++ dropWhile (not . isFunctionLine) (lines text))
+                                functionsOf out = [takeWhile (/= ' ') (drop 9 l) | l <- lines out, take 9 l == "function "]
+                            (_, plain, plainErrors) <- Native.runWithInputFull executable ("pass link\nprune\n" ++ text)
+                            (_, checked, checkedErrors) <- Native.runWithInputFull executable ("pass link\nprune\n" ++ facts)
+                            pure $ firstFailure
+                                [ testAssertEq plainErrors "", testAssertEq (functionsOf plain) []
+                                , testAssertEq checkedErrors "", testAssertEq (functionsOf checked) ["\"dropT\""]
+                                , testAssertTrue ("owned \"T\"" `isInfixOf` checked)
+                                ]
+       , TestCase "actual emitter prune keeps the native List images of Boxes of arrays and the List instances of list constants" $ do
+            let decl = M.StructDecl [("n", TInt)]
+                -- (the storage List and Box are L and B, as the checked protocols name them)
+                withStorage text = unlines (takeWhile (not . recordsEnd) (lines text) ++ ["protocol \"Box\" \"B\"", "protocol \"List\" \"L\""] ++ dropWhile (not . recordsEnd) (lines text))
+                recordsEnd l = any (`isPrefixOf` l) ["shared ", "function ", "main "]
+                typesOf out = [takeWhile (/= '"') (drop 8 l) | l <- lines out, take 8 l == "struct \""]
+                withMain locals stmts = empty
+                    { M.progTypes = Map.fromList [("L<Int>", decl), ("L<Bool>", decl)]
+                    , M.progMain = (function "" 0){M.fnLocals = Map.fromList ((M.Local 0, M.LocalDecl TInt Nothing) : locals), M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock stmts M.Return)}
+                    }
+                -- (a Box of an array is natively a List of its elements: L<Int>, not L<Bool>)
+                boxed = withMain [(M.Local 1, M.LocalDecl (TNamed "B" [ArgType (TArrayOf TInt SizeAny)]) Nothing)] []
+                -- (a list constant without an L local keeps its element List only when List is bound: L<Int>, not L<Bool>)
+                constant = withMain [] [M.Assign (M.Local 0) (M.ListOp M.Length [M.Const (M.CList [M.CInt 1])])]
+                -- (an empty list constant takes the List the place it is put in demands: L<Bool>, not L<Int>)
+                emptyConstant = withMain [(M.Local 1, M.LocalDecl TBool Nothing)] [M.Assign (M.Local 1) (M.ListOp M.First [M.Const (M.CList [])])]
+            tool <- actualEmitterTool
+            case (tool, programData boxed, programData constant, programData emptyConstant) of
+                (Error e, _, _, _) -> pure (Just e)
+                (_, Error e, _, _) -> pure (Just e)
+                (_, _, Error e, _) -> pure (Just e)
+                (_, _, _, Error e) -> pure (Just e)
+                (Ok executable, Ok boxedText, Ok constantText, Ok emptyText) -> do
+                    let prune text = do
+                            (_, out, errors) <- Native.runWithInputFull executable ("pass link\nprune\n" ++ text)
+                            pure (errors, typesOf out)
+                    results <- mapM prune [boxedText, withStorage boxedText, constantText, withStorage constantText, emptyText, withStorage emptyText]
+                    -- (without the checked protocols the program names no storage, and none of the List instances are kept)
+                    pure $ testAssertEq results [("", []), ("", ["L<Int>"]), ("", []), ("", ["L<Int>"]), ("", []), ("", ["L<Bool>"])]
+       , TestCase "host ownership keeps the checked receipt's facts of a held instance's copies and of an instance nothing holds" $ do
+            let w t = TNamed "W" [ArgType t]
+                v t = TNamed "V" [ArgType t]
+                local n t = (M.Local n, M.LocalDecl t Nothing)
+                template n self = (function n 0){M.fnParams = [M.Local 1], M.fnTypeParams = ["T"], M.fnLocals = Map.fromList [local 0 TInt, local 1 self], M.fnBorrowed = [M.Local 1 | n == "cloneW"]}
+                mainFn = (function "" 0){M.fnLocals = Map.fromList [local 0 TInt, local 1 (w TInt)], M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [M.Assign (M.Local 1) (M.MakeData "W<Int>" [("x", M.Const (M.CInt 1))]), M.Assign (M.Local 0) (M.Use (M.Const (M.CInt 0)))] M.Return)}
+                facts = Map.fromList
+                    [ ("W<Int>", OwnershipFacts Nothing (Just ("D", "dropW")) (Just ("C", "cloneW")) Nothing)
+                    , ("V<Bool>", OwnershipFacts Nothing (Just ("D", "dropV")) Nothing Nothing)
+                    ]
+                program = empty
+                    { M.progGenerics = Map.fromList [("W", (["T"], [("x", TParam "T")])), ("V", (["T"], [("x", TParam "T")]))]
+                    , M.progFunctions = Map.fromList [("dropW", template "dropW" (w (TParam "T"))), ("cloneW", template "cloneW" (TRef (w (TParam "T")))), ("dropV", template "dropV" (v (TParam "T")))]
+                    , M.progMain = mainFn
+                    , M.progOwnership = Just facts
+                    }
+            pure $ case Housekeeping.insertOwnership program of
+                Error e -> Just e
+                Ok owned -> firstFailure
+                    -- (the held instance's facts name its copies; V<Bool>'s row, which nothing holds, is the receipt's as it was)
+                    [ testAssertEq (M.progOwnership owned) (Just (Map.fromList
+                        [ ("W<Int>", OwnershipFacts Nothing (Just ("D", "dropW<Int>")) (Just ("C", "cloneW<Int>")) Nothing)
+                        , ("V<Bool>", OwnershipFacts Nothing (Just ("D", "dropV")) Nothing Nothing)
+                        ]))
+                    , testAssertEq (Map.keys (M.progFunctions owned)) ["cloneW<Int>", "dropW<Int>"]
+                    , testAssertTrue (not (null [() | M.BasicBlock stmts _ <- Map.elems (M.fnBlocks (M.progMain owned)), M.Drop (M.Local 1) <- stmts]))
+                    ]
+       , TestCase "actual emitter Mono and fused ownership make and free the copies a held instance's checked facts select" $ do
+            let w t = TNamed "W" [ArgType t]
+                v t = TNamed "V" [ArgType t]
+                local n t = (M.Local n, M.LocalDecl t Nothing)
+                -- (dropW and cloneW are no type's by their names: only the facts select them)
+                template n self = (function n 0){M.fnParams = [M.Local 1], M.fnTypeParams = ["T"], M.fnLocals = Map.fromList [local 0 TInt, local 1 self], M.fnBorrowed = [M.Local 1 | n == "cloneW"]}
+                mainFn = (function "" 0){M.fnLocals = Map.fromList [local 0 TInt, local 1 (w TInt)], M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [M.Assign (M.Local 1) (M.MakeData "W<Int>" [("x", M.Const (M.CInt 1))]), M.Assign (M.Local 0) (M.Use (M.Const (M.CInt 0)))] M.Return)}
+                program = empty
+                    { M.progGenerics = Map.fromList [("W", (["T"], [("x", TParam "T")])), ("V", (["T"], [("x", TParam "T")]))]
+                    , M.progFunctions = Map.fromList [("dropW", template "dropW" (w (TParam "T"))), ("cloneW", template "cloneW" (TRef (w (TParam "T")))), ("dropV", template "dropV" (v (TParam "T")))]
+                    , M.progMain = mainFn
+                    }
+                isFunctionLine l = take 9 l == "function " || take 5 l == "main "
+                recordsEnd l = isFunctionLine l || take 7 l == "shared "
+                withRows rows text = unlines (takeWhile (not . recordsEnd) (lines text) ++ rows ++ dropWhile (not . recordsEnd) (lines text))
+                wRow = "owned \"W<Int>\" \"\" \"D\" \"dropW\" \"C\" \"cloneW\" \"\" \"\""
+                vRow = "owned \"V<Bool>\" \"\" \"D\" \"dropV\" \"\" \"\" \"\" \"\""
+                functionsOf out = [takeWhile (/= ' ') (drop 9 l) | l <- lines out, take 9 l == "function "]
+                -- (the owned MIR version 2 the fused tool writes after its MIR version 3 receipt)
+                ownedPart out = dropWhile (/= "tersus-mir 2") (lines out)
+                -- (a declared type whose name sorts after a held instance's: the owned rows come in the order the declarations do)
+                withZ = program{M.progTypes = Map.singleton "Z" (M.StructDecl [("n", TInt)])}
+                zRow = "owned \"Z\" \"\" \"\" \"\" \"\" \"\" \"\" \"\""
+                -- (a tuple's declared struct has no facts of its own; a near miss of its name is an ordinary struct, which has to)
+                withTuple n = program{M.progTypes = Map.singleton n (M.StructDecl [("0", TInt), ("1", TInt)])}
+            case (programData program, programData (withTuple "Tuple2"), programData (withTuple "Tuple02"), programData withZ) of
+                (Error e, _, _, _) -> pure (Just e)
+                (_, Error e, _, _) -> pure (Just e)
+                (_, _, Error e, _) -> pure (Just e)
+                (_, _, _, Error e) -> pure (Just e)
+                (Ok text, Ok tupleText, Ok nearTupleText, Ok zText) -> do
+                    tool <- actualEmitterTool
+                    case tool of
+                        Error e -> pure (Just e)
+                        Ok executable -> do
+                            let checked = withRows ["ownership 2", vRow, wRow] text
+                            (tupleStatus, _, tupleErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 2", vRow, wRow] tupleText)
+                            (_, nearTuple, nearTupleErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 2", vRow, wRow] nearTupleText)
+                            (zStatus, zFused, zErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 3", vRow, wRow, zRow] zText)
+                            let zOwned = ownedPart zFused
+                                -- (the declarations and their rows, as the owned program writes them)
+                                zRecords = [l | l <- zOwned, any (`isPrefixOf` l) ["struct ", "enum ", "storage ", "ownership ", "owned "]]
+                            (_, mono, monoErrors) <- Native.runWithInputFull executable ("pass mono\n" ++ checked)
+                            (fusedStatus, fused, fusedErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ checked)
+                            (_, missing, missingErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 1", vRow] text)
+                            let owned = ownedPart fused
+                                ownedMain = dropWhile (\l -> take 5 l /= "main ") owned
+                            -- (the owned program, its ghosts erased by the eraser, is what the emitter makes native code of: the
+                            -- drop it frees the held value with is the copy the facts name)
+                            eraser <- actualEraserTool
+                            (erasedStatus, erased, eraserErrors) <- case eraser of
+                                Error e -> pure (ExitFailure 1, "", e)
+                                Ok eraserExe -> Native.runWithInputFull eraserExe (unlines owned)
+                            (_, llvm, llvmErrors) <- Native.runWithInputFull executable erased
+                            (_, nearMiss, nearMissErrors) <- Native.runWithInputFull executable ("pass mono-ownership\n" ++ withRows ["ownership 2", "owned \"W<Bool>\" \"\" \"D\" \"dropW\" \"\" \"\" \"\" \"\"", vRow] text)
+                            pure $ firstFailure
+                                [ testAssertEq monoErrors ""
+                                -- (the held instance's facts make its copies and name them; V<Bool> is held by nothing, and makes none)
+                                , testAssertEq (functionsOf mono) ["\"cloneW<Int>\"", "\"dropW<Int>\""]
+                                , testAssertTrue ("owned \"W<Int>\" \"\" \"D\" \"dropW<Int>\" \"C\" \"cloneW<Int>\" \"\" \"\"" `elem` lines mono)
+                                , testAssertTrue (vRow `elem` lines mono)
+                                , testAssertTrue ("ownership 2" `elem` lines mono)
+                                , testAssertEq fusedErrors "", testAssertEq fusedStatus ExitSuccess
+                                -- (the receipt is the Mono output, and the owned program has the declared instance's facts)
+                                , testAssertEq (unlines (takeWhile (/= "tersus-mir 2") (lines fused))) mono
+                                , testAssertTrue ("ownership 1" `elem` owned)
+                                , testAssertTrue ("owned \"W<Int>\" \"\" \"D\" \"dropW<Int>\" \"C\" \"cloneW<Int>\" \"\" \"\"" `elem` owned)
+                                -- (and frees the held value with the copy the facts name)
+                                , testAssertTrue ("drop 1" `elem` ownedMain)
+                                , testAssertEq eraserErrors "", testAssertEq erasedStatus ExitSuccess
+                                , testAssertEq (take 1 (lines erased)) ["tersus-mir 1"]
+                                , testAssertTrue ("owned \"W<Int>\" \"\" \"D\" \"dropW<Int>\" \"C\" \"cloneW<Int>\" \"\" \"\"" `elem` lines erased)
+                                , testAssertEq llvmErrors ""
+                                , testAssertTrue (any ("call i64 @\"fn.dropW<Int>\"" `isInfixOf`) (lines llvm))
+                                , firstFailure [testAssertEq missing "1\n", testAssertEq missingErrors "Type error: W<Int> has no checked ownership facts\n"]
+                                , firstFailure [testAssertEq tupleErrors "", testAssertEq tupleStatus ExitSuccess]
+                                , firstFailure
+                                    [ testAssertEq zErrors "", testAssertEq zStatus ExitSuccess
+                                    , testAssertEq zRecords
+                                        [ "struct \"W<Int>\" 1 \"x\" int", "struct \"Z\" 1 \"n\" int", "storage \"\" \"\"", "ownership 2"
+                                        , "owned \"W<Int>\" \"\" \"D\" \"dropW<Int>\" \"C\" \"cloneW<Int>\" \"\" \"\"", zRow ]
+                                    , testAssertTrue ("drop 1" `elem` dropWhile (\l -> take 5 l /= "main ") zOwned)
+                                    ]
+                                , firstFailure [testAssertEq nearTuple "1\n", testAssertEq nearTupleErrors "Type error: Tuple02 has no checked ownership facts\n"]
+                                -- (facts of another instance of the same struct are not the held instance's)
+                                , firstFailure [testAssertEq nearMiss "1\n", testAssertEq nearMissErrors "Type error: W<Int> has no checked ownership facts\n"]
+                                ]
        , TestCase "dependency main ghosts follow numeric block order despite wire permutation" $ do
             let dep = empty{M.progMain = (M.progMain empty){M.fnBlocks = Map.fromList
                     [(M.BlockId 2, M.BasicBlock [M.Ghost Map.empty (M.GhostPosition 2 1)] M.Return)
@@ -337,7 +612,7 @@ responseProgram :: String -> Result M.Program String
 responseProgram input = runReference input `bindResult` \out ->
     if outValue out == Just (MInt 1)
         then Error (reverse (dropWhile (== '\n') (reverse (decodeUtf8 (outStderr out)))))
-        else mapResult M.lowProgram (readLowered (outStdout out))
+        else mapResult M.lowProgram (readCheckedLowered (outStdout out))
 
 roundTrip :: M.Lowered -> TestResult
 roundTrip raw = inspect (writeLowered raw) $ \input -> inspect (runReference input) $ \out ->
@@ -523,7 +798,8 @@ boxedSpecializations = case programData fixture of
 
 libraryBoundedRetention :: IO TestResult
 libraryBoundedRetention = do
-    actual <- evaluate (ProductionLink.linkPrograms units)
+    -- (the production linker is told which units are the compiler's libraries)
+    actual <- evaluate (ProductionLink.linkWithLibraries [u | u@(ModuleId "tersuslib" _, _) <- units] [u | u@(m, _) <- units, modulePackage m /= "tersuslib"])
     reference <- evaluate (linked units)
     native <- nativeMerge units
     let check p = firstFailure
@@ -540,7 +816,7 @@ libraryBoundedRetention = do
     templates = ["libraryUsed", "libraryUnused"]
     library = empty
         { M.progFunctions = Map.fromList [(name, (function name 1){M.fnTypeParams = ["T"]}) | name <- templates]
-        , M.progBounded = Map.fromList [(name, M.BoundedFn [] [] [] []) | name <- templates]
+        , M.progBounded = Map.fromList [(name, M.BoundedFn [] [] [] [] []) | name <- templates]
         }
     root = empty
         { M.progInstances = Map.singleton "libraryUsed[Int]" ("libraryUsed", [ArgType TInt])
@@ -579,7 +855,7 @@ firstFailure (Just e : _) = Just e
 firstFailure (Nothing : rest) = firstFailure rest
 
 empty :: M.Program
-empty = M.Program Map.empty Map.empty (function "" 0){M.fnReturns = Nothing, M.fnLocals = Map.empty, M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)} Map.empty Map.empty Map.empty Map.empty Map.empty
+empty = M.Program Map.empty Map.empty (function "" 0){M.fnReturns = Nothing, M.fnLocals = Map.empty, M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)} Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Nothing
 
 function :: String -> Integer -> M.Function
 function n value = M.Function n [] (Just TInt) (Map.singleton (M.Local 0) (M.LocalDecl TInt Nothing))
@@ -621,7 +897,7 @@ linkCases =
     , ("conditional ghost expression branch collision", [(unitA, ghostFunction (S.IfExpr (S.Var "c") (S.Var "a") (S.Var "b"))), (unitB, ghostFunction (S.IfExpr (S.Var "c") (S.Var "a") (S.Var "other")))], Left "link error: function f is defined by both module app::a and module app::b with different definitions")
     , ("block ghost expression statement collision", [(unitA, ghostFunction blockExpression), (unitB, ghostFunction (S.BlockExpr [] (S.Var "blockResultRef")))], Left "link error: function f is defined by both module app::a and module app::b with different definitions")
     , ("ascription type child collision", [(unitA, ghostFunction (S.Ascribed (S.Var "x") TInt)), (unitB, ghostFunction (S.Ascribed (S.Var "x") TBool))], Left "link error: function f is defined by both module app::a and module app::b with different definitions")
-    , ("identical ascriptions of a recursive type", [(unitA, ghostFunction (S.Ascribed (S.Var "x") (TBox (TList TInt)))), (unitB, ghostFunction (S.Ascribed (S.Var "x") (TBox (TList TInt))))], Right "c257d40edabc1cbe")
+    , ("identical ascriptions of a recursive type", [(unitA, ghostFunction (S.Ascribed (S.Var "x") (TBox (TList TInt)))), (unitB, ghostFunction (S.Ascribed (S.Var "x") (TBox (TList TInt))))], Right "240ae5a125a2d104")
     , ("root spec and loop environments remain untouched", [(unitA, program [("extra", 1)]), (unitB, environments)], Right "659454d16d459ffb")
     , ("the complete full metadata fixture", [(unitA, M.lowProgram everyRecord)], Right "85792b8f6a7902a6")
     ]
@@ -629,7 +905,7 @@ linkCases =
     withType ty p = p{M.progTypes = Map.singleton "T" (M.StructDecl [("x", ty)])}
     withGeneric n = empty{M.progGenerics = Map.singleton "T" ([n], [("x", TArrayOf TInt (SizeParam n))])}
     withInvariant b = empty{M.progInvariants = Map.singleton "T" [S.ProofAssert (S.CTerm (S.VBool b))]}
-    withBounded n = empty{M.progBounded = Map.singleton "f" (M.BoundedFn [n] [] [] [])}
+    withBounded n = empty{M.progBounded = Map.singleton "f" (M.BoundedFn [n] [] [] [] [])}
     withInstance ty = empty{M.progInstances = Map.singleton "copy" ("f", [ArgType ty])}
     externContract b = (program [("extern package$puts", 1)]){M.progFunctions = Map.singleton "extern package$puts" (function "extern package$puts" 1){M.fnSpec = M.emptySpec{M.specRequires = [S.ProofAssert (S.CTerm (S.VBool b))]}}}
     ghostUnit n = withMain empty [M.Ghost Map.empty (M.GhostPosition n 1), M.Ghost Map.empty (M.GhostValidation (S.ProofAssert (S.CTerm (S.VInt (toInteger n)))))] M.Return
@@ -893,7 +1169,7 @@ testLink = TestList "testLink"
     , testCase "signed local overflow refuses without wrapping" (wireMutation everyRecord (replaceFirst (isPrefixOf "local 0 ") (const "local 9223372036854775808 none int")))
     , testCase "AST signed numbers do not widen" (wireMutation everyRecord (replaceFirst (== "VBool true") (const "Mark 9223372036854775808 0")))
     , testCase "integer payload spelling has semantic equality" (rawSemanticControl (valueProgram (S.VInt 1)) (replaceFirst (isPrefixOf "NamePart \"1\" ") (replaceText "\"1\"" "\"01\"")))
-    , testCase "recursive List/Box aliases have semantic equality" (rawSemanticControl (valueProgram (S.VFunct [] [] [] (S.BuiltinFunct (Ctor "Holder" [ArgType (TBox (TList (TList TInt)))] ["value"])) [])) (map (\line -> if "Type " `isPrefixOf` line then replaceText "named \"List\" 1 type " "list " (replaceText "named \"Box\" 1 type " "box " line) else line)))
+    , testCase "recursive List/Box aliases have semantic equality" (rawSemanticControl (valueProgram (S.VFunct [] [] [] (S.BuiltinFunct (Ctor "Holder" [ArgType (TNamed "Box" [ArgType (TNamed "List" [ArgType (TNamed "List" [ArgType TInt])])])] ["value"])) [])) (map (\line -> if "Type " `isPrefixOf` line then replaceText "named \"List\" 1 type " "list " (replaceText "named \"Box\" 1 type " "box " line) else line)))
     , testCase "builtin metadata is retained while builtin equality ignores it" builtinMetadataControl
     , testCase "unknown binary operation refuses" (wireMutation (asUnit (program [("f", 1)])) (replaceFirst (isPrefixOf "assign 0 ") (const "assign 0 binary bogus const int 1 const int 2")))
     , testCase "truncated conditional expression payload refuses" (wireMutation (asUnit (ghostFunction (S.IfExpr (S.Var "f") (S.Var "f") (S.Var "f")))) (replaceFirst (isPrefixOf "IfExpr ") (const "IfExpr 0 1")))

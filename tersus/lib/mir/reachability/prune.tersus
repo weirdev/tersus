@@ -1,0 +1,628 @@
+import data::codec::codec { Token, Type, catStrings, typeAt };
+import data::ast::ast { AstNode, AstProof, AstExpression, AstValue, AstValidation, AstRule, AstStatement };
+import data::reader::reader { nodeKind, nodeRefs, nameValue };
+import mir::full::full { FullProgram, FullFunction, FullRecord, FullBlock, rowIndex };
+import mir::full::tokens { appendTokens, argEnd, constantEnd, integerAt, intsEnd, intToken, name, numberAt, operandEnd, namesEnd, runtimeRefs, sizeEnd, sliceTokens, stepsEnd, textAt, typeEnd, wordIs, word, quotedAt };
+import mir::full::records { nodeAt, statementAt, envStart, envEnd, envEntries, envTokens, replaceEnv, EnvEntry };
+import mir::full::environments { replaceEnvBase };
+
+fn listIds(nodes: &List<AstNode>, root: Int, kind: Int) -> List<Int> ~ {
+    out = []; at = root;
+    while at >= 0 && at < size(nodes) [{ }] ~ {
+        n = nodeAt(nodes, at); if nodeKind(&n) != kind { return out; };
+        refs = nodeRefs(&n); if size(refs) != 2 { return out; };
+        out = push(out, get(&refs, 0)); at = get(&refs, 1);
+    };
+    return out;
+};
+fn addTexts(a: List<String>, b: &List<String>) -> List<String> ~ { for n in b { a = push(a, clone(n)); }; return a; };
+fn proofRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    n = nodeAt(nodes, id); if !(n is AstNode::Proof) { return []; }; p = (n as AstNode::Proof).value;
+    if p is AstProof::ATerm { return push([], nameValue(nodes, (p as AstProof::ATerm).n)); };
+    if p is AstProof::CTerm { return valueFnRef(nodes, (p as AstProof::CTerm).v); };
+    if p is AstProof::FApp { v = p as AstProof::FApp; return addTexts(proofRefs(nodes, v.f), proofListRefs(nodes, v.xs)); };
+    if p is AstProof::Forall { v = p as AstProof::Forall; return addTexts(proofListRefs(nodes, v.gs), proofRefs(nodes, v.b)); };
+    return [];
+};
+fn proofListRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ { out = []; for p in listIds(nodes, id, 27) { out = addTexts(out, proofRefs(nodes, p)); }; return out; };
+fn valueFnRef(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    n = nodeAt(nodes, id); if !(n is AstNode::Value) { return []; }; v = (n as AstNode::Value).value;
+    if v is AstValue::VFnRef { return push([], nameValue(nodes, (v as AstValue::VFnRef).n)); }; return [];
+};
+fn exprRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    n = nodeAt(nodes, id); if !(n is AstNode::Expression) { return []; }; e = (n as AstNode::Expression).value;
+    if e is AstExpression::Var { return push([], nameValue(nodes, (e as AstExpression::Var).n)); };
+    if e is AstExpression::Val { return valueFnRef(nodes, (e as AstExpression::Val).v); };
+    if e is AstExpression::IfExpr {
+        c = e as AstExpression::IfExpr;
+        return addTexts(addTexts(exprRefs(nodes, c.c), exprRefs(nodes, c.a)), exprRefs(nodes, c.b));
+    };
+    if e is AstExpression::BlockExpr {
+        b = e as AstExpression::BlockExpr;
+        return addTexts(statementsRefs(nodes, b.xs), exprRefs(nodes, b.e));
+    };
+    // An ascription's second child is the type it is read at, not an expression.
+    if e is AstExpression::Ascribed { return exprRefs(nodes, (e as AstExpression::Ascribed).e); };
+    v = e as AstExpression::F; out = exprRefs(nodes, v.f); for a in listIds(nodes, v.xs, 25) { out = addTexts(out, exprRefs(nodes, a)); }; return out;
+};
+fn statementsRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    out = []; for s in listIds(nodes, id, 24) { out = addTexts(out, statementRefs(nodes, s)); }; return out;
+};
+fn statementRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    s = statementAt(nodes, id);
+    if s is AstStatement::Assign { return exprRefs(nodes, (s as AstStatement::Assign).e); };
+    if s is AstStatement::AssignDeref { v = s as AstStatement::AssignDeref; return addTexts(exprRefs(nodes, v.a), exprRefs(nodes, v.b)); };
+    if s is AstStatement::Let { return exprRefs(nodes, (s as AstStatement::Let).e); };
+    if s is AstStatement::Return { return exprRefs(nodes, (s as AstStatement::Return).e); };
+    if s is AstStatement::ValidationStatement { return validationRefs(nodes, (s as AstStatement::ValidationStatement).v, true); };
+    if s is AstStatement::Block { return statementsRefs(nodes, (s as AstStatement::Block).xs); };
+    if s is AstStatement::If {
+        v = s as AstStatement::If;
+        return addTexts(addTexts(exprRefs(nodes, v.e), statementsRefs(nodes, v.a)), statementsRefs(nodes, v.b));
+    };
+    if s is AstStatement::While {
+        v = s as AstStatement::While;
+        return addTexts(addTexts(exprRefs(nodes, v.e), validationsRefs(nodes, v.vs, true)), statementsRefs(nodes, v.xs));
+    };
+    if s is AstStatement::PackLoop {
+        v = s as AstStatement::PackLoop;
+        return addTexts(addTexts(addTexts(exprRefs(nodes, v.lo), exprRefs(nodes, v.hi)), validationsRefs(nodes, v.inv, true)), statementsRefs(nodes, v.xs));
+    };
+    if s is AstStatement::AxiomDef || s is AstStatement::ProofDef { return payloadRefs(nodes, id, true); };
+    return [];
+};
+fn ruleRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    n = nodeAt(nodes, id); if !(n is AstNode::Rule) { return []; }; r = (n as AstNode::Rule).value;
+    if r is AstRule::UserRewrite { return proofListRefs(nodes, (r as AstRule::UserRewrite).xs); };
+    if r is AstRule::Refl { return proofRefs(nodes, (r as AstRule::Refl).p); };
+    if r is AstRule::CheckGtZero { return proofRefs(nodes, (r as AstRule::CheckGtZero).p); };
+    if r is AstRule::CheckRel { return proofRefs(nodes, (r as AstRule::CheckRel).p); };
+    return [];
+};
+fn validationRefs(nodes: &List<AstNode>, id: Int, full: Bool) -> List<String> ~ {
+    n = nodeAt(nodes, id); if !(n is AstNode::Validation) { return []; }; v = (n as AstNode::Validation).value;
+    if v is AstValidation::ProofAssert { return proofRefs(nodes, (v as AstValidation::ProofAssert).p); };
+    if v is AstValidation::Assume { return proofRefs(nodes, (v as AstValidation::Assume).p); };
+    if full {
+        if v is AstValidation::AssignProofVar { return exprRefs(nodes, (v as AstValidation::AssignProofVar).e); };
+        if v is AstValidation::Rewrite { return ruleRefs(nodes, (v as AstValidation::Rewrite).r); };
+    };
+    return [];
+};
+fn validationsRefs(nodes: &List<AstNode>, id: Int, full: Bool) -> List<String> ~ { out = []; for v in listIds(nodes, id, 26) { out = addTexts(out, validationRefs(nodes, v, full)); }; return out; };
+fn payloadRefs(nodes: &List<AstNode>, id: Int, full: Bool) -> List<String> ~ {
+    s = statementAt(nodes, id);
+    if s is AstStatement::ValidationStatement { return validationRefs(nodes, (s as AstStatement::ValidationStatement).v, full); };
+    if s is AstStatement::Block {
+        out = []; for v in listIds(nodes, (s as AstStatement::Block).xs, 24) { inner = statementAt(nodes, v); if inner is AstStatement::ValidationStatement { out = addTexts(out, validationRefs(nodes, (inner as AstStatement::ValidationStatement).v, full)); }; }; return out;
+    };
+    if s is AstStatement::AxiomDef { v = s as AstStatement::AxiomDef; return addTexts(validationsRefs(nodes, v.ins, true), validationsRefs(nodes, v.outs, true)); };
+    if s is AstStatement::ProofDef { v = s as AstStatement::ProofDef; return addTexts(addTexts(validationsRefs(nodes, v.ins, true), validationsRefs(nodes, v.outs, true)), validationsRefs(nodes, v.body, true)); };
+    return [];
+};
+fn emptyIndexMap() -> HashMap<String, Int> ~ { return HashMap::new(); };
+fn emptyTextMap() -> HashMap<String, String> ~ { return HashMap::new(); };
+fn emptyListMap() -> HashMap<String, List<String>> ~ { return HashMap::new(); };
+struct ReachIndex {
+    fns: HashMap<String, Int>,
+    types: HashMap<String, Int>,
+    invariants: HashMap<String, Int>,
+    ownership: HashMap<String, Int>,
+    ownerByCtor: HashMap<String, String>,
+    exactImpls: HashMap<String, List<String>>,
+    baseImpls: HashMap<String, List<String>>,
+    listRole: String,
+    boxRole: String
+};
+fn buildReachIndex(p: &FullProgram) -> ReachIndex ~ {
+    fns = emptyIndexMap(); exactImpls = emptyListMap(); baseImpls = emptyListMap();
+    i = 0;
+    for f in &p.functions {
+        if size(f.header) > 1 {
+            n = textAt(&f.header, 1);
+            if !HashMap::contains(&fns, &n) { fns = HashMap::insert(fns, clone(n), i); };
+            if size(n.bytes) > 0 && get(n.bytes, 0) = toByte(60) {
+                pos = textFrom(&n, " as ", 1);
+                if pos >= 1 && pos <= size(n.bytes) {
+                    owner = n.slice(1, pos);
+                    prev = HashMap::lookup(&exactImpls, &owner, []);
+                    exactImpls = HashMap::insert(exactImpls, clone(owner), push(prev, clone(n)));
+                    if !copyName(&n) {
+                        prevBase = HashMap::lookup(&baseImpls, &owner, []);
+                        baseImpls = HashMap::insert(baseImpls, clone(owner), push(prevBase, clone(n)));
+                    };
+                };
+            };
+        };
+        i = i + 1;
+    };
+    types = emptyIndexMap(); ownerByCtor = emptyTextMap();
+    i = 0;
+    for r in &p.types {
+        if !HashMap::contains(&types, &r.name) { types = HashMap::insert(types, clone(r.name), i); };
+        if !HashMap::contains(&ownerByCtor, &r.name) { ownerByCtor = HashMap::insert(ownerByCtor, clone(r.name), clone(r.name)); };
+        i = i + 1;
+    };
+    for r in &p.types {
+        if wordIs(&r.tokens, 0, "enum") {
+            n = numberAt(&r.tokens, 2); at = 3;
+            if n >= 0 {
+                for j in 0..n {
+                    v = textAt(&r.tokens, at);
+                    if !HashMap::contains(&ownerByCtor, &v) { ownerByCtor = HashMap::insert(ownerByCtor, v, clone(r.name)); };
+                    at = fieldsEnd(&r.tokens, at + 1);
+                };
+            };
+        };
+    };
+    invariants = emptyIndexMap(); i = 0;
+    for r in &p.invariants { if !HashMap::contains(&invariants, &r.name) { invariants = HashMap::insert(invariants, clone(r.name), i); }; i = i + 1; };
+    ownership = emptyIndexMap(); i = 0;
+    for r in &p.ownership { if !HashMap::contains(&ownership, &r.name) { ownership = HashMap::insert(ownership, clone(r.name), i); }; i = i + 1; };
+    return ReachIndex {
+        fns: fns, types: types, invariants: invariants, ownership: ownership,
+        ownerByCtor: ownerByCtor, exactImpls: exactImpls, baseImpls: baseImpls,
+        listRole: storageRole(p, "List"), boxRole: storageRole(p, "Box")
+    };
+};
+fn functionRefsWith(p: &FullProgram, idx: &ReachIndex, f: &FullFunction) -> List<String> ~ {
+    out = [];
+    for b in &f.blocks { for row in &b.lines {
+        if wordIs(row, 0, "ghost") {
+            if wordIs(row, 1, "validation") || wordIs(row, 1, "axiom") || wordIs(row, 1, "proof") { out = addTexts(out, payloadRefs(&p.arena, integerAt(row, envEnd(row, 2)).value, true)); };
+        } else {
+            if wordIs(row, 0, "assign") || wordIs(row, 0, "peek") || wordIs(row, 0, "assignref") || wordIs(row, 0, "call") || wordIs(row, 0, "switch") { out = addTexts(out, runtimeRefs(row)); };
+        };
+    }; };
+    out = addTexts(out, payloadRefs(&p.arena, integerAt(&f.spec, 2).value, false)); out = addTexts(out, payloadRefs(&p.arena, integerAt(&f.spec, 4).value, false));
+    for loop in &f.loops { out = addTexts(out, payloadRefs(&p.arena, integerAt(&loop.tokens, 5).value, false)); };
+    found = []; for n in &out { if HashMap::contains(&idx.fns, n) { found = push(found, clone(n)); }; }; return found;
+};
+fn typePositions(ts: &List<Token>, pos: Int) -> List<Int> ~ {
+    if typeEnd(ts, pos) < 0 { return []; };
+    if wordIs(ts, pos, "named") {
+        out = push([], pos); at = pos + 3;
+        for i in 0..numberAt(ts, pos + 2) {
+            if wordIs(ts, at, "type") { for child in typePositions(ts, at + 1) { out = push(out, child); }; };
+            at = argEnd(ts, at);
+        };
+        return out;
+    };
+    if wordIs(ts, pos, "variant") { return push([], pos); };
+    if wordIs(ts, pos, "fn") || wordIs(ts, pos, "fnc") {
+        out = []; at = pos + 2;
+        // The signature has one result after its arguments; the contract clauses are not type tokens.
+        for i in 0..(numberAt(ts, pos + 1) + 1) {
+            for child in typePositions(ts, at) { out = push(out, child); };
+            at = typeEnd(ts, at);
+        };
+        return out;
+    };
+    if wordIs(ts, pos, "forall") { return typePositions(ts, namesEnd(ts, namesEnd(ts, pos + 1))); };
+    if wordIs(ts, pos, "array") || wordIs(ts, pos, "addr") || wordIs(ts, pos, "block") || wordIs(ts, pos, "uninit") || wordIs(ts, pos, "ref") || wordIs(ts, pos, "mutref") || wordIs(ts, pos, "list") || wordIs(ts, pos, "box") || wordIs(ts, pos, "closure") || wordIs(ts, pos, "closuremut") { return typePositions(ts, pos + 1); };
+    return [];
+};
+fn typeNames(ts: &List<Token>, pos: Int) -> List<String> ~ {
+    out = [];
+    for at in typePositions(ts, pos) {
+        out = push(out, textAt(ts, at + 1));
+        if wordIs(ts, at, "named") && numberAt(ts, at + 2) > 0 && at >= 0 && at < size(ts) {
+            parsed = typeAt(ts, at);
+            if parsed.ok && parsed.value is Type::TNamed { out = push(out, (parsed.value as Type::TNamed).name); };
+        };
+    };
+    return out;
+};
+fn ownerNamesWith(idx: &ReachIndex, ctor: &String) -> List<String> ~ {
+    owner = HashMap::lookup(&idx.ownerByCtor, ctor, "");
+    if size(owner.bytes) > 0 { return push([], owner); };
+    return [];
+};
+fn fieldsEnd(ts: &List<Token>, at: Int) -> Int ~ {
+    n = numberAt(ts, at); if n < 0 { return 0 - 1; }; p = at + 1;
+    for i in 0..n { p = typeEnd(ts, p + 1); if p < 0 { return p; }; }; return p;
+};
+fn stepOwnersWith(idx: &ReachIndex, row: &List<Token>, start: Int) -> List<String> ~ {
+    end = stepsEnd(row, start);
+    if end < 0 { return []; };
+    out = []; at = start + 1;
+    for i in 0..numberAt(row, start) {
+        if wordIs(row, at, "field") {
+            out = addTexts(out, ownerNamesWith(idx, textAt(row, at + 1))); at = at + 3;
+        } else { at = operandEnd(row, at + 1); };
+    };
+    return out;
+};
+fn reachableFunctionTypesWith(idx: &ReachIndex, f: &FullFunction) -> List<String> ~ {
+    out = [];
+    for r in &f.locals { at = 3; if wordIs(&r.tokens, 2, "some") { at = 4; }; out = addTexts(out, typeNames(&r.tokens, at)); };
+    end = intsEnd(&f.header, 3); if wordIs(&f.header, end + 1, "some") { out = addTexts(out, typeNames(&f.header, end + 2)); };
+    for b in &f.blocks { for row in &b.lines {
+        rv = 0 - 1;
+        if wordIs(row, 0, "assignref") {
+            out = addTexts(out, stepOwnersWith(idx, row, 2));
+            rv = stepsEnd(row, 2);
+        };
+        if wordIs(row, 0, "assign") || wordIs(row, 0, "peek") {
+            rv = 2;
+            ctor = "";
+            if wordIs(row, 2, "makedata") || wordIs(row, 2, "takefield") { ctor = textAt(row, 3); if wordIs(row, 2, "takefield") { ctor = textAt(row, 4); }; };
+            if wordIs(row, 2, "readfield") || wordIs(row, 2, "isvariant") || wordIs(row, 2, "asvariant") { ctor = textAt(row, operandEnd(row, 3)); };
+            if size(ctor.bytes) > 0 { out = addTexts(out, ownerNamesWith(idx, &ctor)); };
+        };
+        if rv >= 0 && (wordIs(row, rv, "borrow") || wordIs(row, rv, "borrowmut")) { out = addTexts(out, stepOwnersWith(idx, row, rv + 2)); };
+    }; };
+    return out;
+};
+fn declarationTypes(r: &FullRecord) -> List<String> ~ {
+    out = [];
+    for at in fieldTypeStarts(&r.tokens) { out = addTexts(out, typeNames(&r.tokens, at)); };
+    return out;
+};
+fn baseName(n: &String) -> String ~ {
+    i = 0;
+    while i < size(n.bytes) && get(n.bytes, i) != toByte(60) [{ affirm i >= 0; }] ~ { i = i + 1; };
+    if i > size(n.bytes) { return clone(n); };
+    return n.slice(0, i);
+};
+fn addNames(set: HashSet<String>, ns: &List<String>) -> HashSet<String> ~ { for n in ns { set = set.insert(clone(n)); }; return set; };
+// Whether the text has the pattern at or after a position
+fn textFrom(n: &String, pattern: &String, from: Int) -> Int ~ {
+    if from < 0 { return 0 - 1; };
+    i = from;
+    while i + size(pattern.bytes) <= size(n.bytes) [{ affirm i >= 0; }] shrinks size(n.bytes) - i {
+        if n.slice(i, i + size(pattern.bytes)) = *pattern { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+// A copy of a function with bounds (`f[T]`), not the check of an impl (`Trait for Type::f`)
+fn copyName(n: &String) -> Bool ~ {
+    forAt = textFrom(n, " for ", 0);
+    implCheck = forAt >= 0 && textFrom(n, "::", forAt + 5) >= 0;
+    return textFrom(n, "[", 0) >= 0 && !implCheck;
+};
+// A kept type keeps its impls and its base's impls that are not copies: a copy of a base's impl for another instance is
+// kept by what calls it, or by that instance's facts
+fn implRefsWith(idx: &ReachIndex, ty: &String) -> List<String> ~ {
+    out = HashMap::lookup(&idx.exactImpls, ty, []);
+    base = baseName(ty);
+    more = HashMap::lookup(&idx.baseImpls, &base, []);
+    return addTexts(out, &more);
+};
+// The functions a kept type's checked facts name: its Drop, Clone and Deref
+fn factRefsWith(p: &FullProgram, idx: &ReachIndex, ty: &String) -> List<String> ~ {
+    out = []; i = HashMap::lookup(&idx.ownership, ty, 0 - 1);
+    if i >= 0 && i < size(p.ownership) {
+        row = clone(get(&p.ownership, i).tokens);
+        for k in 0..3 { f = textAt(&row, 4 + 2 * k); if size(f.bytes) > 0 && HashMap::contains(&idx.fns, &f) { out = push(out, f); }; };
+    };
+    return out;
+};
+fn scrubEnv(row: List<Token>, kept: &HashSet<String>) -> List<Token> ~ {
+    at = envStart(&row); if at < 0 { return row; }; out = [];
+    for e in envEntries(&row, at) { if !(wordIs(&e.value, 0, "const") && wordIs(&e.value, 1, "fn") && !HashSet::contains(kept, textAt(&e.value, 2))) { out = push(out, clone(e)); }; };
+    if at >= 0 && at < size(row) { return replaceEnvBase(&row, clone(get(&row, at)), &out); };
+    return row;
+};
+fn scrubFunction(f: FullFunction, kept: &HashSet<String>) -> FullFunction ~ {
+    loops = []; blocks = [];
+    for r in &f.loops { loops = push(loops, FullRecord { name: clone(r.name), tokens: scrubEnv(clone(r.tokens), kept) }); };
+    for b in &f.blocks { rows = []; for row in &b.lines {
+        keep = true; if wordIs(row, 0, "ghost") && wordIs(row, 1, "function") { keep = HashSet::contains(kept, textAt(row, envEnd(row, 2))); };
+        if keep { rows = push(rows, scrubEnv(clone(row), kept)); };
+    }; blocks = push(blocks, FullBlock { lines: rows, ..b }); };
+    return FullFunction { env: scrubEnv(f.env, kept), loops: loops, blocks: blocks, ..f };
+};
+fn keptFunctions(functions: &List<FullFunction>, kept: &HashSet<String>) -> List<FullFunction> ~ {
+    out = [];
+    for i in 0..size(functions) {
+        f = &get(functions, i);
+        if HashSet::contains(kept, textAt(&(*f).header, 1)) { out = push(out, scrubFunction(clone(*f), kept)); };
+    };
+    return out;
+};
+// The provider the program's checked protocols give a role ("" for none: data written without them)
+fn storageRole(p: &FullProgram, role: &String) -> String ~ {
+    i = rowIndex(&p.protocols, role);
+    if i >= 0 && i < size(p.protocols) { return textAt(&get(p.protocols, i).tokens, 2); };
+    return "";
+};
+struct TypeText { text: String, end: Int };
+impl Clone for TypeText { };
+// A size as the rendered name of an instance writes it (Types.renderSizeForName)
+fn sizeText(ts: &List<Token>, p: Int) -> TypeText ~ {
+    end = sizeEnd(ts, p);
+    if wordIs(ts, p, "any") { return TypeText { text: "?", end: end }; };
+    if wordIs(ts, p, "v") { return TypeText { text: catStrings("_", textAt(ts, p + 1)), end: end }; };
+    return TypeText { text: textAt(ts, p + 1), end: end };
+};
+fn bareLower(n: &String) -> Bool ~ {
+    if size(n.bytes) = 0 { return false; };
+    c = toInt(get(n.bytes, 0));
+    if c < 97 || c > 122 { return false; };
+    for i in 1..size(n.bytes) {
+        b = toInt(get(n.bytes, i));
+        if !((b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)) { return false; };
+    };
+    return true;
+};
+// A type as the rendered name of an instance writes it (Types.renderTypeForName)
+fn typeText(ts: &List<Token>, p: Int) -> TypeText ~ {
+    end = typeEnd(ts, p); w = textAt(ts, p);
+    if w = "int" { return TypeText { text: "Int", end: end }; };
+    if w = "byte" { return TypeText { text: "Byte", end: end }; };
+    if w = "bool" { return TypeText { text: "Bool", end: end }; };
+    if w = "i8" || w = "i16" || w = "i32" { return TypeText { text: catStrings("I", w.slice(1, size(w.bytes))), end: end }; };
+    if w = "u16" || w = "u32" { return TypeText { text: catStrings("U", w.slice(1, size(w.bytes))), end: end }; };
+    if w = "variant" { return TypeText { text: textAt(ts, p + 1), end: end }; };
+    if w = "param" { return TypeText { text: catStrings("'", textAt(ts, p + 1)), end: end }; };
+    if w = "var" { return TypeText { text: catStrings("?", textAt(ts, p + 1)), end: end }; };
+    if w = "named" { return TypeText { text: instanceText(ts, p), end: end }; };
+    if w = "forall" { at = namesEnd(ts, p + 1); at = namesEnd(ts, at); inner = typeText(ts, at); return TypeText { text: inner.text, end: end }; };
+    if w = "fn" {
+        n = numberAt(ts, p + 1); at = p + 2; out = "fn(";
+        for i in 0..n { a = typeText(ts, at); if i > 0 { out = catStrings(out, ", "); }; out = catStrings(out, a.text); at = a.end; };
+        r = typeText(ts, at);
+        return TypeText { text: catStrings(catStrings(out, ") -> "), r.text), end: end };
+    };
+    inner = typeText(ts, p + 1);
+    if w = "array" { s = sizeText(ts, inner.end); return TypeText { text: catStrings(catStrings(catStrings(catStrings("Array<", inner.text), ", "), s.text), ">"), end: end }; };
+    if w = "addr" { return TypeText { text: catStrings(catStrings("Addr<", inner.text), ">"), end: end }; };
+    if w = "block" { return TypeText { text: catStrings(catStrings("Block<", inner.text), ">"), end: end }; };
+    if w = "uninit" { return TypeText { text: catStrings(catStrings("Uninit<", inner.text), ">"), end: end }; };
+    if w = "ref" { return TypeText { text: catStrings("&", inner.text), end: end }; };
+    if w = "mutref" { return TypeText { text: catStrings("&mut ", inner.text), end: end }; };
+    return TypeText { text: "", end: end };
+};
+// The rendered name of the instance a named type at p is (Types.instanceName), its base for one with no arguments
+fn instanceText(ts: &List<Token>, p: Int) -> String ~ {
+    base = textAt(ts, p + 1); n = numberAt(ts, p + 2);
+    if n <= 0 { if bareLower(&base) { return catStrings("`", base); }; return base; };
+    out = catStrings(base, "<"); at = p + 3;
+    for i in 0..n {
+        if i > 0 { out = catStrings(out, ", "); };
+        if wordIs(ts, at, "size") { s = sizeText(ts, at + 1); out = catStrings(out, s.text); at = s.end; } else { t = typeText(ts, at + 1); out = catStrings(out, t.text); at = t.end; };
+    };
+    return catStrings(out, ">");
+};
+// The type at p as it is natively (Types.listType): a Box of an array is a list of its elements, wherever it is
+fn listImage(ts: &List<Token>, p: Int, list: &String, box: &String) -> List<Token> ~ {
+    end = typeEnd(ts, p); w = textAt(ts, p);
+    if w = "named" {
+        n = numberAt(ts, p + 2);
+        if textAt(ts, p + 1) = *box && n = 1 && wordIs(ts, p + 3, "type") && wordIs(ts, p + 4, "array") {
+            element = listImage(ts, p + 5, list, box);
+            return appendTokens(push(push(push(push([], word("named")), name(clone(*list))), intToken(1)), word("type")), &element);
+        };
+        out = sliceTokens(ts, p, p + 3); at = p + 3;
+        for i in 0..n {
+            next = argEnd(ts, at);
+            if wordIs(ts, at, "type") { inner = listImage(ts, at + 1, list, box); out = appendTokens(push(out, word("type")), &inner); } else { kept = sliceTokens(ts, at, next); out = appendTokens(out, &kept); };
+            at = next;
+        };
+        return out;
+    };
+    if w = "array" { at = typeEnd(ts, p + 1); inner = listImage(ts, p + 1, list, box); sizeTokens = sliceTokens(ts, at, end); return appendTokens(appendTokens(push([], word("array")), &inner), &sizeTokens); };
+    if w = "addr" || w = "uninit" || w = "ref" || w = "mutref" { inner = listImage(ts, p + 1, list, box); return appendTokens(push([], word(w)), &inner); };
+    if w = "fn" {
+        n = numberAt(ts, p + 1); out = sliceTokens(ts, p, p + 2); at = p + 2;
+        for i in 0..n { a = listImage(ts, at, list, box); out = appendTokens(out, &a); at = typeEnd(ts, at); };
+        r = listImage(ts, at, list, box);
+        return appendTokens(out, &r);
+    };
+    return sliceTokens(ts, p, end);
+};
+fn hasBoxToken(ts: &List<Token>, start: Int, end: Int, box: &String) -> Bool ~ {
+    if start < 0 || end <= start || end > size(ts) { return false; };
+    for i in start..end { if textAt(ts, i) = *box { return true; }; };
+    return false;
+};
+// The names the native images of a type's named parts keep (Link.reachable's typesFromStorage)
+fn storageImagesWith(idx: &ReachIndex, ts: &List<Token>, pos: Int) -> List<String> ~ {
+    out = [];
+    if size(idx.boxRole.bytes) = 0 { return out; };
+    end = typeEnd(ts, pos);
+    if !hasBoxToken(ts, pos, end, &idx.boxRole) { return out; };
+    for i in typePositions(ts, pos) {
+        if wordIs(ts, i, "named") {
+            image = listImage(ts, i, &idx.listRole, &idx.boxRole);
+            if image != sliceTokens(ts, i, typeEnd(ts, i)) { out = addTexts(out, typeNames(&image, 0)); };
+        };
+    };
+    return out;
+};
+// The positions of the field types of a struct or enum record
+fn fieldTypeStarts(ts: &List<Token>) -> List<Int> ~ {
+    out = [];
+    if wordIs(ts, 0, "struct") { n = numberAt(ts, 2); at = 3; for i in 0..n { out = push(out, at + 1); at = typeEnd(ts, at + 1); if at < 0 { return out; }; }; return out; };
+    if wordIs(ts, 0, "enum") {
+        n = numberAt(ts, 2); at = 3;
+        for i in 0..n { k = numberAt(ts, at + 1); at = at + 2; for j in 0..k { out = push(out, at + 1); at = typeEnd(ts, at + 1); if at < 0 { return out; }; }; };
+    };
+    return out;
+};
+fn declarationImagesWith(idx: &ReachIndex, r: &FullRecord) -> List<String> ~ {
+    out = []; for at in fieldTypeStarts(&r.tokens) { out = addTexts(out, storageImagesWith(idx, &r.tokens, at)); }; return out;
+};
+fn localTypeStart(row: &List<Token>) -> Int ~ { if wordIs(row, 2, "some") { return 4; }; return 3; };
+fn functionImagesWith(idx: &ReachIndex, f: &FullFunction) -> List<String> ~ {
+    out = [];
+    for r in &f.locals { out = addTexts(out, storageImagesWith(idx, &r.tokens, localTypeStart(&r.tokens))); };
+    end = intsEnd(&f.header, 3); if wordIs(&f.header, end + 1, "some") { out = addTexts(out, storageImagesWith(idx, &f.header, end + 2)); };
+    return out;
+};
+// Whether a type has no type parameter, unknown or unsized parameter (MirCopies.groundType)
+fn groundTokens(ts: &List<Token>) -> Bool ~ {
+    for i in 0..size(ts) { if !quotedAt(ts, i) && (wordIs(ts, i, "param") || wordIs(ts, i, "var") || wordIs(ts, i, "forall") || wordIs(ts, i, "p") || wordIs(ts, i, "v")) { return false; }; };
+    return true;
+};
+// The type of a constant (Mir.constantType), none for one that has none
+fn constantTypeTokens(ts: &List<Token>, p: Int, list: &String) -> List<Token> ~ {
+    if wordIs(ts, p, "int") { return push([], word("int")); };
+    if wordIs(ts, p, "bool") { return push([], word("bool")); };
+    if wordIs(ts, p, "data") {
+        n = textAt(ts, p + 1);
+        for i in 0..size(n.bytes) { if i + 1 < size(n.bytes) && get(n.bytes, i) = toByte(58) && get(n.bytes, i + 1) = toByte(58) { return push(push([], word("variant")), name(n)); }; };
+        return push(push(push([], word("named")), name(n)), intToken(0));
+    };
+    if wordIs(ts, p, "list") {
+        element = push([], word("int")); n = numberAt(ts, p + 1); at = p + 2; found = false;
+        for i in 0..n { if !found { t = constantTypeTokens(ts, at, list); if size(t) > 0 { element = t; found = true; }; }; at = constantEnd(ts, at); };
+        return appendTokens(push(push(push(push([], word("named")), name(clone(*list))), intToken(1)), word("type")), &element);
+    };
+    return [];
+};
+// The names a constant's type keeps (Link.typeRefsOfFunction's instanceNames)
+fn instanceNames(ts: &List<Token>, p: Int) -> List<String> ~ {
+    if !wordIs(ts, p, "named") { return []; };
+    out = push(push([], textAt(ts, p + 1)), instanceText(ts, p)); n = numberAt(ts, p + 2); at = p + 3;
+    for i in 0..n { if wordIs(ts, at, "type") { out = addTexts(out, instanceNames(ts, at + 1)); }; at = argEnd(ts, at); };
+    return out;
+};
+// The names a constant at p keeps, of the type the place it is put in says (expected, empty for none) or its own
+fn constantNames(ts: &List<Token>, p: Int, expected: &List<Token>, list: &String) -> List<String> ~ {
+    if wordIs(ts, p, "list") && size(*expected) > 3 && wordIs(expected, 0, "named") && textAt(expected, 1) = *list && groundTokens(expected) { return instanceNames(expected, 0); };
+    own = constantTypeTokens(ts, p, list);
+    return instanceNames(&own, 0);
+};
+fn localTypeOf(f: &FullFunction, local: Int) -> List<Token> ~ {
+    i = rowIndex(&f.locals, String::fromInt(local));
+    if i < 0 || i >= size(f.locals) { return []; };
+    row = clone(get(&f.locals, i).tokens); at = localTypeStart(&row);
+    return sliceTokens(&row, at, typeEnd(&row, at));
+};
+// The starts of the operands of an rvalue at p
+fn rvalueOperands(ts: &List<Token>, p: Int) -> List<Int> ~ {
+    w = textAt(ts, p);
+    if w = "use" || w = "makebox" || w = "unbox" || w = "unsize" || w = "clone" || w = "deref" || w = "readfield" || w = "isvariant" || w = "asvariant" { return push([], p + 1); };
+    out = []; at = 0; n = 0;
+    if w = "binary" { at = p + 2; n = 2; };
+    if w = "listop" { at = p + 3; n = numberAt(ts, p + 2); };
+    if w = "makelist" { at = p + 2; n = numberAt(ts, p + 1); };
+    if w = "makedata" { at = p + 3; n = numberAt(ts, p + 2); for i in 0..n { out = push(out, at + 1); at = operandEnd(ts, at + 1); }; return out; };
+    for i in 0..n { out = push(out, at); at = operandEnd(ts, at); };
+    return out;
+};
+fn constOperandNames(ts: &List<Token>, operand: Int, expected: &List<Token>, list: &String) -> List<String> ~ {
+    if !wordIs(ts, operand, "const") { return []; };
+    return constantNames(ts, operand + 1, expected, list);
+};
+// The names the list constants of a function keep (Link.typeRefsOfFunction's constantTypeNames): a list constant is a struct
+// of the storage List once MirLists makes it, of the type the place it is put in says or, where nothing says it, its elements do
+fn constantRootsWith(p: &FullProgram, idx: &ReachIndex, f: &FullFunction) -> List<String> ~ {
+    list = &idx.listRole; out = []; none = [];
+    if size((*list).bytes) = 0 { return out; };
+    for b in &f.blocks { for row in &b.lines {
+        if wordIs(row, 0, "assign") || wordIs(row, 0, "peek") {
+            dest = localTypeOf(f, integerAt(row, 1).value); operands = rvalueOperands(row, 2);
+            if wordIs(row, 2, "use") { out = addTexts(out, constOperandNames(row, 3, &dest, list)); } else {
+                if wordIs(row, 2, "listop") && size(operands) > 0 && (wordIs(row, 3, "push") || wordIs(row, 3, "set") || wordIs(row, 3, "pop") || wordIs(row, 3, "uninitNew") || wordIs(row, 3, "first") || wordIs(row, 3, "last") || wordIs(row, 3, "get")) {
+                    expected = clone(dest);
+                    if (wordIs(row, 3, "first") || wordIs(row, 3, "last") || wordIs(row, 3, "get")) && size(dest) > 0 { expected = appendTokens(push(push(push(push([], word("named")), name(clone(*list))), intToken(1)), word("type")), &dest); };
+                    out = addTexts(out, constOperandNames(row, get(&operands, 0), &expected, list));
+                    for i in 1..size(operands) { out = addTexts(out, constOperandNames(row, get(&operands, i), &none, list)); };
+                } else {
+                    element = [];
+                    if wordIs(row, 2, "makelist") && size(dest) > 4 && wordIs(&dest, 0, "named") && textAt(&dest, 1) = *list && numberAt(&dest, 2) = 1 && wordIs(&dest, 3, "type") { element = sliceTokens(&dest, 4, size(dest)); };
+                    for o in &operands { out = addTexts(out, constOperandNames(row, o, &element, list)); };
+                };
+            };
+        };
+        if wordIs(row, 0, "switch") { out = addTexts(out, constOperandNames(row, 1, &none, list)); };
+        if wordIs(row, 0, "call") {
+            calleeEnd = operandEnd(row, 1); n = numberAt(row, calleeEnd); at = calleeEnd + 1;
+            ci = 0 - 1; if wordIs(row, 1, "const") && wordIs(row, 2, "fn") { ci = HashMap::lookup(&idx.fns, textAt(row, 3), 0 - 1); };
+            for i in 0..n {
+                expected = [];
+                if ci >= 0 && ci < size(p.functions) {
+                    callee = clone(get(&p.functions, ci)); params = intsEnd(&callee.header, 3);
+                    if 4 + i < params { pi = integerAt(&callee.header, 4 + i); if pi.ok { expected = localTypeOf(&callee, pi.value); }; };
+                };
+                out = addTexts(out, constOperandNames(row, at, &expected, list)); at = operandEnd(row, at);
+            };
+        };
+    }; };
+    return out;
+};
+struct LiveRoots { functions: HashSet<String>, types: HashSet<String> };
+struct WorkQueue { seen: HashSet<String>, items: List<String> };
+fn enqueueNames(q: WorkQueue, ns: &List<String>) -> WorkQueue ~ {
+    seen = q.seen; items = q.items;
+    for n in ns {
+        if !HashSet::contains(&seen, n) {
+            seen = seen.insert(clone(n));
+            items = push(items, clone(n));
+        };
+    };
+    return WorkQueue { seen: seen, items: items };
+};
+fn liveRootsWith(p: &FullProgram, idx: &ReachIndex) -> LiveRoots ~ {
+    entryFns = functionRefsWith(p, idx, &p.entry);
+    fnQ = enqueueNames(WorkQueue { seen: HashSet::new(), items: [] }, &entryFns);
+    entryTys = reachableFunctionTypesWith(idx, &p.entry);
+    entryImgs = functionImagesWith(idx, &p.entry);
+    entryConsts = constantRootsWith(p, idx, &p.entry);
+    tyQ = enqueueNames(WorkQueue { seen: HashSet::new(), items: [] }, &entryTys);
+    tyQ = enqueueNames(tyQ, &entryImgs);
+    tyQ = enqueueNames(tyQ, &entryConsts);
+    fi = 0; ti = 0;
+    while fi < size(fnQ.items) || ti < size(tyQ.items) [{ affirm fi >= 0; affirm ti >= 0; }] ~ {
+        while fi < size(fnQ.items) [{ affirm fi >= 0; }] ~ {
+            n = clone(get(&fnQ.items, fi)); fi = fi + 1;
+            i = HashMap::lookup(&idx.fns, &n, 0 - 1);
+            if i >= 0 && i < size(p.functions) {
+                fun = clone(get(&p.functions, i));
+                fRefs = functionRefsWith(p, idx, &fun);
+                fTys = reachableFunctionTypesWith(idx, &fun);
+                fImgs = functionImagesWith(idx, &fun);
+                fConsts = constantRootsWith(p, idx, &fun);
+                fnQ = enqueueNames(fnQ, &fRefs);
+                tyQ = enqueueNames(tyQ, &fTys);
+                tyQ = enqueueNames(tyQ, &fImgs);
+                tyQ = enqueueNames(tyQ, &fConsts);
+            };
+        };
+        while ti < size(tyQ.items) [{ affirm ti >= 0; }] ~ {
+            n = clone(get(&tyQ.items, ti)); ti = ti + 1;
+            iRefs = implRefsWith(idx, &n);
+            fcRefs = factRefsWith(p, idx, &n);
+            fnQ = enqueueNames(fnQ, &iRefs);
+            fnQ = enqueueNames(fnQ, &fcRefs);
+            i = HashMap::lookup(&idx.invariants, &n, 0 - 1);
+            if i >= 0 && i < size(p.invariants) {
+                refs = payloadRefs(&p.arena, integerAt(&get(p.invariants, i).tokens, 2).value, false);
+                invFns = [];
+                for f in &refs { if HashMap::contains(&idx.fns, f) { invFns = push(invFns, clone(f)); }; };
+                fnQ = enqueueNames(fnQ, &invFns);
+            };
+            i = HashMap::lookup(&idx.types, &n, 0 - 1);
+            if i >= 0 && i < size(p.types) {
+                decl = clone(get(&p.types, i));
+                dTys = declarationTypes(&decl);
+                dImgs = declarationImagesWith(idx, &decl);
+                tyQ = enqueueNames(tyQ, &dTys);
+                tyQ = enqueueNames(tyQ, &dImgs);
+            };
+        };
+    };
+    return LiveRoots { functions: fnQ.seen, types: tyQ.seen };
+};
+fn liveRoots(p: &FullProgram) -> LiveRoots ~ {
+    idx = buildReachIndex(p);
+    return liveRootsWith(p, &idx);
+};
+fn pruneProgram(p: FullProgram) -> FullProgram ~ {
+    live = liveRoots(&p); fns = live.functions; types = live.types;
+    functions = keptFunctions(&p.functions, &fns); decls = []; invariants = [];
+    for r in &p.types { if HashSet::contains(&types, &r.name) { decls = push(decls, clone(r)); }; };
+    baseTypes = HashSet::new();
+    for ty in types.elements() { baseTypes = baseTypes.insert(baseName(ty)); };
+    for r in &p.invariants { if HashSet::contains(&types, &r.name) || HashSet::contains(&baseTypes, &r.name) { invariants = push(invariants, clone(r)); }; };
+    shared = [];
+    for table in &p.shared {
+        kept = []; for e in envEntries(table, 0) { if !(wordIs(&e.value, 0, "const") && wordIs(&e.value, 1, "fn") && !HashSet::contains(&fns, textAt(&e.value, 2))) { kept = push(kept, clone(e)); }; };
+        shared = push(shared, envTokens(&kept));
+    };
+    return FullProgram { shared: shared, functions: functions, types: decls, invariants: invariants, entry: scrubFunction(p.entry, &fns), ..p };
+};

@@ -1,16 +1,6 @@
-import tersuslib::types;
+import std::core::types { List, Box };
+import std::core::ownership { Clone };
 
-// What makes a copy of a value explicit: the trait `Clone` that `clone(x)` and `x.clone()` call. A program has this library in
-// front of it unless it declares a trait `Clone` of its own (see Pipeline.libraries), as with Eq. A value is moved to where it is
-// wanted, and a program that needs it again says `clone(x)`, which has the value of x.
-//
-// A struct or an enum implements it with `impl Clone for T { };` (which clones the fields, of the same variant for an enum, each
-// with its own Clone) or with an impl that has a body, whose clone has the value of the value it clones, as the trait says. A word
-// (Int, Byte, Bool, a fixed-width integer, an address) and a function are their own copy, which clone itself says
-// (the elaborator's cloneCall), so they have no impl.
-trait Clone {
-    fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }];
-};
 
 // A list is cloned element by element, an array is too (Array::fromList moves the cloned elements in), and a Box is a new
 // Box of the clone of what it holds.

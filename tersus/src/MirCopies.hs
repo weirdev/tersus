@@ -8,6 +8,7 @@ module MirCopies
     , isStubName
     , withoutGeneric
     , contractSuffix
+    , proofPackElement
     ) where
 
 import Data.List (intercalate, isPrefixOf, stripPrefix)
@@ -16,7 +17,7 @@ import qualified Data.Set as Set
 
 import Mir
 import Syntax (parseImplCheckName)
-import Types (Name, Type, Variable, baseNameOf, renderTypeForName, tupleGeneric)
+import Types (Name, Size (..), Storage (..), Type (..), Variable, baseNameOf, listElement, renderTypeForName, tupleGeneric)
 
 -- The name of a copy that no reference wrote (one made for a copy, from a body with type parameters)
 copyName :: Name -> [Type] -> [Integer] -> Name
@@ -94,3 +95,10 @@ withoutGeneric program =
     marker st = case st of
         Ghost _ (GhostFunction n _ _) -> gone n
         _ -> False
+
+proofPackElement :: Storage -> Type -> Maybe Variable
+proofPackElement storage ty = case ty of
+    TArrayOf (TParam pack) SizeAny | null (storageList storage), ".." `isPrefixOf` pack -> Just pack
+    _ -> case listElement storage ty of
+        Just (TParam pack) | ".." `isPrefixOf` pack -> Just pack
+        _ -> Nothing

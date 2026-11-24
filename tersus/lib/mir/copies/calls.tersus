@@ -2,9 +2,9 @@ import data::codec::codec { Token };
 import mir::full::full { FullProgram, FullFunction };
 import mir::full::read { fieldsEnd };
 import mir::full::tokens { argEnd, integerAt, intToken, namesEnd, numberAt, sizeEnd, sliceTokens, textAt, typeEnd, word, wordIs };
-import mir::copies::keys { Maybe, CopyKey, CopyBinding, CopyInstance, CopyCx, CopyNeed, DispatchEdge, boundCallParts, instanceAt, concreteKey, nameOf, companionOf, renderCopyType, copyLookup };
+import mir::copies::keys { Maybe, CopyKey, CopyBinding, CopyInstance, CopyCx, CopyNeed, DispatchEdge, boundCallParts, instanceAt, concreteKey, nameOf, companionOf, renderCopyType, copyLookup, copyProvider, copyStorageName };
 import mir::copies::types { substituteArg };
-import mir::instances::names { InstanceNameClasses };
+import mir::instances::names { InstanceNameClasses, instanceNameAt };
 import mir::instances::complete { tupleArity };
 
 enum CopyTarget {
@@ -83,18 +83,47 @@ fn boundedIndex(program: &FullProgram, callee: &String) -> Int ~ {
     return 0 - 1;
 };
 
-fn resolveBound(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, constants: &HashMap<Int, String>, caller: &FullFunction, library: Bool, traitName: &String, method: &String, ty: &List<Token>, args: &List<List<Token>>, dest: Maybe<Int>) -> CopyCall ~ {
-    if traitName = "Clone" && method = "clone" { return traitClone(classes, program, cx, constants, caller, ty, args, dest); };
-    base = unref(ty);
-    if traitName = "Eq" && method = "eq" {
-        if wordType(&base) { return resolved(CopyTarget::InlineEq); };
-        elem = unsizedBoxed(ty);
-        if elem.found && boundedIndex(program, "eqBoxedArrays") >= 0 {
-            return namedCopy(classes, cx, CopyKey { function: "eqBoxedArrays", types: push([], elem.value), sizes: [] }, []);
+fn copyRoleIs(program: &FullProgram, role: &String, provider: &String) -> Bool ~ {
+    if !program.checked && size(program.protocols) = 0 { return *role = *provider; };
+    return *provider != "" && copyProvider(program, role) = *provider;
+};
+fn copyRoleHelper(program: &FullProgram, role: &String, local: &String) -> String ~ {
+    if !program.checked && size(program.protocols) = 0 { return clone(*local); };
+    provider = copyProvider(program, role);
+    first = provider.find(toByte(36), 0); second = provider.find(toByte(36), first + 1);
+    if first < 0 || second < 0 { if provider != "" { return clone(*local); }; return ""; };
+    prefix = provider.slice(0, second + 1); suffix = "$".concat(local);
+    found = "";
+    for row in &program.bounded {
+        n = size(row.name.bytes); m = size(suffix.bytes);
+        if n >= m && row.name.startsWith(&prefix) && row.name.slice(n - m, n) = suffix {
+            if found != "" { return ""; }; found = clone(row.name);
         };
     };
-    inline = sequenceBuiltin(method, ty);
-    inner = boxedArray(&base);
+    return found;
+};
+fn checkedClone(classes: &InstanceNameClasses, program: &FullProgram, ty: &List<Token>) -> String ~ {
+    owner = "";
+    if wordIs(ty, 0, "named") { owner = instanceNameAt(classes, ty, 0); };
+    if wordIs(ty, 0, "variant") { owner = variantOwner(program, textAt(ty, 1)); };
+    for row in &program.ownership { if row.name = owner { return textAt(&row.tokens, 6); }; };
+    return "";
+};
+fn inlineClone(ty: &List<Token>) -> Bool ~ {
+    return wordType(ty) || wordIs(ty, 0, "fn") || wordIs(ty, 0, "fnc") || isReference(ty);
+};
+fn resolveBound(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, constants: &HashMap<Int, String>, caller: &FullFunction, library: Bool, traitName: &String, method: &String, ty: &List<Token>, args: &List<List<Token>>, dest: Maybe<Int>) -> CopyCall ~ {
+    if copyRoleIs(program, "Clone", traitName) && method = "clone" { return traitClone(classes, program, cx, constants, caller, ty, args, dest); };
+    base = unref(ty);
+    if copyRoleIs(program, "Eq", traitName) && method = "eq" {
+        if wordType(&base) { return resolved(CopyTarget::InlineEq); };
+        elem = unsizedBoxed(program, ty); helper = copyRoleHelper(program, "Eq", "eqBoxedArrays");
+        if elem.found && helper != "" && boundedIndex(program, &helper) >= 0 {
+            return namedCopy(classes, cx, CopyKey { function: helper, types: push([], elem.value), sizes: [] }, []);
+        };
+    };
+    inline = sequenceBuiltin(program, method, ty);
+    inner = boxedArray(program, &base);
     if library && inline.found && size(inner) > 0 && !wordIs(&inner, typeEnd(&inner, 1), "any") {
         return resolved(inline.value);
     };
@@ -103,29 +132,40 @@ fn resolveBound(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyC
         callee = "<".concat(owner).concat(" as ").concat(traitName).concat(">::").concat(method);
         if functionIndex(program, &callee) >= 0 {
             witness = Maybe<List<Token>> { found: true, value: clone(ty) };
-            if library && (method = "size" || method = "get") && sequenceType(ty) {
+            if library && (method = "size" || method = "get") && sequenceType(program, ty) {
                 return calling(classes, program, cx, constants, caller, witness, &callee, args, dest);
             };
             return callingCheck(classes, program, cx, constants, caller, witness, &callee, args, dest);
         };
     };
-    if inline.found && (traitName = "Sequence" || traitName = "Growable") { return resolved(inline.value); };
+    if !program.checked && size(program.protocols) = 0 && inline.found && (traitName = "Sequence" || traitName = "Growable") { return resolved(inline.value); };
     return callError("internal compiler error: ".concat(traitName).concat("::").concat(method).concat(" is called on a ").concat(renderCopyType(classes, ty)).concat(" in ").concat(&cx.copy).concat(", which has no impl of it"));
 };
 
 fn cloneTarget(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, constants: &HashMap<Int, String>, caller: &FullFunction, ty: &List<Token>, args: &List<List<Token>>, dest: Maybe<Int>) -> CopyCall ~ {
     base = unref(ty);
-    if wordType(&base) || wordIs(&base, 0, "fn") || isReference(&base) { return resolved(CopyTarget::InlineCopy); };
+    if inlineClone(&base) { return resolved(CopyTarget::InlineCopy); };
     return traitClone(classes, program, cx, constants, caller, ty, args, dest);
 };
 
 fn traitClone(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, constants: &HashMap<Int, String>, caller: &FullFunction, ty: &List<Token>, args: &List<List<Token>>, dest: Maybe<Int>) -> CopyCall ~ {
     base = unref(ty);
-    elem = unsizedBoxed(&base);
-    if elem.found && boundedIndex(program, "cloneBoxedArray") >= 0 {
-        return namedCopy(classes, cx, CopyKey { function: "cloneBoxedArray", types: push([], elem.value), sizes: [] }, []);
+    elem = unsizedBoxed(program, &base); helper = copyRoleHelper(program, "Clone", "cloneBoxedArray");
+    if elem.found && helper != "" && boundedIndex(program, &helper) >= 0 {
+        return namedCopy(classes, cx, CopyKey { function: helper, types: push([], elem.value), sizes: [] }, []);
     };
     if wordIs(&base, 0, "named") && tupleArity(textAt(&base, 1)) > 0 { return resolved(CopyTarget::InlineCopy); };
+    if program.checked || size(program.protocols) > 0 {
+        if inlineClone(&base) { return resolved(CopyTarget::InlineCopy); };
+        callee = checkedClone(classes, program, &base);
+        provider = copyProvider(program, "Clone");
+        if wordIs(&base, 0, "array") && provider != "" { callee = "<Array as ".concat(&provider).concat(">::clone"); };
+        if callee != "" && instanceAt(program, &callee).found { return target(classes, program, cx, constants, caller, &callee, args, dest); };
+        if callee != "" && functionIndex(program, &callee) >= 0 {
+            return callingCheck(classes, program, cx, constants, caller, Maybe<List<Token>> { found: true, value: clone(*ty) }, &callee, args, dest);
+        };
+        return callError("internal compiler error: a copy of ".concat(&cx.copy).concat(" clones a ").concat(renderCopyType(classes, &base)).concat(", which has no checked Clone"));
+    };
     owner = ownerOfType(program, unref(&base));
     if owner != "" {
         callee = "<".concat(owner).concat(" as Clone>::clone");
@@ -159,29 +199,29 @@ fn unaryNominal(ty: &List<Token>, base: &String) -> Bool ~ {
     return wordIs(ty, 0, "named") && textAt(ty, 1) = base && numberAt(ty, 2) = 1 && wordIs(ty, 3, "type");
 };
 
-fn boxedArray(ty: &List<Token>) -> List<Token> ~ {
+fn boxedArray(program: &FullProgram, ty: &List<Token>) -> List<Token> ~ {
     p = 0 - 1;
-    if unaryNominal(ty, "Box") { p = 4; };
+    if unaryNominal(ty, copyStorageName(program, "Box")) && textAt(ty, 1) != "" { p = 4; };
     if wordIs(ty, 0, "box") { p = 1; };
     if wordIs(ty, p, "array") { return sliceTokens(ty, p, size(ty)); };
     return [];
 };
 
-fn unsizedBoxed(ty: &List<Token>) -> Maybe<List<Token>> ~ {
+fn unsizedBoxed(program: &FullProgram, ty: &List<Token>) -> Maybe<List<Token>> ~ {
     base = unref(ty);
-    arr = boxedArray(&base);
+    arr = boxedArray(program, &base);
     end = typeEnd(&arr, 1);
     if end >= 0 && wordIs(&arr, end, "any") { return Maybe<List<Token>> { found: true, value: sliceTokens(&arr, 1, end) }; };
     return Maybe<List<Token>> { found: false, value: [] };
 };
 
-fn sequenceType(ty: &List<Token>) -> Bool ~ {
+fn sequenceType(program: &FullProgram, ty: &List<Token>) -> Bool ~ {
     base = unref(ty);
-    return wordIs(&base, 0, "array") || wordIs(&base, 0, "list") || unaryNominal(&base, "List") || size(boxedArray(&base)) > 0;
+    return wordIs(&base, 0, "array") || wordIs(&base, 0, "list") || unaryNominal(&base, copyStorageName(program, "List")) && textAt(&base, 1) != "" || size(boxedArray(program, &base)) > 0;
 };
 
-fn sequenceBuiltin(method: &String, ty: &List<Token>) -> Maybe<CopyTarget> ~ {
-    if sequenceType(ty) {
+fn sequenceBuiltin(program: &FullProgram, method: &String, ty: &List<Token>) -> Maybe<CopyTarget> ~ {
+    if sequenceType(program, ty) {
         if method = "size" { return Maybe<CopyTarget> { found: true, value: CopyTarget::InlineBuiltin { builtin: "size", op: "length" } }; };
         if method = "get" || method = "set" || method = "push" || method = "pop" || method = "first" || method = "last" {
             return Maybe<CopyTarget> { found: true, value: CopyTarget::InlineBuiltin { builtin: clone(method), op: clone(method) } };

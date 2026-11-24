@@ -1,8 +1,9 @@
 import data::codec::codec { Token };
-import mir::full::full { fullAt };
-import mir::full::tokens { word, wordIs, intToken };
-import mir::full::write { FullOutput, outputFull, emitFull };
+import mir::full::full { FullProgram, fullAt };
+import mir::full::tokens { name, textAt, word, wordIs, intToken };
+import mir::full::write { FullOutput, outputFull, emitFull, sortRecords };
 import mir::mono::mono { monomorphize };
+import mir::mono::types { monoTuple };
 import mir::reader::reader { ghostProgramAt };
 import mir::writer::writer { printProgramWithGhosts };
 import mir::ownership::rewrite { insertOwnership };
@@ -14,11 +15,62 @@ fn isMonoOwnershipRequest(lines: &List<List<Token>>) -> Bool ~ {
     return size(header) = 2 && wordIs(&header, 0, "pass") && wordIs(&header, 1, "mono-ownership");
 };
 
-fn ownershipRows(receipt: &FullOutput) -> List<List<Token>> ~ {
+// The checked facts of the declared types, as MIR version 2 writes them (MirData.metaLines): the storage the protocols name, then a
+// row for each declared type, which is its facts' (a tuple's has none); a declared type with no facts, or a fact whose function the
+// program does not have, is refused
+struct Meta { ok: Bool, message: String, rows: List<List<Token>> };
+impl Clone for Meta { };
+fn protocolOf(p: &FullProgram, role: &String) -> String ~ {
+    for r in &p.protocols { if r.name = *role { return textAt(&r.tokens, 2); }; };
+    return "";
+};
+// A tuple's declared struct, or an instance of it (Types.tupleGeneric of the base)
+fn tupleName(n: &String) -> Bool ~ {
+    base = n.slice(0, n.find(toByte(60), 0));
+    return size(monoTuple(&base).tokens) > 0;
+};
+fn hasFunction(p: &FullProgram, f: &String) -> Bool ~ {
+    for fun in &p.functions { if textAt(&fun.header, 1) = *f { return true; }; };
+    return false;
+};
+fn checkedMeta(p: &FullProgram) -> Meta ~ {
+    rows = push([], push(push(push([], word("storage")), name(protocolOf(p, "List"))), name(protocolOf(p, "Box"))));
+    rows = push(rows, push(push([], word("ownership")), intToken(size(p.types))));
+    roles = push(push(push([], "Drop"), "Clone"), "Deref");
+    // (in the order of the declarations the program as data writes, sorted by name)
+    for d in sortRecords(clone(p.types)) {
+        at = 0 - 1;
+        for i in 0..size(p.ownership) { if get(&p.ownership, i).name = d.name { at = i; }; };
+        if at >= 0 && at < size(p.ownership) {
+            row = clone(get(&p.ownership, at).tokens);
+            for k in 0..3 {
+                f = textAt(&row, 4 + 2 * k);
+                if size(f.bytes) > 0 && !hasFunction(p, &f) {
+                    role = clone(get(&roles, k));
+                    return Meta { ok: false, message: "Type error: the checked ".concat(&role).concat(" of ").concat(&d.name).concat(" is ").concat(&f).concat(", which the program does not have"), rows: [] };
+                };
+            };
+            rows = push(rows, row);
+        } else {
+            if !tupleName(&d.name) { return Meta { ok: false, message: "Type error: ".concat(&d.name).concat(" has no checked ownership facts"), rows: [] }; };
+            row = push(push([], word("owned")), name(clone(d.name)));
+            for k in 0..7 { row = push(row, name("")); };
+            rows = push(rows, row);
+        };
+    };
+    return Meta { ok: true, message: "", rows: rows };
+};
+
+fn ownershipRows(receipt: &FullOutput, meta: &List<List<Token>>) -> List<List<Token>> ~ {
     rows = push([], push(push([], word("tersus-mir")), word("2")));
     active = false;
     ghost = 0;
+    metaWritten = false;
     for row in &receipt.records {
+        if !metaWritten && !wordIs(row, 0, "tersus-mir") && !wordIs(row, 0, "struct") && !wordIs(row, 0, "enum") {
+            for m in meta { rows = push(rows, clone(m)); };
+            metaWritten = true;
+        };
         if wordIs(row, 0, "function") || wordIs(row, 0, "main") { active = true; };
         keep = wordIs(row, 0, "struct") || wordIs(row, 0, "enum");
         if active && !wordIs(row, 0, "spec") && !wordIs(row, 0, "env") && !wordIs(row, 0, "loop") { keep = true; };
@@ -40,9 +92,16 @@ fn runMonoOwnership(lines: &List<List<Token>>) -> Bool ~ {
     parsed = fullAt(&input);
     if !parsed.ok { "the input is not full MIR version 3\n".printError(); return false; };
     specialized = monomorphize(parsed.value);
+    // (the ownership pass is given the specialized program's checked facts, as complete as MIR version 2 has them)
+    meta = [];
+    if specialized.checked {
+        m = checkedMeta(&specialized);
+        if !m.ok { clone(m.message).concat("\n").printError(); return false; };
+        meta = m.rows;
+    };
     receipt = outputFull(&specialized);
     emitFull(&receipt);
-    runtime = ghostProgramAt(ownershipRows(&receipt));
+    runtime = ghostProgramAt(ownershipRows(&receipt, &meta));
     if !runtime.ok {
         "the ownership input is not the MIR as data\n".printError();
         return false;

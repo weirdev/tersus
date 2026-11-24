@@ -1,6 +1,6 @@
 import data::arena::arena { remapNode };
 import data::ast::ast { AstBody, AstBuiltin, AstEntry, AstNode, AstProgram, AstScheme, AstValue };
-import data::codec::codec { Type, catStrings, typeAt };
+import data::codec::codec { Token, Type, catStrings, typeAt };
 import elaborate::records { codecTypeAt, codecTypesAt, fromCodec, fromCodecs, listItems, nameText, nodeIn };
 import elaborate::state { St, Ty, addTy, builtinValueAt, fail, fnTy, freshVar, indexIn, intText, isSize, kindOf, nameOf, notModelled, nth, tyAt, withTy, wordName };
 
@@ -54,7 +54,22 @@ fn storageType(t: Type) -> Type ~ {
                 return Type::TBox { inner: Box::new(storageType(inner.value)) };
             };
         };
-        return t;
+        // (a list or a Box among another named type's arguments, a pair's, is the same: `named "List" 1 type T` is `list T`)
+        tokens = [];
+        i = 0;
+        while i < size(n.argTokens) [{ affirm i >= 0; }] ~ {
+            w = get(&n.argTokens, i);
+            if !w.quoted && w.text = "named" && i + 3 < size(n.argTokens) && get(&n.argTokens, i + 1).quoted && (get(&n.argTokens, i + 1).text = "List" || get(&n.argTokens, i + 1).text = "Box") && !get(&n.argTokens, i + 2).quoted && get(&n.argTokens, i + 2).text = "1" && !get(&n.argTokens, i + 3).quoted && get(&n.argTokens, i + 3).text = "type" {
+                word = "list";
+                if get(&n.argTokens, i + 1).text = "Box" { word = "box"; };
+                tokens = push(tokens, Token { quoted: false, text: word });
+                i = i + 4;
+            } else {
+                tokens = push(tokens, clone(w));
+                i = i + 1;
+            };
+        };
+        return Type::TNamed { name: clone(n.name), base: clone(n.base), argc: n.argc, argTokens: tokens };
     };
     if t is Type::TList { return Type::TList { elem: Box::new(storageType(Box::unbox(clone((t as Type::TList).elem)))) }; };
     if t is Type::TArray { a = t as Type::TArray; return Type::TArray { elem: Box::new(storageType(Box::unbox(clone(a.elem)))), size: clone(a.size) }; };

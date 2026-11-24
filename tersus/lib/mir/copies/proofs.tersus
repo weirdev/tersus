@@ -55,7 +55,7 @@ fn rewriteName(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx
     bound = boundCallParts(n);
     if bound.found && (bound.value.method = "size" || bound.value.method = "get") && libraryBuiltin(program, n) {
         ty = copyLookup(&cx.types, &bound.value.param);
-        if size(ty) > 0 && sequenceType(&ty) { return proofBuiltin(arena, &bound.value.method, proof); };
+        if size(ty) > 0 && sequenceType(program, &ty) { return proofBuiltin(arena, &bound.value.method, proof); };
     };
     if !bound.found && !instanceAt(program, n).found && !HashMap::contains(&cx.lifted, n) { return kept(arena, id); };
     result = target(classes, program, cx, HashMap::new(), noFunction(), n, [], Maybe<Int> { found: false, value: 0 });

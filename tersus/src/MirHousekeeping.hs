@@ -67,14 +67,14 @@ import System.Exit (ExitCode (..))
 
 import Hash (fingerprint)
 import ElaboratorTool (Loader, bootstrapLoader)
-import LibPackage (LibPackage, libPackage, nativeStorageUnits)
-import Link (linkPrograms)
+import LibPackage (LibPackage (..), libModuleId, libPackage, nativeStorageUnits)
+import Link (linkValidatedPrograms, pruneProgram)
 import LlvmRuntime (runtimeSource)
 import Mir
-import MirData (readProgram, writeProgram, writeProgramWithGhosts)
+import MirData (readProgram, writeOwnedProgram, writeOwnedProgramWithGhosts, writeProgram, writeProgramWithGhosts)
 import MirPass (programData, runPassWith, runMonoOwnershipPassWith)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
-import MirLists (hasLists, lowerLists)
+import MirLists (ownerSourceId, hasLists, lowerLists)
 import MirOwnershipData (ownershipInput, restoreOwnership)
 import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresent, cachedProgramIfPresentWithArtifacts, parallelBuilds, runWithInput, runWithInputFull)
 import Seed (emitterSeedFile, seedSha256, frontendSeedSha256, parserSeedSha256,
@@ -86,6 +86,7 @@ import Modules (ModuleId, Snapshot (..), resolverFromFiles)
 import PackageCompile (compileModulesUsing, lowerCompiledPackage)
 import PreludeSource (emitterSourceFiles, emitterSeedConstruction, frontendSeedSources,
     boxSource, listsSource, toolPackageFiles, validationPackageFiles)
+import qualified Types as T
 import Types (Arg (..), Type (..), instanceFields, instanceName)
 import Utils
 
@@ -272,12 +273,17 @@ ownershipPassWith _ "expand" program
     isReference (Just (LocalDecl (TRef _) _)) = True
     isReference (Just (LocalDecl (TMutRef _) _)) = True
     isReference _ = False
-ownershipPassWith getTool pass program = do
+ownershipPassWith _ "ownership" program
+    | owner : _ <- uncoveredInstances program = pure (Error ("Type error: " ++ owner ++ " has no checked ownership facts, and its declaration's facts may not apply to it"))
+ownershipPassWith getTool pass program = case serialized of
+  Error e -> pure (Error e)
+  Ok wire -> do
+    let request = "pass " ++ pass ++ "\n" ++ wire
     tool <- getTool
     output <- case tool of
         ToolFailed e -> pure (Error e)
         ToolNative exe -> do
-            (code, out, errors) <- runWithInputFull exe input
+            (code, out, errors) <- runWithInputFull exe request
             pure $ case code of
                 ExitFailure n -> Error ("the ownership tool exited with " ++ show n ++ ": " ++ trimEnd errors)
                 ExitSuccess
@@ -290,7 +296,10 @@ ownershipPassWith getTool pass program = do
             then Error "the ownership tool did not write MIR version 2"
             else stage "the ownership tool wrote unreadable MIR: " (readProgram text) `bindResult` restoreOwnership program
   where
-    input = "pass " ++ pass ++ "\n" ++ writeProgramWithGhosts (ownershipInput program)
+    input = ownershipInput program
+    serialized
+        | pass == "expand" = Ok (writeProgramWithGhosts input)
+        | otherwise = writeOwnedProgramWithGhosts input
 
 -- A program expanded, lowered and owned by one emitter executable (the seed's, for what the host builds itself)
 ownedWith :: FilePath -> Program -> IO (Result Program String)
@@ -706,7 +715,7 @@ prepareProgram entry raw = do
                     zero <- cachedSeed
                     case zero of
                         Error e -> pure (Error e)
-                        Ok seed -> mapResult writeProgram <$> ownedWith seed program
+                        Ok seed -> (`bindResult` writeOwnedProgram) <$> ownedWith seed program
             case input of
                 Error e -> pure (Nothing, Error e)
                 Ok text -> do
@@ -984,7 +993,9 @@ nativeProgramUsing tool library raw = case abiView raw of
         case ready of
             Error e -> pure (Error e)
             Ok () -> do
-                expanded <- ownershipPassWith tool "expand" program
+                expanded <- case pruneProgram program of
+                    Error e -> pure (Error e)
+                    Ok pruned -> ownershipPassWith tool "expand" pruned
                 case expanded of
                     Error e -> pure (Error e)
                     Ok written
@@ -1001,15 +1012,18 @@ emitterOwnedProgram = unsafePerformIO (toolOwnedProgramUsing sourceTool emitterE
         emitter <- cachedSourceEmitter
         pure $ case emitter of Error e -> ToolFailed e; Ok exe -> ToolNative exe
 
--- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus): its
+-- The library of lists and Boxes (lib/std/lists/lists.tersus and lib/std/box/box.tersus): its
 -- units as native code is linked with them, and the program they link to.
 -- Native code of every program, the validator's included, is made with it,
 -- so it is built here without being validated; the validator, once built,
 -- validates it before it is used (ValidatorNative.validatorExecutable).
+-- The native storage helpers, and the program they make with the module that declares the List and Box they work on
+-- (core, whose drops of them their values are freed by)
 nativeStorage :: Result ([(ModuleId, Program)], Program) String
-nativeStorage = nativeStorageUnits `bindResult` \modules ->
+nativeStorage = nativeStorageUnits `bindResult` \modules -> libPackage `bindResult` \pkg ->
     let units = [(modu, program) | (modu, _, program) <- modules]
-     in linkPrograms units `bindResult` \program -> Ok (units, program)
+        owners = [(libModuleId "core", program) | Just program <- [Map.lookup "core" (libPrograms pkg)]]
+     in linkValidatedPrograms (owners ++ units) `bindResult` \program -> Ok (units, program)
 
 storageProgram :: Program
 storageProgram = case nativeStorage of
@@ -1025,7 +1039,7 @@ listLibrary = do
             Just units -> pure (saved, Ok units)
             Nothing -> do
                 result <- bracket_ (writeIORef buildingRef True) (writeIORef buildingRef False) $
-                    case nativeStorage `bindResult` \(units, _) -> flatResultMap eraseUnit units of
+                    case nativeStorage `bindResult` \(units, program) -> flatResultMap eraseUnit units `bindResult` \erased -> ownerDrops program `bindResult` \drops -> Ok (erased ++ drops) of
                         Error e -> pure (Error e)
                         Ok units -> do
                             _ <- evaluate (sum [length (writeProgram program) | (_, program) <- units])
@@ -1034,6 +1048,13 @@ listLibrary = do
                 pure (keep, result)
   where
     eraseUnit (modu, program) = mapResult ((,) modu) (eraseGhosts program)
+    -- (the checked drops of the List and the Box, from the storage program erased as the helpers are: a unit of core
+    -- with those functions alone, which native code of a program takes in place of its own copies)
+    ownerDrops program = eraseGhosts program `bindResult` \erased ->
+        let storage = progStorage program
+            names = Set.fromList [callee | owner <- [T.storageList storage, T.storageBox storage], Just callee <- [dropFunction program owner]]
+            only p = p{progTypes = Map.empty, progGenerics = Map.empty, progInvariants = Map.empty, progBounded = Map.empty, progInstances = Map.empty, progFunctions = Map.restrictKeys (progFunctions p) names, progOwnership = Just Map.empty}
+         in Ok [(libModuleId "core", only erased), (ownerSourceId, only program)]
 
 -- Runs a program of the housekeeping with what a user of it gives on the standard input: what it wrote, what
 -- it wrote to the standard error, and its value. The interpreter reads the world the program is not given, so
@@ -1051,6 +1072,8 @@ mergeErased original erased =
         { progGenerics = Map.map scrubGeneric (progGenerics original)
         , progFunctions = Map.mapWithKey mergeFunction (progFunctions erased)
         , progMain = mergeFn original (progMain original) (progMain erased)
+        , progProtocols = progProtocols original
+        , progOwnership = progOwnership original
         }
   where
     scrubGeneric (params, fields) = (params, [(f, t) | (f, t) <- fields, not (ghostType original t)])
