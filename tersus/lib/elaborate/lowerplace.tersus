@@ -1,7 +1,7 @@
 import data::ast::ast { AstExpression, AstNode };
 import elaborate::records { listItems, nameText, nodeIn };
-import elaborate::lowerstate { lwMalformed, LDecl, LowSt, Op, Step, Stmt, TDecl, boxInner, claim, hasInt, intAt, isMutRefTy, isRefTy, isTupleBase, lfail, lwCat, lwCat3, lwInstanceText, lwKind, noOp, quote, simpleType, lwSp, tyOf, unrefTy, wrapType };
-import elaborate::lowerbuild { Bi, biOf, borrowRv, builtinOfExpr, cloneVariantPayload, copyOp, emitAssign, emitStmt, exprAt, findRefTarget, ghostStmt, isPrim, lookupBinding, singleEnv, tempLocal, useRv, varNameOf };
+import elaborate::lowerstate { lwMalformed, LowSt, Op, Step, Stmt, TDecl, boxInner, claim, hasInt, intAt, isMutRefTy, isRefTy, isTupleBase, lfail, lwCat, lwCat3, lwInstanceText, lwKind, noOp, quote, simpleType, lwSp, tyOf, unrefTy, wrapType };
+import elaborate::lowerbuild { Bi, biOf, borrowRv, builtinOfExpr, cloneVariantPayload, copyOp, emitAssign, emitStmt, exprAt, ghostStmt, isPrim, lookupBinding, singleEnv, tempLocal, useRv, varNameOf };
 import elaborate::lowerexpr { captureOperand, exprEffects, lowerOperand };
 
 // A place as the local it starts from (ls.root), the steps from there (ls.steps) and its type (ls.ty). Each
@@ -195,8 +195,8 @@ fn lowerRefRoot(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
 
 fn lwIsVar(src: &List<AstNode>, e: Int) -> Bool ~ { return exprAt(src, e) is AstExpression::Var; };
 
-// The place an assignment through a reference is to: through an update parameter (the parameter local itself), or
-// through a reference local made by &mut place in this function (the place it was made to)
+// The place an assignment through a reference is to, rooted at the update parameter or the reference local written
+// through (never at what that local was borrowed from, so that the write is a use of it)
 fn lowerDerefPlace(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
     if !ls.ok { return ls; };
     form = lwPlaceForm(src, e);
@@ -249,21 +249,8 @@ fn lwDerefRoot(ls: LowSt, src: &List<AstNode>, inner: Int) -> LowSt ~ {
     bty = found.b.ty;
     if hasInt(&ls.bMutBorrowed, l) { return placeResult(ls, l, [], t); };
     if !isRefTy(&ls, bty) { return lfail(ls, lwCat3("Lowering failed: ", &name, " is not a reference")); };
-    i = findRefTarget(ls, l);
-    if i >= 0 && i < size(ls.bRefTargets) && get(ls.bRefTargets, i).root >= 0 {
-        target = clone(get(ls.bRefTargets, i));
-        // (a reborrow of a reference is written through as itself, so that the MIR tells it from a write through its parent)
-        rt = declaredTy(&ls.bLocals, target.root);
-        if hasInt(&ls.bMutBorrowed, target.root) || (rt >= 0 && isRefTy(&ls, rt)) { return placeResult(ls, l, [], t); };
-        return placeResult(ls, target.root, target.steps, t);
-    };
-    if isMutRefTy(&ls, bty) { return placeResult(ls, l, [], t); };
-    return lfail(ls, lwCat3("Lowering failed: the place that ", &name, " is a reference to is not known here: a reference that is assigned through must be made by &mut place in this function, or be an update parameter"));
-};
-
-fn declaredTy(locals: &List<LDecl>, l: Int) -> Int ~ {
-    if l < 0 || l >= size(locals) || !get(locals, l).present { return 0 - 1; };
-    return get(locals, l).ty;
+    if !isMutRefTy(&ls, bty) { return lfail(ls, lwCat3("Lowering failed: ", &name, " is a shared reference, which cannot be written through")); };
+    return placeResult(ls, l, [], t);
 };
 
 // The constructor that a struct type has, or the variant a value is known to be (ls.name)

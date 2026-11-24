@@ -49,9 +49,6 @@ impl Clone for LDecl { };
 struct Binding { isLocal: Bool, local: Int, ty: Int, fname: String };
 impl Clone for Binding { };
 
-struct RefTarget { local: Int, root: Int, steps: List<Step> };
-impl Clone for RefTarget { };
-
 // A loop: its header and body blocks, the payloads of its invariant and termination (-1 for none), its environment
 struct LoopRec { header: Int, body: Int, inv: Int, term: Int, env: Int };
 impl Clone for LoopRec { };
@@ -73,7 +70,7 @@ impl Clone for LFn { };
 // The function being built, which a nested function's body puts aside while it is built
 struct Builder {
     name: String, isMain: Bool, sizes: List<String>, typeParams: List<String>, borrowed: List<Int>, mutBorrowed: List<Int>,
-    refTargets: List<RefTarget>, hasReturns: Bool, returns: Int, params: List<Int>, locals: List<LDecl>, nextLocal: Int,
+    hasReturns: Bool, returns: Int, params: List<Int>, locals: List<LDecl>, nextLocal: Int,
     blocks: List<LBlock>, nextBlock: Int, hasOpen: Bool, openId: Int, openStmts: List<Int>,
     scopeNames: List<String>, scopeBinds: List<Binding>, scopeMarks: List<Int>, loops: List<LoopRec>,
     hasPlace: Bool, line: Int, col: Int, packLoops: List<PackLoopRec>, lent: List<String>
@@ -134,7 +131,7 @@ struct LowSt {
     vis: Visible, visLow: Int, visEnv: Int, visEnvGv: Int,
     std: HashMap<String, Int>,
     bName: String, bIsMain: Bool, bSizes: List<String>, bTypeParams: List<String>, bBorrowed: List<Int>, bMutBorrowed: List<Int>,
-    bRefTargets: List<RefTarget>, bHasReturns: Bool, bReturns: Int, bParams: List<Int>, bLocals: List<LDecl>, bNextLocal: Int,
+    bHasReturns: Bool, bReturns: Int, bParams: List<Int>, bLocals: List<LDecl>, bNextLocal: Int,
     bBlocks: List<LBlock>, bNextBlock: Int, bHasOpen: Bool, bOpenId: Int, bOpenStmts: List<Int>,
     bScopeNames: List<String>, bScopeBinds: List<Binding>, bScopeMarks: List<Int>, bLoops: List<LoopRec>,
     bHasPlace: Bool, bLine: Int, bCol: Int, bPackLoops: List<PackLoopRec>, bLent: List<String>,
@@ -152,7 +149,7 @@ struct Swapped { ls: LowSt, b: Builder };
 fn swapBuilder(ls: LowSt, b: Builder) -> Swapped ~ {
     old = Builder {
         name: ls.bName, isMain: ls.bIsMain, sizes: ls.bSizes, typeParams: ls.bTypeParams, borrowed: ls.bBorrowed,
-        mutBorrowed: ls.bMutBorrowed, refTargets: ls.bRefTargets, hasReturns: ls.bHasReturns, returns: ls.bReturns,
+        mutBorrowed: ls.bMutBorrowed, hasReturns: ls.bHasReturns, returns: ls.bReturns,
         params: ls.bParams, locals: ls.bLocals, nextLocal: ls.bNextLocal, blocks: ls.bBlocks, nextBlock: ls.bNextBlock,
         hasOpen: ls.bHasOpen, openId: ls.bOpenId, openStmts: ls.bOpenStmts, scopeNames: ls.bScopeNames,
         scopeBinds: ls.bScopeBinds, scopeMarks: ls.bScopeMarks, loops: ls.bLoops, hasPlace: ls.bHasPlace,
@@ -160,7 +157,7 @@ fn swapBuilder(ls: LowSt, b: Builder) -> Swapped ~ {
     };
     next = LowSt {
         bName: b.name, bIsMain: b.isMain, bSizes: b.sizes, bTypeParams: b.typeParams, bBorrowed: b.borrowed, bMutBorrowed: b.mutBorrowed,
-        bRefTargets: b.refTargets, bHasReturns: b.hasReturns, bReturns: b.returns, bParams: b.params, bLocals: b.locals,
+        bHasReturns: b.hasReturns, bReturns: b.returns, bParams: b.params, bLocals: b.locals,
         bNextLocal: b.nextLocal, bBlocks: b.blocks, bNextBlock: b.nextBlock, bHasOpen: b.hasOpen, bOpenId: b.openId,
         bOpenStmts: b.openStmts, bScopeNames: b.scopeNames, bScopeBinds: b.scopeBinds, bScopeMarks: b.scopeMarks, bLoops: b.loops,
         bHasPlace: b.hasPlace, bLine: b.line, bCol: b.col, bPackLoops: b.packLoops, bLent: b.lent, visLow: 0, ..ls
@@ -178,7 +175,7 @@ fn newBuilder(name: String, isMain: Bool, hasReturns: Bool, returns: Int) -> Bui
     locals = [];
     if hasReturns { locals = push(locals, LDecl { present: true, ty: returns, hasName: false, name: "" }); };
     return Builder {
-        name: name, isMain: isMain, sizes: [], typeParams: [], borrowed: [], mutBorrowed: [], refTargets: [],
+        name: name, isMain: isMain, sizes: [], typeParams: [], borrowed: [], mutBorrowed: [],
         hasReturns: hasReturns, returns: returns, params: [], locals: locals, nextLocal: 1, blocks: [], nextBlock: 1,
         hasOpen: true, openId: 0, openStmts: [], scopeNames: [], scopeBinds: [], scopeMarks: push([], 0), loops: [],
         hasPlace: false, line: 0, col: 0, packLoops: [], lent: []
@@ -194,7 +191,7 @@ fn newLowSt(pbase: Int, unitKey: String) -> LowSt ~ {
         prereg: HashMap::new(), stubs: HashSet::new(), pn: [], pbase: pbase,
         envs: [], contents: [], contentKeys: HashMap::new(), contentTexts: HashMap::new(),
         vis: noVisible(0), visLow: 0, visEnv: 0 - 1, visEnvGv: 0, std: HashMap::new(),
-        bName: "main", bIsMain: true, bSizes: [], bTypeParams: [], bBorrowed: [], bMutBorrowed: [], bRefTargets: [],
+        bName: "main", bIsMain: true, bSizes: [], bTypeParams: [], bBorrowed: [], bMutBorrowed: [],
         bHasReturns: false, bReturns: 0 - 1, bParams: [], bLocals: [], bNextLocal: 1, bBlocks: [], bNextBlock: 1,
         bHasOpen: true, bOpenId: 0, bOpenStmts: [], bScopeNames: [], bScopeBinds: [], bScopeMarks: push([], 0), bLoops: [],
         bHasPlace: false, bLine: 0, bCol: 0, bPackLoops: [], bLent: [],

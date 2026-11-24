@@ -369,7 +369,6 @@ data Cx = Cx
     , cxLiveAfter :: Map BlockId [Set Local] -- the locals live after each statement of a block, by the block
     , cxLiveOut :: Map BlockId (Set Local) -- the locals live at the end of a block
     , cxLiveNow :: Set Local -- the locals live after the statement or terminator being checked
-    , cxBorrowRefs :: Map Local [Local] -- the reference locals borrowed from each local
     , cxCallArgs :: Set Local -- the temporaries given to the call that ends the block being checked
     , cxCloned :: Set Name -- the structs and enums with a Clone of their own (cloneBases), found once for the program
     }
@@ -399,11 +398,6 @@ liveness fn = go (Map.keysSet blocks) Map.empty Map.empty Map.empty
   where
     blocks = fnBlocks fn
     predecessors = Map.fromListWith (++) [(s, [b]) | (b, BasicBlock _ term) <- Map.toList blocks, s <- successors term]
-    -- (an assignment to an owner goes through one of the reference locals that are to it, which the place has
-    -- already been resolved away from, so they are uses of the statement too)
-    borrowRefs = borrowRefsOf fn
-    usesOf stmt@(AssignRef root _ _) | ownerRoot fn root = stmtUses stmt ++ Map.findWithDefault [] root borrowRefs
-    usesOf stmt = stmtUses stmt
     -- (the highest block first: lowering numbers blocks in program order, so liveness, which flows backwards, crosses a
     -- block's successors before the block itself)
     go pending after liveIn liveOut = case Set.maxView pending of
@@ -415,7 +409,7 @@ liveness fn = go (Map.keysSet blocks) Map.empty Map.empty Map.empty
                     termLive = Set.fromList (termUses term) `Set.union` (liveEnd `Set.difference` callDest term)
                     stmtAfter = scanBack termLive stmts
                     liveBefore = case (stmts, stmtAfter) of
-                        (stmt : _, after0 : _) -> Set.fromList (usesOf stmt) `Set.union` (after0 `Set.difference` defOf stmt)
+                        (stmt : _, after0 : _) -> Set.fromList (stmtUses stmt) `Set.union` (after0 `Set.difference` defOf stmt)
                         _ -> termLive
                     pending'
                         | liveBefore == Map.findWithDefault Set.empty b liveIn = rest
@@ -428,19 +422,7 @@ liveness fn = go (Map.keysSet blocks) Map.empty Map.empty Map.empty
     defOf _ = Set.empty
     scanBack liveAfterLast stmts = snd (foldl step (liveAfterLast, []) (reverse stmts))
       where
-        step (liveAfter, acc) stmt = (Set.fromList (usesOf stmt) `Set.union` (liveAfter `Set.difference` defOf stmt), liveAfter : acc)
-
--- Whether an assignment to a local is to an owner: lowering writes `*r = v` as an assignment to r itself when r is a
--- reference or an update parameter, or was made by a borrow of the place of one, and otherwise to the root of the place r borrows.
-ownerRoot :: Function -> Local -> Bool
-ownerRoot fn l = l `notElem` fnBorrowed fn && case localType <$> Map.lookup l (fnLocals fn) of
-    Just (TRef _) -> False
-    Just (TMutRef _) -> False
-    _ -> True
-
--- The reference locals that borrow each local: those an assignment to an owner may go through.
-borrowRefsOf :: Function -> Map Local [Local]
-borrowRefsOf fn = Map.fromListWith (++) [(root, [d]) | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign d (Borrow root _ _) <- stmts]
+        step (liveAfter, acc) stmt = (Set.fromList (stmtUses stmt) `Set.union` (liveAfter `Set.difference` defOf stmt), liveAfter : acc)
 
 typeOf :: Cx -> Local -> Type
 typeOf cx l = maybe TInt localType (Map.lookup l (fnLocals (cxFn cx)))
@@ -486,7 +468,7 @@ checkFunction copies linear drops cloned program fn = nub (concat [snd (runBlock
         _ -> Nothing
     lent = Set.fromList (fnBorrowed fn ++ [self | Just (_, self) <- [dropOf]])
     (liveAfter, liveOut) = liveness fn
-    cx = Cx program copies fn lent linear drops (snd <$> dropOf) liveAfter liveOut Set.empty (borrowRefsOf fn) Set.empty cloned
+    cx = Cx program copies fn lent linear drops (snd <$> dropOf) liveAfter liveOut Set.empty Set.empty cloned
     -- (a permission given to the function, and not lent, is the function's to use)
     entry = emptySt{stHeld = Map.fromList ([((p, steps), Nothing) | p <- fnParams fn, p `Set.notMember` lent, steps <- linearParts linear drops program (typeOf cx p)] ++ [((self, steps), Nothing) | Just (owner, self) <- [dropOf], steps <- linearParts linear (Set.delete owner drops) program (typeOf cx self), not (null steps)]), stFieldLoans = incomingFields, stExtraLoans = incomingExtras}
     incomingFields = Map.fromList [((param, field), [incomingRoot]) | param <- fnParams fn, field <- refFieldNames cx (typeOf cx param)]
@@ -1065,8 +1047,7 @@ updatePlace cx pos st0 root steps rv = (updated, errs ++ placeReads cx pos st1 [
          in if null refs then Map.delete owner extras else Map.insert owner (Set.toList (Set.fromList refs)) extras
     updated = defined{stFieldLoans = fieldsAfter, stExtraLoans = extrasAfter}
     (st1, errs) = foldl' (access cx pos) (st0, []) (accesses rv ++ [(root, map refStepOf steps, Read)])
-    -- (which of these the program wrote through cannot be told from the assignment)
-    through = [w | w <- [root | isReference cx root] ++ [w | ownerRoot (cxFn cx) root, w <- Map.findWithDefault [] root (cxBorrowRefs cx)], isMutRef (typeOf cx w)]
+    through = [root | isMutRef (typeOf cx root)]
     isMutRef ty = case ty of
         TMutRef _ -> True
         _ -> False

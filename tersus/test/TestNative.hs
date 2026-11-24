@@ -903,6 +903,8 @@ referenceHolderPrograms =
     , ("a field reference is returned", "struct P { a: Int, b: Int }; fn getb(p: &P) -> &Int from p { return &p.b; }; p = P { a: 1, b: 41 }; r = getb(&p); return *r + 1;")
     , ("a holder is given to a function", "struct W { r: &Int }; fn rd(w: W) -> Int { return *w.r; }; a = 7; w = W { r: &a }; return rd(w);")
     , ("an update reference in a field is written through", "struct W { r: &mut Int }; a = 1; w = W { r: &mut a }; *w.r = 9; return a;")
+    , ("an element borrowed for updating is written through", "xs = [1, 2, 3]; p = &mut get(xs, 1); *p = 7; return get(xs, 1) * 10 + size(xs);")
+    , ("a Box's payload is written through a reborrow of it", "b = Box::new(1); p = &mut *b; *p = 5; return Box::unbox(b);")
     ] ++ referenceWritePrograms ++ lentPartPrograms
 
 -- Calls that hand references back to the caller: through an update parameter's final value, a value given that holds
@@ -951,6 +953,11 @@ referenceWritePrograms =
     , ("a reference given something other than a borrow: a borrow made in one branch is not what it holds after the branches meet", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; y = 1; w = W { r: &mut y }; p = w.r; if c > 0 { p = &mut x; } else { }; *p = 5; return x * 10 + y; }; return f(1) * 100 + f(0);")
     , ("a reference given something other than a borrow: nor in the other branch", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; y = 1; w = W { r: &mut y }; p = w.r; if c > 0 { } else { p = &mut x; }; *p = 5; return x * 10 + y; }; return f(1) * 100 + f(0);")
     , ("a reference given something other than a borrow: a reborrow given a read-out after it was written through", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; y = 1; w = W { r: &mut y }; q = &mut x; p = &mut *q; *p = 2; p = w.r; *p = 5; return x * 10 + y; }; return f(1);")
+    , ("a reference given on is written through", "x = 1; q = &mut x; p = q; *p = 4; return x;")
+    , ("a reference is written through in each branch", "fn f(c: Int) -> Int { x = 0; q = &mut x; if c > 0 { *q = 1; } else { *q = 2; }; return x; }; return f(1) * 10 + f(0);")
+    , ("a field is written through a reference in a loop", "struct P { a: Int, b: Int }; p = P { a: 0, b: 7 }; q = &mut p; i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { (*q).a = (*q).a + 1; i = i + 1; }; return p.a * 10 + p.b;")
+    , ("a reference is written through after a call given a reborrow of it", "fn bump(n: &mut Int) -> Int writes(n) { *n = *n + 1; return 0; }; x = 1; q = &mut x; k = bump(&mut *q); *q = *q * 10; return x + k;")
+    , ("a place written through a held reference is borrowed again once the holder is dead", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 0; w = W { r: &mut x }; *w.r = 1; q = &mut x; *q = *q + 2; return x; }; return f(1);")
     , ("an update parameter rebuilt from itself releases what it held", "fn put(xs: &mut List<List<Int>>) -> Int writes(xs) { *xs = push(clone(*xs), [9, 10]); return 0; }; a = [[7], [8]]; put(&mut a); return size(a);")
     ]
 
@@ -1186,6 +1193,7 @@ valgrindCases =
     , "examples/termination.tersus", "examples/packet_parser.tersus"
     , "recursive function", "data built in a loop", "struct update", "match", "build in a loop", "set a list in a list"
     , "push to an empty list of lists", "in a list", "in a struct", "a parameter", "a builtin on lists"
+    , "an element borrowed for updating is written through", "a Box's payload is written through a reborrow of it"
     ] ++ map fst partialTakePrograms ++ map fst takenApartPrograms ++ map fst lookPrograms ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms] ++ map fst referenceWritePrograms ++ map fst lentPartPrograms
 
 -- Builds the program with the memory checks of the runtime and runs it, and for some programs builds it again as it is
