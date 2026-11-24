@@ -51,8 +51,10 @@ fn originalNames(classes: &InstanceNameClasses, p: &FullProgram) -> HashMap<Stri
     for d in &p.types { if wordIs(&d.tokens, 0, "struct") { named = collectFields(classes, &d.tokens, 2, named); }; };
     for d in &p.types {
         if wordIs(&d.tokens, 0, "enum") {
-            at = 3;
-            for i in 0..numberAt(&d.tokens, 2) { named = collectFields(classes, &d.tokens, at + 1, named); at = fieldsEnd(&d.tokens, at + 1); };
+            at = 3; n = numberAt(&d.tokens, 2);
+            if n >= 0 {
+                for i in 0..n { named = collectFields(classes, &d.tokens, at + 1, named); at = fieldsEnd(&d.tokens, at + 1); };
+            };
         };
     };
     for d in &p.generics { named = collectFields(classes, &d.tokens, namesEnd(&d.tokens, 2), named); };
@@ -84,7 +86,9 @@ fn redirectCall(classes: &InstanceNameClasses, caller: &FullFunction, originals:
     target = get(originals, idx); tail = headerTail(&target.header);
     typeParams = monoSection(&tail, "typeparams"); ns = size(monoSection(&tail, "sizeparams"));
     if ns = 0 && size(typeParams) = 0 { return unchanged; };
-    count = numberAt(line, 4); kept = count - ns;
+    count = numberAt(line, 4);
+    if count < 0 { return unchanged; };
+    kept = count - ns;
     if kept < 0 { kept = 0; };
     args = []; sizes = []; at = 5;
     for i in 0..count {
@@ -106,11 +110,14 @@ fn redirectCall(classes: &InstanceNameClasses, caller: &FullFunction, originals:
 fn redirect(classes: &InstanceNameClasses, f: FullFunction, originals: &List<FullFunction>) -> MonoRedirect ~ {
     blocks = []; needs = [];
     for b in &f.blocks {
-        rows = []; n = size(b.lines);
-        for i in 0..n - 1 { rows = push(rows, clone(get(&b.lines, i))); };
-        result = redirectCall(classes, &f, originals, last(&b.lines));
-        for k in &result.needs { needs = push(needs, clone(k)); };
-        blocks = push(blocks, FullBlock { lines: push(rows, result.line), ..clone(b) });
+        n = size(b.lines);
+        if n = 0 { blocks = push(blocks, clone(b)); }
+        else {
+            result = redirectCall(classes, &f, originals, last(&b.lines));
+            for k in &result.needs { needs = push(needs, clone(k)); };
+            rows = set(clone(b.lines), n - 1, result.line);
+            blocks = push(blocks, FullBlock { lines: rows, ..clone(b) });
+        };
     };
     return MonoRedirect { function: FullFunction { blocks: blocks, ..f }, needs: needs };
 };
@@ -118,13 +125,15 @@ fn redirect(classes: &InstanceNameClasses, f: FullFunction, originals: &List<Ful
 fn rewritableEnvBases(shared: &List<List<Token>>) -> List<List<EnvEntry>> ~ {
     index = [];
     for table in shared {
-        entries = []; at = 2;
-        for i in 0..numberAt(table, 1) {
-            end = operandEnd(table, at + 1);
-            if !wordIs(table, at + 1, "const") || !wordIs(table, at + 2, "fn") {
-                entries = push(entries, EnvEntry { name: textAt(table, at), value: sliceTokens(table, at + 1, end) });
+        entries = []; at = 2; n = numberAt(table, 1);
+        if n >= 0 {
+            for i in 0..n {
+                end = operandEnd(table, at + 1);
+                if !wordIs(table, at + 1, "const") || !wordIs(table, at + 2, "fn") {
+                    entries = push(entries, EnvEntry { name: textAt(table, at), value: sliceTokens(table, at + 1, end) });
+                };
+                at = end;
             };
-            at = end;
         };
         index = push(index, entries);
     };
@@ -151,7 +160,7 @@ fn renameEnv(ts: &List<Token>, values: &List<MonoBinding>, names: &List<MonoBind
 };
 
 fn specializedHeader(f: &FullFunction, label: String, kept: &List<String>, removed: &List<String>, sizes: &List<MonoBinding>, types: &List<MonoBinding>) -> List<Token> ~ {
-    header = [clone(get(&f.header, 0)), name(label)];
+    header = push(sliceTokens(&f.header, 0, 1), name(label));
     header = appendTokens(header, monoSectionTokens("params", kept, false));
     header = push(header, word("returns")); ret = monoReturn(f);
     if size(ret) = 0 { header = push(header, word("none")); }
@@ -283,7 +292,7 @@ fn winners(classes: &InstanceNameClasses, plain: &List<FullFunction>, done: &Lis
         i = e.value;
         if i >= 0 && i < size(done) {
             f = clone(get(done, i).function);
-            if final { f = FullFunction { header: set(f.header, 1, name(clone(e.key))), ..f }; };
+            if final && size(f.header) > 1 { f = FullFunction { header: set(f.header, 1, name(clone(e.key))), ..f }; };
             fs = push(fs, f);
         };
     };

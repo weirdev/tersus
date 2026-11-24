@@ -14,12 +14,14 @@ fn namedTypes(classes: &InstanceNameClasses, ts: &List<Token>, at: Int, out: Lis
     if tag = "named" {
         out = push(out, MonoBinding { name: instanceNameAt(classes, ts, at), tokens: sliceTokens(ts, at, typeEnd(ts, at)) });
         n = numberAt(ts, at + 2); p = at + 3;
+        if n < 0 { return out; };
         for i in 0..n {
             if wordIs(ts, p, "type") { out = namedTypes(classes, ts, p + 1, out); };
             p = argEnd(ts, p);
         };
     } else if tag = "fn" {
         n = numberAt(ts, at + 1); p = at + 2;
+        if n < 0 { return out; };
         for i in 0..n { p = typeEnd(ts, p); };
         out = namedTypes(classes, ts, p, out); p = at + 2;
         for i in 0..n { out = namedTypes(classes, ts, p, out); p = typeEnd(ts, p); };
@@ -35,6 +37,7 @@ fn symbolic(ts: &List<Token>, at: Int) -> Bool ~ {
     if tag = "param" { return true; };
     if tag = "named" {
         n = numberAt(ts, at + 2); p = at + 3;
+        if n < 0 { return false; };
         for i in 0..n {
             if wordIs(ts, p, "type") && symbolic(ts, p + 1) { return true; };
             if wordIs(ts, p, "size") && wordIs(ts, p + 1, "p") { return true; };
@@ -43,10 +46,12 @@ fn symbolic(ts: &List<Token>, at: Int) -> Bool ~ {
     };
     if tag = "fn" || tag = "fnc" {
         n = numberAt(ts, at + 1); p = at + 2;
-        for i in 0..n + 1 {
+        if n < 0 { return false; };
+        for i in 0..n {
             if symbolic(ts, p) { return true; };
             p = typeEnd(ts, p);
         };
+        return symbolic(ts, p);
     };
     if tag = "array" { return symbolic(ts, at + 1) || wordIs(ts, typeEnd(ts, at + 1), "p"); };
     if tag = "ref" || tag = "mutref" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "closure" || tag = "closuremut" {
@@ -69,7 +74,7 @@ fn typeMatch(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>) -> 
     };
     if tag = "named" {
         n = numberAt(pat, 2);
-        if textAt(pat, 1) != textAt(actual, 1) || n != numberAt(actual, 2) { return bs; };
+        if n < 0 || textAt(pat, 1) != textAt(actual, 1) || n != numberAt(actual, 2) { return bs; };
         p = 3; a = 3;
         for i in 0..n {
             pe = argEnd(pat, p); ae = argEnd(actual, a);
@@ -81,11 +86,13 @@ fn typeMatch(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>) -> 
     };
     if tag = "fn" {
         pn = numberAt(pat, 1); an = numberAt(actual, 1);
+        if pn < 0 || an < 0 { return bs; };
         p = 2; a = 2;
         for i in 0..pn { p = typeEnd(pat, p); };
         for i in 0..an { a = typeEnd(actual, a); };
         bs = typeMatch(bs, sliceTokens(pat, p, size(pat)), sliceTokens(actual, a, size(actual)));
         p = 2; a = 2; n = pn; if an < n { n = an; };
+        if n < 0 { return bs; };
         for i in 0..n {
             pe = typeEnd(pat, p); ae = typeEnd(actual, a);
             bs = typeMatch(bs, sliceTokens(pat, p, pe), sliceTokens(actual, a, ae)); p = pe; a = ae;
@@ -150,6 +157,7 @@ fn compareType(a: &List<Token>, b: &List<Token>) -> Int ~ {
     };
     if ar = 5 || ar = 16 {
         an = numberAt(a, 1); bn = numberAt(b, 1);
+        if an < 0 || bn < 0 { return 0; };
         order = compareTypes(monoTypeItems(a, 2, an, false), monoTypeItems(b, 2, bn, false), false);
         if order != 0 { return order; };
         ap = 2; bp = 2;
@@ -159,7 +167,9 @@ fn compareType(a: &List<Token>, b: &List<Token>) -> Int ~ {
         if order != 0 || ar = 5 { return order; };
         order = monoCompareNames(monoQuotedNames(a, ae + 1, an), monoQuotedNames(b, be + 1, bn), false);
         if order != 0 { return order; };
-        preA = fnClausesAt(a, namesEnd(a, ae)); preB = fnClausesAt(b, namesEnd(b, be));
+        ac = namesEnd(a, ae); bc = namesEnd(b, be);
+        if ac < 0 || ac > size(a) || bc < 0 || bc > size(b) { return 0; };
+        preA = fnClausesAt(a, ac); preB = fnClausesAt(b, bc);
         order = compareClauses(&preA.value, &preB.value); if order != 0 { return order; };
         postA = fnClausesAt(a, preA.pos); postB = fnClausesAt(b, preB.pos);
         return compareClauses(&postA.value, &postB.value);
