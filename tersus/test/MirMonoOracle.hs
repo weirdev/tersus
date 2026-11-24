@@ -12,7 +12,7 @@ import Data.Map.Strict (Map)
 
 import Mir
 import Pretty (renderType)
-import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName, mentionsParameter, substitute)
+import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox, Variable, boxedTypeKey, containsBoxedClosure, instanceName, mentionsParameter, substitute)
 
 -- A function with type parameters (`fn first<T>(a: &List<T>) -> T`) is made the same way, a copy for each list of types. A call does not
 -- say them: they are what the types of the arguments and of the local that gets the result make the types of the parameters and of the
@@ -108,7 +108,11 @@ build program (key@(name, tys, sizes) : rest) done
              in build program (rest ++ needs) (Map.insert key copy done)
 
 fnInstanceName :: Name -> [Type] -> [Integer] -> Name
-fnInstanceName name tys sizes = name ++ "<" ++ intercalate ", " (map renderType tys ++ map show sizes) ++ ">"
+fnInstanceName name tys sizes = name ++ "<" ++ intercalate ", " (map argumentName tys ++ map show sizes) ++ ">"
+  where
+    argumentName ty
+        | containsBoxedClosure ty = boxedTypeKey ty
+        | otherwise = renderType ty
 
 -- The function with its type and size parameters replaced by the types and the sizes
 instantiate :: Function -> [Type] -> [Integer] -> Function
