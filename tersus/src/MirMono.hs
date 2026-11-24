@@ -11,7 +11,7 @@ import Data.Map.Strict (Map)
 
 import Mir
 import Pretty (renderType)
-import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName, mentionsParameter, substitute)
+import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox, Variable, boxedTypeKey, containsBoxedClosure, instanceName, mentionsParameter, substitute)
 
 -- A function with type parameters (`fn first<T>(a: &List<T>) -> T`) is made the same way, a copy for each list of types. A call does not
 -- say them: they are what the types of the arguments and of the local that gets the result make the types of the parameters and of the
@@ -93,7 +93,11 @@ build program (key@(name, tys, sizes) : rest) done
              in build program (rest ++ needs) (Map.insert key copy done)
 
 fnInstanceName :: Name -> [Type] -> [Integer] -> Name
-fnInstanceName name tys sizes = name ++ "<" ++ intercalate ", " (map renderType tys ++ map show sizes) ++ ">"
+fnInstanceName name tys sizes = name ++ "<" ++ intercalate ", " (map argumentName tys ++ map show sizes) ++ ">"
+
+  where
+    argumentName ty | containsBoxedClosure ty = boxedTypeKey ty
+                    | otherwise = renderType ty
 
 -- The function with its type and size parameters replaced by the types and the sizes
 instantiate :: Function -> [Type] -> [Integer] -> Function
@@ -133,6 +137,8 @@ instantiate fn tys sizes =
             TRef u -> namedSubs u
             TMutRef u -> namedSubs u
             TFn as r -> concatMap namedSubs (r : as)
+            TFnContract as r _ -> concatMap namedSubs (r : as)
+            TBoxedClosure _ sig -> namedSubs sig
             TForall _ _ u -> namedSubs u
             _ -> []
     constant c = case c of
@@ -163,6 +169,9 @@ instantiate fn tys sizes =
         ListOp op os -> ListOp op (map operand os)
         MakeList os -> MakeList (map operand os)
         MakeBox o -> MakeBox (operand o)
+        PackClosure o thunk -> case operand (Const (CFn thunk)) of
+            Const (CFn name) -> PackClosure (operand o) name
+            _ -> PackClosure (operand o) thunk
         Unbox o -> Unbox (operand o)
         Unsize o -> Unsize (operand o)
         MakeData name fields -> MakeData (named name) [(f, operand o) | (f, o) <- fields]
@@ -236,6 +245,8 @@ match pat actual = case (pat, actual) of
     (TNamed bp ps, TNamed ba as)
         | bp == ba, length ps == length as -> concat (zipWith matchArg ps as)
     (TFn ps p, TFn as a) -> concat (zipWith match (p : ps) (a : as))
+    (TBoxedClosure pm p, TBoxedClosure am a) | pm == am -> match p a
+    (TFnContract ps p pc, TFnContract as a ac) | pc == ac -> concat (zipWith match (p : ps) (a : as))
     _ -> []
 
 -- What the type parameters are, given what an instance of a struct is given
@@ -259,6 +270,8 @@ namedTypesByName program = Map.fromList [(instanceName b a, TNamed b a) | ty <- 
         TRef u -> subs u
         TMutRef u -> subs u
         TFn as r -> concatMap subs (r : as)
+        TFnContract as r _ -> concatMap subs (r : as)
+        TBoxedClosure _ sig -> subs sig
         TForall _ _ u -> subs u
         _ -> []
 

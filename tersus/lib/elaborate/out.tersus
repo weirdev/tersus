@@ -133,6 +133,11 @@ fn typeTokenText(st: &St, t: Int) -> String ~ {
     if k = 10 { return catStrings(" ref", typeTokenText(st, nth(&x.args, 0))); };
     if k = 11 { return catStrings(" mutref", typeTokenText(st, nth(&x.args, 0))); };
     if k = 12 { return catStrings(" param ", quotedName(&x.name)); };
+    if k = 16 {
+        tag = " closure";
+        if x.flag { tag = " closuremut"; };
+        return catStrings(tag, typeTokenText(st, nth(&x.args, 0)));
+    };
     if k = 13 {
         out = catStrings(" forall ", intText(size(x.sizes)));
         for s in &x.sizes { out = catStrings(catStrings(out, " "), quotedName(s)); };

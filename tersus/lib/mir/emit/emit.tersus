@@ -3,14 +3,13 @@ import mir::emit::values { Gen };
 import mir::emit::functions { emitBody, emitFunction, externDeclaration, failedFn };
 import mir::emit::helpers { cloneFunctions, dropFunctions, printFunctions };
 import mir::support::support { noStrings, showInt, renderType, isAggregate };
-import data::codec::codec { Type, Token, Parsed, tokenize, isWord, boxedClosureInRows };
+import data::codec::codec { Type, Token, Parsed, tokenize, isWord };
 import data::reader::reader { readRecord, readRecords, tokenizeMir };
 import mir::reader::reader { TypeDecl, Function, Program, programAt, readLines, storageProblemIn };
 import mir::ownership::ownership { isOwnershipRequest, runOwnership };
 import mir::mono::mono { isMonoRequest, runMono };
 import mir::ownership::mono { isMonoOwnershipRequest, runMonoOwnership };
 import mir::link::link { isLinkRequest, runLink };
-import mir::full::tokens { boxedClosureInFullRows };
 
 // The lowering from the MIR to LLVM IR, written in Tersus (step 31 of the roadmap, see STEP31.md): the compiler's only emitter. It was written function by function
 // oracle. It reads the MIR as data from the standard input (what `tersus mir --data` prints) and writes the LLVM IR.
@@ -134,6 +133,11 @@ fn entryPoint(types: &List<TypeDecl>, p: &Program, main: &Function) -> EmitResul
     for c in convert { body = push(body, clone(c)); };
     body = push(body, "call void ".then(printSymbol(types, ty)).then("(i64 ").then(word).then(")"));
     body = push(body, "%nl = call i64 @tersus_writeByte(i64 10)");
+    if ty is Type::TBoxedClosure {
+        body = push(body, "%owner = alloca ptr");
+        body = push(body, "store ptr %v, ptr %owner");
+        body = push(body, "call void ".then(dropSymbol(types, ty)).then("(ptr %owner)"));
+    };
     body = push(body, "br label %done");
     body = push(body, "done:");
     body = push(body, "ret i32 0");
@@ -278,20 +282,10 @@ fn readEmitterInput() -> Parsed<List<List<Token>>> ~ {
     return Parsed<List<List<Token>>> { value: rows, pos: 0, ok: true };
 };
 
-fn boxedClosureRefused(lines: &List<List<Token>>) -> Bool ~ {
-    if isLinkRequest(lines) { return false; };
-    if isMonoRequest(lines) || isMonoOwnershipRequest(lines) { return boxedClosureInFullRows(lines); };
-    return boxedClosureInRows(lines);
-};
-
 mode = String::arg(0, 100);
 read = readEmitterInput();
 if !read.ok {
     "the input is not the MIR as data: a bad name\n".printError();
-    return 1;
-};
-if boxedClosureRefused(&read.value) {
-    "boxed closure types are not supported by the runtime MIR ABI\n".printError();
     return 1;
 };
 if isLinkRequest(read.value) {

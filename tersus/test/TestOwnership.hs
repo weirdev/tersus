@@ -42,7 +42,7 @@ data Val = VI Integer | VB Bool | VP Int | VNull | VF Name | VS Name [(Variable,
     deriving (Eq, Show)
 
 -- (OMem is the memory of Addr::alloc: the slots that hold a value, of so many; an address is the number of the cell times 2^32 and the slot)
-data Obj = OList [Val] | OBox Val | OMem (Map Integer Val) Integer
+data Obj = OList [Val] | OBox Val | OClosure Name Val | OMem (Map Integer Val) Integer
 
 data Cell = Cell {cellGeneration :: Int, cellObject :: Obj}
 
@@ -169,6 +169,7 @@ listCell fs = case lookup "addr" fs of
 children :: Obj -> [Val]
 children (OList vs) = vs
 children (OBox v) = [v]
+children (OClosure _ v) = [v]
 children (OMem slots _) = Map.elems slots
 
 -- The values of the heap that a value holds, inline or not
@@ -207,6 +208,7 @@ cloneFields (VP a) = do
     case cellObject c of
         OList vs -> mapM (cloneIn Nothing) vs >>= alloc . OList
         OBox v -> cloneIn Nothing v >>= alloc . OBox
+        OClosure{} -> failM "a boxed closure is copied"
         OMem _ _ -> failM "memory is copied"
 -- (a copy of a list has memory of its own, with copies of the elements in use)
 cloneFields (VS name fs) | isListStruct name, Just a <- listCell fs = do
@@ -266,6 +268,7 @@ needsDrop program = owning
   where
     owning ty = case ty of
         TBox{} -> True
+        TBoxedClosure{} -> True
         TArrayOf t _ -> owning t
         TNamed base args -> declared (instanceName base args)
         TVariant v -> maybe False declared (ownerOf v)
@@ -394,6 +397,7 @@ toPure (VP a) = do
     case cellObject c of
         OList vs -> PL <$> mapM toPure vs
         OBox v -> toPure v
+        OClosure{} -> failM "an opaque boxed closure is observed directly"
         OMem _ _ -> failM "memory is compared"
 -- (a list of native code is the elements in use of the array it holds)
 toPure (VS name fs)
@@ -477,6 +481,7 @@ evalRvalue rv =
         Borrow root steps mutable -> mapM refPath steps >>= \path -> borrowValue root path mutable
         Deref o -> readOperand o >>= dereference
         MakeBox o -> readOperand o >>= alloc . OBox
+        PackClosure o thunk -> readOperand o >>= alloc . OClosure thunk
         Unbox o -> readOperand o >>= unbox
         BinaryOp op a b -> do
             x <- readOperand a
@@ -855,14 +860,22 @@ runBlock program fn b = do
                 _ -> return Nothing
         Call callee args dest next -> do
             target <- readOperand callee
-            name <- case target of
-                VF n -> return n
+            (name, capture) <- case target of
+                VF n -> return (n, [])
+                VR{} -> do
+                    owner <- dereference target
+                    (_, payload) <- object owner
+                    case payload of
+                        OClosure n v -> return (n, [v])
+                        _ -> failM "a boxed call does not point to a closure"
                 _ -> failM "a call of something that is not a function"
             callee' <- maybe (failM ("no function " ++ name)) return (Map.lookup name (progFunctions program))
+            let (self, params) = splitAt (length capture) (fnParams callee')
+            if any (`elem` fnMutBorrowed callee') self then failM "the heap model does not dispatch mutable boxed closures" else return ()
             values <- mapM (\(param, operand) -> case operandLocal operand of
                 Just local | param `elem` fnBorrowed callee' -> borrowValue local [] (param `elem` fnMutBorrowed callee')
-                _ -> readOperand operand) (zip (fnParams callee') args)
-            result <- callFunction program callee' values
+                _ -> readOperand operand) (zip params args)
+            result <- callFunction program callee' (capture ++ values)
             v <- maybe (failM "a function did not return a value") return result
             f <- currentFrame
             case Map.lookup dest (frameSlots f) of
@@ -1212,6 +1225,7 @@ mainProgram locals stmts =
         , progInvariants = Map.empty
         , progBounded = Map.empty
         , progInstances = Map.empty
+        , progCaptureStorage = Map.empty
         }
 
 -- A part of a list that is read after the list changes is copied: the change of a list is a call, which ends the block, and a part that

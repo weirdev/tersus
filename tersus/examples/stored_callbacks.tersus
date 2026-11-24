@@ -1,0 +1,15 @@
+// Borrow callbacks from a list and a field without moving either owner.
+struct Handler { run: Closure<fn(Int) -> Int> };
+
+fn makeAdder(offset: Int) -> Closure<fn(Int) -> Int> {
+    return move fn(x: Int) -> Int => x + offset;
+};
+
+fn double(x: Int) -> Int { return x * 2; };
+
+let callbacks: List<Closure<fn(Int) -> Int>> = [double, makeAdder(7)];
+handler = Handler { run: makeAdder(10) };
+first = &get(callbacks, 0);
+second = &get(callbacks, 1);
+field = &handler.run;
+return first(3) + second(3) + field(3);

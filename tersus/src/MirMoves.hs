@@ -68,6 +68,7 @@ roles rv = case rv of
     ListOp _ os -> [(o, Read) | o <- os]
     MakeList os -> [(o, Consume) | o <- os]
     MakeBox o -> [(o, Consume)]
+    PackClosure o _ -> [(o, Consume)]
     Unbox o -> [(o, Consume)]
     Unsize o -> [(o, Consume)]
     MakeData _ fields -> [(o, Consume) | (_, o) <- fields]
@@ -148,15 +149,14 @@ ownsHeap program = go Set.empty
 -- function for such a type is checked by the ownership pass alone, which applies the same rule at the types native code is made
 -- of and refuses what this misses (testOwnership "the ownership pass's own refusals").
 holdsDrop :: Cx -> Type -> Bool
-holdsDrop cx
-    | Set.null (cxDrops cx) = const False
-    | otherwise = go Set.empty
+holdsDrop cx = go Set.empty
   where
     program = cxProgram cx
     -- (an instance has a Clone of its own when its type has one and none of its type arguments holds a value with a drop and no
     -- Clone, which a Clone bounded by Clone on that argument could not clone: dropHolders in lib/mir/ownership/common.tersus)
     cloned seen base args = base `Set.member` cxCloned cx && not (any (go seen) [t | ArgType t <- args])
     go seen ty = case ty of
+        TBoxedClosure{} -> True
         TArrayOf t _ -> go seen t
         TUninit t -> go seen t
         TAddr t -> go seen t
@@ -590,6 +590,7 @@ sharedTransfer cx st moved rv = case rv of
     AsVariant o _ -> carries [o]
     Unsize o -> carries [o]
     MakeBox o -> carries [o]
+    PackClosure o _ -> carries [o]
     MakeList os -> carries os
     MakeData _ fields -> carries (map snd fields)
     TakeField l _ _ -> carries [Copy l]
@@ -780,6 +781,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
              in Just (loans', if null made then Map.delete d (stExtraLoans base) else Map.insert d (concatMap snd made) (stExtraLoans base), foldl' (\m (f, places) -> Map.insert (d, f) places m) clearedFields made)
         MakeList items -> carry items
         MakeBox o -> carry [o]
+        PackClosure{} -> Just none
         Unsize o -> carry [o]
         ReadField operand _ field
             | Just src <- operandLocal operand, not (isRefType ty), Just places <- Map.lookup (src, field) (stFieldLoans st1), not (null (refFieldNames cx ty)) ->
@@ -1366,17 +1368,21 @@ terminator cx pos st term = case term of
     Call callee args dest _ ->
         let lent = lentArguments cx callee (length args)
             mut = mutArguments cx callee (length args)
-            argLocals = [(l, b) | (a, b) <- zip args lent, Just l <- [operandLocal a]]
+            receiver = [(callee, True, True) | Just l <- [operandLocal callee], TMutRef (TBoxedClosure True _) <- [typeOf cx l]]
+                    ++ [(callee, True, False) | Just l <- [operandLocal callee], ty <- [typeOf cx l],
+                          case ty of TRef (TBoxedClosure False _) -> True; TMutRef (TBoxedClosure False _) -> True; _ -> False]
+            loanArgs = receiver ++ zip3 args lent mut
+            argLocals = [(l, b) | (a, b, _) <- loanArgs, Just l <- [operandLocal a]]
             lentPlaces = [q | (l, True) <- argLocals, q <- mayPlacesOf st l] ++ loanPlacesOf cx st (map fst argLocals)
             conflicts = lentAndMovedExcept (\h q -> null (snd h) && forwardedOutside cx args (fst h) q) cx pos st "lent to this call" lentPlaces [l | (l, False) <- argLocals]
             activeBorrowLoans = cxLiveNow cx `Set.union` Set.fromList [local | (local, borrowed) <- argLocals, borrowed]
             argPlaces l = case Map.lookup l (stLoans st) of
                 Just (place, _, _) -> place : Map.findWithDefault [] l (stExtraLoans st)
                 Nothing -> placesOf st l
-            borrowedPlaces = [(index, l, place, mutable) | (index, (arg, borrowed, mutable)) <- zip [1 :: Int ..] (zip3 args lent mut), borrowed, Just l <- [operandLocal arg], place <- argPlaces l]
+            borrowedPlaces = [(index, l, place, mutable) | (index, (arg, borrowed, mutable)) <- zip [1 :: Int ..] loanArgs, borrowed, Just l <- [operandLocal arg], place <- argPlaces l]
             mutErrs =
                 [ message cx pos (describe cx place ++ " is borrowed by " ++ describeLocal cx ref ++ ", so it cannot be lent for updating to this call: the borrow ends at the last use of " ++ describeLocal cx ref)
-                | (a, isMut) <- zip args mut
+                | (a, _, isMut) <- loanArgs
                 , isMut
                 , Just l <- [operandLocal a]
                 , place <- argPlaces l
@@ -1393,7 +1399,7 @@ terminator cx pos st term = case term of
                 , leftMut || rightMut
                 , overlaps leftPlace rightPlace
                 ]
-            mutLocals = [l | (a, True) <- zip args mut, Just l <- [operandLocal a]]
+            mutLocals = [l | (a, _, True) <- loanArgs, Just l <- [operandLocal a]]
             readAndUpdated =
                 [ message cx pos (describe cx h ++ " is lent to this call" ++ (if h == updated then " and lent to it for updating too" else ", and " ++ describe cx updated ++ " is lent to it for updating") ++ ": write clone(" ++ describe cx h ++ ") for the one that is read")
                 | m <- mutLocals
@@ -1414,7 +1420,7 @@ terminator cx pos st term = case term of
             -- which are those of every copy, is not given to the call, so its moves, its loans and the other arguments of the
             -- call that move it do not stop the forward)
             outside = forwardedOutside cx args
-            (st', errs) = foldl' (\acc (l, steps, role) -> accessExcept (outside l) cx pos acc (l, steps, role)) (st, []) ([(l, [], Read) | Just l <- [operandLocal callee]] ++ [(l, [], if b then Read else Consume) | (l, b) <- argLocals])
+            (st', errs) = foldl' (\acc (l, steps, role) -> accessExcept (outside l) cx pos acc (l, steps, role)) (st, []) ([(l, [], Read) | null receiver, Just l <- [operandLocal callee]] ++ [(l, [], if b then Read else Consume) | (l, b) <- argLocals])
             forwarded = [l | (l, False) <- argLocals, isPackRoot cx l]
             stMarked = st'{stMoved = foldl' (\m l -> Map.adjust (\(p, _) -> (p, Just forwardedMark)) (l, []) m) (stMoved st') forwarded}
             -- (a call of a function whose body is checked here leaves what the caller's holders hold as it was)
@@ -1438,7 +1444,7 @@ terminator cx pos st term = case term of
             windowed = case (refFieldNames cx (typeOf cx dest), resultPlaces) of
                 (fields@(_ : _), places@(_ : _)) -> loaned{stFieldLoans = foldl' (\m f -> Map.insert (dest, f) places m) (Map.filterWithKey (\(root, _) _ -> root /= dest) (stFieldLoans loaned)) fields, stExtraLoans = Map.insert dest places (stExtraLoans loaned)}
                 _ -> loaned
-            readErrs = concat [suspendedReads cx pos st dest r | Just r <- map operandLocal args, isReference cx r] ++ placeReads cx pos st [dest] [(l, [], True) | (l, lentArg) <- [(l, True) | Just l <- [operandLocal callee]] ++ argLocals, lentArg || isCopy cx l]
+            readErrs = concat [suspendedReads cx pos st dest r | Just r <- map operandLocal (callee : args), isReference cx r] ++ placeReads cx pos st [dest] [(l, [], True) | (l, lentArg) <- [(l, True) | Just l <- [operandLocal callee]] ++ argLocals, lentArg || isCopy cx l]
             parented = windowed{stParents = case [l | (a, _) <- sources, Just l <- [operandLocal a], l /= dest] of
                 [] -> Map.delete dest (stParents windowed)
                 from -> Map.insert dest (nub from) (stParents windowed)}
@@ -1515,7 +1521,7 @@ referenceReach query program = go query Set.empty
         TParam _ -> False
         TFn _ _ -> False
         TFnContract _ _ _ -> False
-        TBoxedClosure{} -> True
+        TBoxedClosure{} -> False
         TForall _ _ _ -> False
         TAddr _ -> False
         TInt -> False
@@ -1546,9 +1552,13 @@ indirectParameterTypes :: Cx -> Operand -> Maybe [Type]
 indirectParameterTypes cx callee = do
     local <- operandLocal callee
     case typeOf cx local of
-        TFn args _ -> Just args
-        TFnContract args _ _ -> Just args
-        _ -> Nothing
+        TRef (TBoxedClosure False signature) -> argsOf signature
+        TMutRef (TBoxedClosure _ signature) -> argsOf signature
+        ty -> argsOf ty
+  where
+    argsOf (TFn args _) = Just args
+    argsOf (TFnContract args _ _) = Just args
+    argsOf _ = Nothing
 
 -- Which of the arguments of a call are lent: the parameters that the function declares as such, or the ones that the type of a function value marks
 lentArguments :: Cx -> Operand -> Int -> [Bool]

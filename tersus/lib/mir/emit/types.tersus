@@ -1,4 +1,4 @@
-import mir::support::support { Res, Layout, noStrings, beforeAngle, escaped, renderType, declName, lookupDecl, canonical, variantsOf, sizedArray, isSizedArray, isAggregate, declaredName, roundUp, wordLayout, simpleLayout };
+import mir::support::support { Res, Layout, noStrings, beforeAngle, escaped, renderType, declName, lookupDecl, canonical, variantsOf, sizedArray, isSizedArray, isAggregate, declaredName, roundUp, wordLayout, simpleLayout , runtimeTypeKey };
 import data::codec::codec { Size, Type };
 import mir::reader::reader { Field, TypeDecl, Constant, Operand, RefStep, Function, Program, cloneOf, dropOf, isStorageList };
 
@@ -119,8 +119,11 @@ fn containsName(names: &List<String>, n: &String) -> Bool [{ }] [{ }] {
 
 // Whether a value owns something to free: a Box, or an array, struct or enum that holds one or has a drop (the ownership pass's needsDrop). The names
 // are those of the functions of the program, which have the drop of a type that has one.
+fn ownsHeapWord(t: &Type) -> Bool { return t is Type::TBox || t is Type::TBoxedClosure; };
+fn hasDropHelper(t: &Type) -> Bool { return isAggregate(t) || t is Type::TBoxedClosure; };
+
 fn needsDrop(types: &List<TypeDecl>, p: &Program, t: &Type) -> Bool ~ {
-    if t is Type::TBox { return true; };
+    if ownsHeapWord(t) { return true; };
     if t is Type::TArray { return needsDrop(types, p, Box::unbox((t as Type::TArray).elem)); };
     n = declaredName(types, t);
     if !n.ok { return false; };
@@ -152,23 +155,23 @@ fn needsDrop(types: &List<TypeDecl>, p: &Program, t: &Type) -> Bool ~ {
 
 // The symbol of the function that frees what a value of the type owns, made for the type below
 fn dropSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
-    return global("drop.", renderType(canonical(types, t)));
+    return global("drop.", runtimeTypeKey(canonical(types, t)));
 };
 
 // The symbol of the function that prints a value of the type, made for the type below
 fn printSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
-    return global("print.", renderType(canonical(types, t)));
+    return global("print.", runtimeTypeKey(canonical(types, t)));
 };
 
 // The symbol of the function that copies a value of the type into room of its own, made for the type below: the copy
 // that is made when the type has no `Clone` impl to call (a copy of a type that has one is that impl, called)
 fn cloneSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
-    return global("clone.", renderType(canonical(types, t)));
+    return global("clone.", runtimeTypeKey(canonical(types, t)));
 };
 
 // The symbol of the function that frees what each of a run of values of the type owns
 fn dropRangeSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
-    return global("droprange.", renderType(canonical(types, t)));
+    return global("droprange.", runtimeTypeKey(canonical(types, t)));
 };
 
 // Whether a value is a word that is a number: an Int, a Byte or an address
@@ -188,7 +191,7 @@ fn llvmType(t: &Type) -> Res ~ {
         if !inner.ok { return inner; };
         return Res { ok: true, text: "ptr" };
     };
-    if t is Type::TNamed || t is Type::TVariant || t is Type::TFn { return Res { ok: true, text: "ptr" }; };
+    if t is Type::TNamed || t is Type::TVariant || t is Type::TFn || t is Type::TBoxedClosure { return Res { ok: true, text: "ptr" }; };
     return unsupported;
 };
 
@@ -459,7 +462,7 @@ fn declaredIn(cx: &Ctx, t: &Type) -> Res [{ }] [{ }] {
 
 // Whether a value owns something to free (needsDrop, with the answer for a struct or an enum taken from the table)
 fn needsDropIn(cx: &Ctx, t: &Type) -> Bool ~ {
-    if t is Type::TBox { return true; };
+    if ownsHeapWord(t) { return true; };
     if t is Type::TArray { return needsDropIn(cx, Box::unbox((t as Type::TArray).elem)); };
     n = declaredIn(cx, t);
     if !n.ok { return false; };
@@ -496,10 +499,27 @@ fn slotsIn(cx: &Ctx, t: &Type) -> Int ~ {
 // Whether a local of the type has something to free: a value held inline that holds something of the heap (a list or a Box of the library,
 // which is a word of it)
 fn ownsIn(cx: &Ctx, t: &Type) -> Bool ~ {
-    return isAggregate(t) && needsDropIn(cx, t);
+    return hasDropHelper(t) && needsDropIn(cx, t);
 };
 
 // A struct is its own constructor, and a variant has its enum's representation
+fn holdsBoxedOwner(cx: &Ctx, t: &Type, seen: &List<String>) -> Bool ~ {
+    if t is Type::TBoxedClosure { return true; };
+    if t is Type::TArray { return holdsBoxedOwner(cx, Box::unbox((t as Type::TArray).elem), seen); };
+    n = declaredIn(cx, t);
+    if !n.ok || containsName(seen, n.text) { return false; };
+    base = beforeAngle(n.text);
+    storage = base = cx.storage.listName || base = cx.storage.boxName;
+    next = push(clone(seen), clone(n.text));
+    for v in variantsOf(cx.types, n.text) {
+        for f in v.fields {
+            if holdsBoxedOwner(cx, f.ty, &next) { return true; };
+            if storage && f.ty is Type::TAddr && holdsBoxedOwner(cx, Box::unbox((f.ty as Type::TAddr).inner), &next) { return true; };
+        };
+    };
+    return false;
+};
+
 fn constructedType(cx: &Ctx, name: &String) -> Type [{ }] [{ }] {
     i = declIndex(cx, name);
     if i >= 0 && i < size(&cx.types) {

@@ -290,6 +290,26 @@ fn lowerLastWith(ls: LowSt, src: &List<AstNode>, e: Int, ty: Int) -> LowSt ~ {
     args = listItems(src, (x as AstExpression::F).xs);
     if (c = "And" || c = "Or") && size(args) = 2 { return lowerValueOfConnective(ls, src, e, ty); };
     funct = (x as AstExpression::F).f;
+    fx = exprAt(src, funct);
+    if fx is AstExpression::Var && nameText(src, (fx as AstExpression::Var).n) = "$packClosure" {
+        if size(args) != 2 { return lfail(ls, "a boxed closure needs a capture and a thunk"); };
+        ls = lowerOperand(ls, src, intAt(&args, 0));
+        if !ls.ok { return ls; };
+        capture = clone(ls.op);
+        if capture.k = 2 {
+            ls = tempLocal(ls, ls.ty);
+            local = ls.root;
+            ls = emitAssign(ls, local, useRv(capture));
+            capture = copyOp(local);
+        };
+        if capture.k != 0 { return lfail(ls, "a boxed closure needs a capture local"); };
+        ls = claim(ls);
+        if !ls.ok { return ls; };
+        ls = resolveHead(ls, src, intAt(&args, 1));
+        if !ls.ok { return ls; };
+        text = lwSp(lwCat("packclosure move ", intText(capture.l)), opText(&ls.op));
+        return LowSt { pend: rvPend(textRv(text)), ty: ty, ..ls };
+    };
     ls = resolveHead(ls, src, funct);
     if !ls.ok { return ls; };
     if ls.id >= 0 {
@@ -300,7 +320,10 @@ fn lowerLastWith(ls: LowSt, src: &List<AstNode>, e: Int, ty: Int) -> LowSt ~ {
     signature = ls.ty;
     ls = anyEffects(ls, src, &args);
     if ls.yes {
-        ls = captureOperand(ls, 0 - 1, callee, signature);
+        reference = 0 - 1;
+        inner = unrefTy(&ls, signature);
+        if lwKind(&ls, inner) = 16 { reference = lwReferenceKind(&ls, signature); };
+        ls = captureOperand(ls, reference, callee, signature);
         callee = clone(ls.op);
     };
     method = false;
@@ -773,6 +796,8 @@ fn pointerNames() -> List<String> ~ {
 fn lwParameters(ls: &LowSt, t: Int) -> List<Int> ~ {
     k = lwKind(ls, t);
     if k = 13 { return lwParameters(ls, argOf(ls, t, 0)); };
+    if k = 16 { return lwParameters(ls, argOf(ls, t, 0)); };
+    if (k = 10 || k = 11) && lwKind(ls, argOf(ls, t, 0)) = 16 { return lwParameters(ls, argOf(ls, t, 0)); };
     if k != 14 { return []; };
     args = tyOf(ls, t).args;
     out = [];

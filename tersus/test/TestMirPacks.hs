@@ -152,7 +152,7 @@ forwarding = realTemplate "forward" $ unlines
 
 fixture :: [M.PackLoop] -> M.Function -> M.Program
 fixture loops f = M.Program Map.empty (Map.singleton "fixture" f) entry Map.empty Map.empty
-    (Map.singleton "fixture" (M.BoundedFn [] [] [] loops)) Map.empty
+    (Map.singleton "fixture" (M.BoundedFn [] [] [] loops)) Map.empty Map.empty
   where
     entry = M.Function "main" [] Nothing Map.empty (Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)) [] [] [] [] [] M.emptySpec
 

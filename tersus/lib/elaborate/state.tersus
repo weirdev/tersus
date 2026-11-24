@@ -1,5 +1,6 @@
 import data::ast::ast { AstNode };
-import data::codec::codec { FnContract, Token, catStrings, countAt, fnClausesAt, namesAt, quoteName, renderFnClauses, tokenize };
+import data::codec::codec { FnContract, Token, catStrings, countAt, fnClausesAt, namesAt, quoteName, renderFnClauses, tokenize, boxedClosureKey, boxedClosureInSpan };
+import elaborate::out { typeTokenText };
 import elaborate::calls { teHead };
 
 // A type. kind: 0 Int, 1 Byte, 2 Bool, 3 a word (flag signed, n bits), 4 a named type (name, args: its arguments,
@@ -701,6 +702,7 @@ fn unify(st: St, a: Int, b: Int) -> St ~ {
         return unify(st, argAt(st, x, 0), argAt(st, y, 0));
     };
     if kx >= 7 && kx <= 11 { return unify(st, argAt(st, x, 0), argAt(st, y, 0)); };
+    if kx = 16 { return St { ok: sameTy(&st, x, y), ..st }; };
     if kx = 14 {
         if nameOf(st, x) != nameOf(st, y) { return St { ok: false, ..st }; };
         xs = argsOf(st, x);
@@ -835,9 +837,26 @@ fn instanceText(st: &St, t: Int, deep: Bool) -> String ~ {
     if size(x.args) = 0 { return clone(x.name); };
     parts = [];
     for a in x.args {
-        if isSize(st, a) { parts = push(parts, sizeText(st, a, deep)); } else { parts = push(parts, typeNameText(st, a, deep)); };
+        if isSize(st, a) { parts = push(parts, sizeText(st, a, deep)); } else { parts = push(parts, instanceArgName(st, a, deep)); };
     };
     return catStrings(catStrings(catStrings(x.name, "<"), joinWith(&parts, ", ")), ">");
+};
+
+fn instanceArgName(st: &St, t: Int, deep: Bool) -> String ~ {
+    if hasBoxedType(st, t, deep) {
+        tokens = tokenize(typeTokenText(st, t));
+        if tokens.ok && boxedClosureInSpan(&tokens.value, 0, size(tokens.value)) { return boxedClosureKey(&tokens.value, 0, size(tokens.value)); };
+    };
+    return typeNameText(st, t, deep);
+};
+
+fn hasBoxedType(st: &St, t: Int, deep: Bool) -> Bool ~ {
+    r = t;
+    if deep { r = resolve(st, t); };
+    x = tyAt(st, r);
+    if x.kind = 16 { return true; };
+    for arg in x.args { if hasBoxedType(st, arg, deep) { return true; }; };
+    return false;
 };
 
 fn wrapped(prefix: &String, inner: String, suffix: &String) -> String ~ {
@@ -894,6 +913,10 @@ fn typeNameText(st: &St, t: Int, deep: Bool) -> String ~ {
     if k = 11 { return catStrings("&mut ", typeNameText(st, nth(&x.args, 0), deep)); };
     if k = 12 { return catStrings("'", x.name); };
     if k = 13 { return typeNameText(st, nth(&x.args, 0), deep); };
+    if k = 16 {
+        tokens = tokenize(typeTokenText(st, r));
+        return boxedClosureKey(&tokens.value, 0, size(tokens.value));
+    };
     if k = 14 {
         parts = [];
         i = 0;
@@ -927,6 +950,11 @@ fn render(st: &St, t: Int) -> String ~ {
     if k = 9 { return wrapped("Uninit<", render(st, nth(&x.args, 0)), ">"); };
     if k = 10 { return catStrings("&", render(st, nth(&x.args, 0))); };
     if k = 11 { return catStrings("&mut ", render(st, nth(&x.args, 0))); };
+    if k = 16 {
+        tag = "Closure<";
+        if x.flag { tag = "ClosureMut<"; };
+        return wrapped(tag, render(st, nth(&x.args, 0)), ">");
+    };
     if k = 12 {
         if isPackTypeName(&x.name) && size(st.pack.bytes) > 0 {
             hash = indexOfByteIn(&x.name, 35);

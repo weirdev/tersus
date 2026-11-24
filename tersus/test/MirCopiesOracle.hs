@@ -830,6 +830,12 @@ transformBlock cx constants fn here (BasicBlock stmts term) = go here [] stmts [
         ListOp l os -> ListOp l <$> mapM op os
         MakeList os -> MakeList <$> mapM op os
         MakeBox o -> MakeBox <$> op o
+        PackClosure o thunk -> do
+            o' <- op o
+            target <- op (Const (CFn thunk))
+            case target of
+                Const (CFn name) -> return (PackClosure o' name)
+                _ -> failC "a boxed closure needs a named thunk"
         Unbox o -> Unbox <$> op o
         Unsize o -> Unsize <$> op o
         MakeData n fields -> MakeData (typeNameIn cx n) <$> mapM (\(f, o) -> (,) f <$> op o) fields
@@ -872,6 +878,7 @@ rvalueOperands rv = case rv of
     ListOp _ os -> os
     MakeList os -> os
     MakeBox o -> [o]
+    PackClosure o thunk -> [o, Const (CFn thunk)]
     Unbox o -> [o]
     Unsize o -> [o]
     MakeData _ fields -> map snd fields
@@ -1477,6 +1484,9 @@ renameFunction rn fn = (mapEnvs (Map.map opR) fn){fnBlocks = Map.map block (fnBl
         ListOp l os -> ListOp l (map opR os)
         MakeList os -> MakeList (map opR os)
         MakeBox o -> MakeBox (opR o)
+        PackClosure o thunk -> case opR (Const (CFn thunk)) of
+            Const (CFn name) -> PackClosure (opR o) name
+            _ -> PackClosure (opR o) thunk
         Unbox o -> Unbox (opR o)
         Unsize o -> Unsize (opR o)
         MakeData n fs -> MakeData n [(f, opR o) | (f, o) <- fs]

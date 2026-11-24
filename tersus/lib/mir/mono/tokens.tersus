@@ -1,4 +1,4 @@
-import data::codec::codec { Token, isBareLowerName };
+import data::codec::codec { Token, isBareLowerName, boxedClosureInSpan, boxedClosureKey };
 import mir::full as full;
 
 struct MonoBinding { name: String, tokens: List<Token> };
@@ -36,8 +36,10 @@ fn monoTypeName(ts: &List<Token>, p: Int, forInstance: Bool) -> String ~ {
     if w = "param" { n = full::tokens::textAt(ts, p + 1); if forInstance { return "'".concat(n); }; return n; };
     if w = "var" { if forInstance { return "?".concat(full::tokens::textAt(ts, p + 1)); }; return "?"; };
     if w = "variant" { return full::tokens::textAt(ts, p + 1); };
+    end = full::tokens::typeEnd(ts, p);
+    if end > p && boxedClosureInSpan(ts, p, end) && (forInstance || w = "closure" || w = "closuremut") { return boxedClosureKey(ts, p, end); };
     if w = "named" { return monoNamedName(ts, p, forInstance); };
-    if w = "fn" { return monoFnTypeName(ts, p, forInstance); };
+    if w = "fn" || w = "fnc" { return monoFnTypeName(ts, p, forInstance); };
     if w = "forall" { return monoForallName(ts, p, forInstance); };
     inner = monoTypeName(ts, p + 1, forInstance);
     if w = "ref" { return "&".concat(inner); }; if w = "mutref" { return "&mut ".concat(inner); };
@@ -45,6 +47,11 @@ fn monoTypeName(ts: &List<Token>, p: Int, forInstance: Bool) -> String ~ {
     prefix = "";
     if w = "list" { prefix = "List"; }; if w = "box" { prefix = "Box"; }; if w = "addr" { prefix = "Addr"; }; if w = "block" { prefix = "Block"; }; if w = "uninit" { prefix = "Uninit"; };
     return prefix.concat("<").concat(inner).concat(">");
+};
+
+fn monoArgumentName(ts: &List<Token>) -> String ~ {
+    if boxedClosureInSpan(ts, 0, size(ts)) { return boxedClosureKey(ts, 0, size(ts)); };
+    return monoTypeName(ts, 0, false);
 };
 
 fn monoForallName(ts: &List<Token>, p: Int, forInstance: Bool) -> String ~ {
@@ -95,6 +102,10 @@ fn monoSubstitute(ts: &List<Token>, sizes: &List<MonoBinding>, types: &List<Mono
     out = [];
     i = 0;
     while i < size(ts) [{ affirm i >= 0; affirm i <= size(ts); }] ~ {
+        if i + 1 < size(ts) && (full::tokens::wordIs(ts, i, "w") || full::tokens::wordIs(ts, i, "q")) {
+            out = push(push(out, clone(get(ts, i))), clone(get(ts, i + 1)));
+            i = i + 2;
+        } else {
         if full::tokens::wordIs(ts, i, "forall") { return full::tokens::appendTokens(out, monoSubstituteForall(ts, i, sizes, types)); };
         if full::tokens::wordIs(ts, i, "fnc") {
             n = full::tokens::numberAt(ts, i + 1);
@@ -111,6 +122,7 @@ fn monoSubstitute(ts: &List<Token>, sizes: &List<MonoBinding>, types: &List<Mono
             if size(replacement) > 0 { out = full::tokens::appendTokens(out, replacement); i = i + 2; }
             else { out = push(out, clone(get(ts, i))); i = i + 1; };
         } else { out = push(out, clone(get(ts, i))); i = i + 1; };
+        };
     };
     return out;
 };
@@ -224,6 +236,10 @@ fn monoArgCompare(a: &List<Token>, b: &List<Token>) -> Int ~ {
 fn monoTypeCompare(a: &List<Token>, b: &List<Token>) -> Int ~ {
     if size(a) = 0 || size(b) = 0 { return monoCompareInt(size(a), size(b)); };
     left = full::tokens::normalizeTypes(clone(a)); right = full::tokens::normalizeTypes(clone(b));
+    leftBoxed = boxedClosureInSpan(&left, 0, size(left)); rightBoxed = boxedClosureInSpan(&right, 0, size(right));
+    if leftBoxed && rightBoxed { return monoCompareText(boxedClosureKey(&left, 0, size(left)), boxedClosureKey(&right, 0, size(right))); };
+    if leftBoxed { return 1; };
+    if rightBoxed { return 0 - 1; };
     rank = monoTypeRank(left); order = monoCompareInt(rank, monoTypeRank(right));
     if order != 0 { return order; }; if rank < 3 { return 0; };
     if rank = 3 { return monoWordCompare(left, right); };

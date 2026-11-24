@@ -178,6 +178,9 @@ instantiate fn tys sizes =
         ListOp op os -> ListOp op (map operand os)
         MakeList os -> MakeList (map operand os)
         MakeBox o -> MakeBox (operand o)
+        PackClosure o thunk -> case operand (Const (CFn thunk)) of
+            Const (CFn name) -> PackClosure (operand o) name
+            _ -> PackClosure (operand o) thunk
         Unbox o -> Unbox (operand o)
         Unsize o -> Unsize (operand o)
         MakeData name fields -> MakeData (named name) [(f, operand o) | (f, o) <- fields]

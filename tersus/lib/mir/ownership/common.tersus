@@ -211,6 +211,7 @@ fn roles(rv: &Rvalue) -> List<RoleOperand> ~ {
         },
         Rvalue::MakeList { items: items } => { for o in items { out = push(out, role(clone(o), true)); }; },
         Rvalue::MakeBox { o: o } => { out = push(out, role(clone(o), true)); },
+        Rvalue::PackClosure { env: env, thunk: thunk } => { out = push(out, role(clone(env), true)); },
         Rvalue::Unbox { o: o } => { out = push(out, role(clone(o), true)); },
         Rvalue::Unsize { o: o } => { out = push(out, role(clone(o), true)); },
         Rvalue::MakeData { name: name, fields: fields, values: values } => { for o in values { out = push(out, role(clone(o), true)); }; },
@@ -295,7 +296,8 @@ fn ownDrop(p: &Program, t: &Type) -> Bool ~ {
 // code is made of. `holders` are the declared types that hold one (dropHolders); a type is finite apart from its names, so the walk
 // below ends, and a recursive type is decided once, by name, in dropHolders.
 fn holdsOwnDrop(p: &Program, holders: &List<String>, t: &Type) -> Bool ~ {
-    if size(holders) = 0 { return false; };
+    if t is Type::TBoxedClosure { return true; };
+    if t is Type::TUninit { return holdsOwnDrop(p, holders, Box::unbox((t as Type::TUninit).inner)); };
     if t is Type::TArray { return holdsOwnDrop(p, holders, Box::unbox((t as Type::TArray).elem)); };
     if t is Type::TList { return holdsOwnDrop(p, holders, Box::unbox((t as Type::TList).elem)); };
     if t is Type::TBox { return holdsOwnDrop(p, holders, Box::unbox((t as Type::TBox).inner)); };
@@ -373,6 +375,12 @@ fn dropHolders(p: &Program) -> List<String> ~ {
         base = beforeAngle(name);
         if !isStorageList(p, &base) && !isStorageBox(p, &base) && hasDrop(p, name) { dropped = true; };
     };
+    if !dropped {
+        for d in p.types {
+            if d is TypeDecl::DStruct { for f in (d as TypeDecl::DStruct).fields { if holdsOwnDrop(p, [], f.ty) { dropped = true; }; }; }
+            else { for v in (d as TypeDecl::DEnum).variants { for f in v.fields { if holdsOwnDrop(p, [], f.ty) { dropped = true; }; }; }; };
+        };
+    };
     if !dropped { return []; };
     clones = ownClones(p);
     holders = [];
@@ -429,7 +437,7 @@ fn soleTypeArgument(t: &Type) -> Parsed<Type> ~ {
     return Parsed<Type> { value: Type::TInt, pos: 0, ok: false };
 };
 fn needsDrop(p: &Program, t: &Type) -> Bool ~ {
-    if t is Type::TBox { return true; };
+    if t is Type::TBox || t is Type::TBoxedClosure { return true; };
     if t is Type::TList { return true; };
     if t is Type::TArray { return needsDrop(p, Box::unbox((t as Type::TArray).elem)); };
     // (the data writes a Box as `named "Box" 1 type T`)

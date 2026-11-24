@@ -1,5 +1,5 @@
 import mir::support::support { Layout, showInt, joinWith, beforeAngle, renderSize, lookupDecl, sizedArray, declaredName, roundUp, wordLayout, simpleLayout };
-import data::codec::codec { Token, Size, Type, quoted, parseInt, boxedClosureInRows };
+import data::codec::codec { Token, Size, Type, quoted, parseInt };
 
 // The ghosts of a program, erased by a program in Tersus. The host runs this on every program (MirHousekeeping) after validation and before anything else. It is checked against the erasure it replaced by TestMirErase.
 // It reads the MIR as data before its ghosts are erased (`tersus mir --ghost-data`, version 2 of the data in MirData: the types
@@ -323,7 +323,7 @@ fn typeText(t: &Type) -> String ~ {
             for a in args { parts = push(parts, typeText(a)); };
             r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(typeText(Box::unbox(ret)));
         },
-        Type::TBoxedClosure { mutable: mutable, signature: signature } => { r = "unsupported boxed closure type"; },
+        Type::TBoxedClosure { key: key } => { r = clone(key); },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             parts = [];
             for a in args { parts = push(parts, typeText(a)); };
@@ -453,6 +453,7 @@ fn eraseRvalue(locals: &HashMap<Int, LocalInfo>, rv: &Rvalue) -> Rvalue ~ {
         Rvalue::BinaryOp { op: op, a: a, b: b } => { },
         Rvalue::MakeList { items: items } => { },
         Rvalue::MakeBox { o: o } => { },
+        Rvalue::PackClosure { env: env, thunk: thunk } => { },
         Rvalue::Unbox { o: o } => { },
         Rvalue::Unsize { o: o } => { },
         Rvalue::ReadField { o: o, name: name, field: field } => { },
@@ -696,7 +697,7 @@ fn plainRendered(t: &Type) -> String ~ {
             for a in args { parts = push(parts, plainRendered(a)); };
             r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(plainRendered(Box::unbox(ret)));
         },
-        Type::TBoxedClosure { mutable: mutable, signature: signature } => { r = "unsupported boxed closure type"; },
+        Type::TBoxedClosure { key: key } => { r = clone(key); },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             parts = [];
             for a in args { parts = push(parts, plainRendered(a)); };
@@ -721,8 +722,10 @@ fn plainName(name: &String) -> String ~ {
 // The tokens of an instance's arguments with each `uninit` taken out, as plainType takes it out of a type
 fn plainArgTokens(tokens: &List<Token>) -> List<Token> [{ }] [{ }] {
     out = [];
+    payload = false;
     for tok in tokens {
-        if tok.quoted || tok.text != "uninit" { out = push(out, clone(tok)); };
+        if tok.quoted || payload || tok.text != "uninit" { out = push(out, clone(tok)); };
+        payload = !tok.quoted && !payload && tok.text = "w";
     };
     return out;
 };
@@ -829,6 +832,7 @@ fn plainRvalue(rv: &Rvalue) -> Rvalue ~ {
             r = Rvalue::MakeList { items: out };
         },
         Rvalue::MakeBox { o: o } => { r = Rvalue::MakeBox { o: plainOperand(o) }; },
+        Rvalue::PackClosure { env: env, thunk: thunk } => { r = Rvalue::PackClosure { env: plainOperand(env), thunk: clone(thunk) }; },
         Rvalue::Unbox { o: o } => { r = Rvalue::Unbox { o: plainOperand(o) }; },
         Rvalue::Unsize { o: o } => { r = Rvalue::Unsize { o: plainOperand(o) }; },
         Rvalue::MakeData { name: name, fields: fields, values: values } => {
@@ -1057,10 +1061,6 @@ fn castProblem(p: &Program, indexes: &List<HashMap<Int, LocalInfo>>, entryIndex:
 read = readLines();
 if !read.ok {
     "the input is not the MIR as data: a bad name\n".printError();
-    return 1;
-};
-if boxedClosureInRows(&read.value) {
-    "boxed closure types are not supported by the runtime MIR ABI\n".printError();
     return 1;
 };
 program = ghostProgramAt(read.value);

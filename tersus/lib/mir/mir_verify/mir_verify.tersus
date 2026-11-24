@@ -1,5 +1,5 @@
-import mir::support::support { Layout, beforeAngle, escaped, renderType, declName, lookupDecl, sizedArray, declaredName, roundUp, wordLayout, simpleLayout };
-import data::codec::codec { Size, Type, quoted, parseInt, wordOf, boxedClosureInRows };
+import mir::support::support { Layout, beforeAngle, escaped, renderType, declName, lookupDecl, sizedArray, declaredName, roundUp, wordLayout, simpleLayout, variantsOf, runtimeTypeKey };
+import data::codec::codec { Size, Type, quoted, parseInt, wordOf, typeAt, sizeAt, wordAt };
 
 // The MIR as data, checked for well-formedness by a program in Tersus: what MirVerify checks of a
 // program in the form `tersus mir --data` prints, or a pre-erasure program written by MirData: its
@@ -245,7 +245,7 @@ fn blockHasId(b: &MirBlock, id: Int) -> Bool [{ }] [{ }] {
 };
 
 fn typeEq(a: &Type, b: &Type) -> Bool ~ {
-    return renderType(a) = renderType(b);
+    return runtimeTypeKey(a) = runtimeTypeKey(b);
 };
 
 fn isUnknown(t: &Type) -> Bool ~ {
@@ -264,7 +264,7 @@ fn isUnknown(t: &Type) -> Bool ~ {
             r = isUnknown(Box::unbox(ret));
             for a in args { if isUnknown(a) { r = true; }; };
         },
-        Type::TBoxedClosure { mutable: mutable, signature: signature } => { r = true; },
+        Type::TBoxedClosure { signature: signature } => { r = isUnknown(Box::unbox(signature)); },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             r = isUnknown(Box::unbox(ret));
             for a in args { if isUnknown(a) { r = true; }; };
@@ -374,11 +374,25 @@ fn typeWordPrefix(text: &String, word: &String) -> Bool [{ }] [{ }] {
 
 // The element of a list type, in either of its spellings: the list shape, and the named struct List of the
 // prelude that a list is in the data now
+fn storageArgument(t: &Type) -> TyRes ~ {
+    if !(t is Type::TNamed) { return noTy(); };
+    named = t as Type::TNamed;
+    if named.argc = 1 && size(named.argTokens) > 1 {
+        tag = get(named.argTokens, 0);
+        if tag.quoted || tag.text != "type" { return noTy(); };
+        arg = typeAt(named.argTokens, 1);
+        if !arg.ok || arg.pos != size(named.argTokens) { return noTy(); };
+        return TyRes { ok: true, ty: arg.value };
+    };
+    args = instanceArgs(named.name);
+    if size(args) = 1 { return textType(get(args, 0)); };
+    return noTy();
+};
+
 fn listElemOf(t: &Type) -> TyRes ~ {
     if t is Type::TList { return TyRes { ok: true, ty: clone(Box::unbox((t as Type::TList).elem)) }; };
     if t is Type::TNamed && beforeAngle((t as Type::TNamed).name) = "List" {
-        args = instanceArgs((t as Type::TNamed).name);
-        if size(args) = 1 { return textType(get(args, 0)); };
+        return storageArgument(t);
     };
     return noTy();
 };
@@ -387,8 +401,7 @@ fn listElemOf(t: &Type) -> TyRes ~ {
 fn boxInnerOf(t: &Type) -> TyRes ~ {
     if t is Type::TBox { return TyRes { ok: true, ty: clone(Box::unbox((t as Type::TBox).inner)) }; };
     if t is Type::TNamed && beforeAngle((t as Type::TNamed).name) = "Box" {
-        args = instanceArgs((t as Type::TNamed).name);
-        if size(args) = 1 { return textType(get(args, 0)); };
+        return storageArgument(t);
     };
     return noTy();
 };
@@ -541,27 +554,23 @@ fn subType(p: &Program, wanted: &Type, actual: &Type, strict: Bool) -> Bool ~ {
     // (a list and a Box are named types in the checker and their own shapes here, so a name a field read was
     // written against and the shape of the value it is read from are two spellings of one type)
     if wanted is Type::TNamed && actual is Type::TList {
-        wa = instanceArgs((wanted as Type::TNamed).name);
-        if beforeAngle((wanted as Type::TNamed).name) != "List" || size(wa) != 1 { return false; };
-        et = textType(get(wa, 0));
+        if beforeAngle((wanted as Type::TNamed).name) != "List" { return false; };
+        et = storageArgument(wanted);
         return et.ok && sub(p, et.ty, Box::unbox((actual as Type::TList).elem));
     };
     if wanted is Type::TList && actual is Type::TNamed {
-        aa = instanceArgs((actual as Type::TNamed).name);
-        if beforeAngle((actual as Type::TNamed).name) != "List" || size(aa) != 1 { return false; };
-        et = textType(get(aa, 0));
+        if beforeAngle((actual as Type::TNamed).name) != "List" { return false; };
+        et = storageArgument(actual);
         return et.ok && sub(p, Box::unbox((wanted as Type::TList).elem), et.ty);
     };
     if wanted is Type::TBox && actual is Type::TNamed {
-        aa = instanceArgs((actual as Type::TNamed).name);
-        if beforeAngle((actual as Type::TNamed).name) != "Box" || size(aa) != 1 { return false; };
-        et = textType(get(aa, 0));
+        if beforeAngle((actual as Type::TNamed).name) != "Box" { return false; };
+        et = storageArgument(actual);
         return et.ok && sub(p, Box::unbox((wanted as Type::TBox).inner), et.ty);
     };
     if wanted is Type::TNamed && actual is Type::TBox {
-        wa = instanceArgs((wanted as Type::TNamed).name);
-        if beforeAngle((wanted as Type::TNamed).name) != "Box" || size(wa) != 1 { return false; };
-        et = textType(get(wa, 0));
+        if beforeAngle((wanted as Type::TNamed).name) != "Box" { return false; };
+        et = storageArgument(wanted);
         return et.ok && sub(p, et.ty, Box::unbox((actual as Type::TBox).inner));
     };
     if wanted is Type::TArray && actual is Type::TArray {
@@ -735,6 +744,80 @@ fn constantFits(p: &Program, funcs: &FunctionIndex, wanted: &Type, c: &Constant)
 };
 
 fn isReferenceType(t: &Type) -> Bool ~ { return t is Type::TRef || t is Type::TMutRef; };
+fn checkedClosureSignature(shape: &Type) -> TyRes ~ {
+    if !(shape is Type::TFn) { return noTy(); };
+    sig = shape as Type::TFn;
+    for arg in &sig.args {
+        if arg is Type::TRef {
+            if !stableBoxedAbi(Box::unbox((arg as Type::TRef).inner)) { return noTy(); };
+        } else if !stableBoxedAbi(arg) { return noTy(); };
+    };
+    if !stableBoxedAbi(Box::unbox(sig.ret)) { return noTy(); };
+    return TyRes { ok: true, ty: clone(shape) };
+};
+
+fn stableBoxedAbi(t: &Type) -> Bool ~ {
+    if t is Type::TUninit || t is Type::TBlock || t is Type::TRef || t is Type::TMutRef || t is Type::TForall || t is Type::TFnContract { return false; };
+    if t is Type::TBoxedClosure { return closureSignature(t).ok; };
+    if t is Type::TArray { return stableBoxedAbi(Box::unbox((t as Type::TArray).elem)); };
+    if t is Type::TAddr { return stableBoxedAbi(Box::unbox((t as Type::TAddr).inner)); };
+    if t is Type::TList { return stableBoxedAbi(Box::unbox((t as Type::TList).elem)); };
+    if t is Type::TBox { return stableBoxedAbi(Box::unbox((t as Type::TBox).inner)); };
+    if t is Type::TFn {
+        fnShape = t as Type::TFn;
+        for arg in fnShape.args { if !stableBoxedAbi(arg) { return false; }; };
+        return stableBoxedAbi(Box::unbox(fnShape.ret));
+    };
+    if t is Type::TNamed {
+        named = t as Type::TNamed;
+        ts = &named.argTokens;
+        pos = 0;
+        while pos < size(ts) [{ affirm pos >= 0; }] ~ {
+            tag = wordAt(ts, pos);
+            if !tag.ok || tag.pos >= size(ts) { return false; };
+            if tag.value = "type" {
+                inner = typeAt(ts, tag.pos);
+                if !inner.ok || !stableBoxedAbi(inner.value) { return false; };
+                pos = inner.pos;
+            } else if tag.value = "size" {
+                s = sizeAt(ts, tag.pos);
+                if !s.ok { return false; };
+                pos = s.pos;
+            } else { return false; };
+        };
+    };
+    return true;
+};
+
+fn closureSignature(t: &Type) -> TyRes ~ {
+    if !(t is Type::TBoxedClosure) { return noTy(); };
+    sig = Box::unbox((t as Type::TBoxedClosure).signature);
+    if sig is Type::TFn { return checkedClosureSignature(sig); };
+    if sig is Type::TFnContract {
+        shape = sig as Type::TFnContract;
+        return checkedClosureSignature(Type::TFn { args: clone(shape.args), ret: clone(shape.ret) });
+    };
+    return noTy();
+};
+fn packable(p: &Program, t: &Type, seen: &List<String>) -> Bool ~ {
+    if t is Type::TRef || t is Type::TMutRef || t is Type::TBlock || t is Type::TUninit || t is Type::TParam || t is Type::TVar || t is Type::TForall { return false; };
+    if t is Type::TAddr { return packable(p, Box::unbox((t as Type::TAddr).inner), seen); };
+    if t is Type::TArray { return packable(p, Box::unbox((t as Type::TArray).elem), seen); };
+    if t is Type::TList { return packable(p, Box::unbox((t as Type::TList).elem), seen); };
+    if t is Type::TBox { return packable(p, Box::unbox((t as Type::TBox).inner), seen); };
+    if t is Type::TNamed || t is Type::TVariant {
+        n = declaredName(p.types, t);
+        if !n.ok { return false; };
+        for previous in seen { if previous = &n.text { return true; }; };
+        index = lookupDecl(p.types, n.text);
+        if index < 0 { return false; };
+        next = push(clone(seen), clone(n.text));
+        for variant in variantsOf(p.types, n.text) {
+            for field in variant.fields { if !packable(p, field.ty, next) { return false; }; };
+        };
+    };
+    return true;
+};
 
 // (native code and the reference interpreter replace the reference a part holds, so only a reference may be written there)
 fn writesNonReference(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, rv: &Rvalue) -> Bool ~ {
@@ -878,6 +961,7 @@ fn rvalueOperands(rv: &Rvalue) -> List<Operand> [{ }] [{ }] {
         Rvalue::ListOp { op: op, args: args } => { out = clone(args); },
         Rvalue::MakeList { items: items } => { out = clone(items); },
         Rvalue::MakeBox { o: o } => { out = single(o); },
+        Rvalue::PackClosure { env: env, thunk: thunk } => { out = push(single(env), Operand::Const { value: Constant::CFn { name: clone(thunk) } }); },
         Rvalue::Unbox { o: o } => { out = single(o); },
         Rvalue::Unsize { o: o } => { out = single(o); },
         Rvalue::MakeData { name: name, fields: fields, values: values } => { out = clone(values); },
@@ -1363,9 +1447,62 @@ fn borrowedParameter(f: &Function, locals: &HashMap<Int, Int>, o: &Operand) -> B
     return false;
 };
 
+fn thunkLends(thunk: &Function, args: &List<Type>, locals: &HashMap<Int, Int>) -> Bool ~ {
+    sharedCount = 0;
+    mutableCount = 0;
+    for i in 0..size(thunk.params) {
+        if i >= size(args) || i >= size(thunk.params) { return false; };
+        param = get(thunk.params, i);
+        ty = get(args, i);
+        lent = false;
+        mutable = false;
+        for p in thunk.borrowed { if p = param { lent = true; }; };
+        for p in thunk.mutBorrowed { if p = param { mutable = true; }; };
+        if lent != (ty is Type::TRef || ty is Type::TMutRef) || mutable != (ty is Type::TMutRef) { return false; };
+        decl = localTy(thunk, locals, param);
+        if !decl.ok || isReferenceType(decl.ty) { return false; };
+        if lent { sharedCount = sharedCount + 1; };
+        if mutable { mutableCount = mutableCount + 1; };
+    };
+    return size(thunk.borrowed) = sharedCount && size(thunk.mutBorrowed) = mutableCount;
+};
+
 fn rvalueWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, d: &Type, rv: &Rvalue) -> List<String> ~ {
+    if rv is Rvalue::PackClosure {
+        if !(d is Type::TBoxedClosure) { return one("packclosure needs a boxed closure destination"); };
+        pack = rv as Rvalue::PackClosure;
+        if !(pack.env is Operand::Move) { return one("packclosure must move a capture local"); };
+        local = (pack.env as Operand::Move).local;
+        for borrowed in f.borrowed { if borrowed = local { return one("packclosure cannot move a borrowed capture"); }; };
+        capture = localTy(f, locals, local);
+        if !capture.ok { return one("a boxed closure requires a declared capture local"); };
+        // The payload uses memory layout, but the thunk receives it as a local slot.
+        if capture.ty is Type::TByte || capture.ty is Type::TWord { return one("a boxed closure capture cannot be a bare Byte or fixed-width integer; wrap it in a struct"); };
+        index = findFunction(funcs, pack.thunk);
+        if index < 0 || index >= size(p.functions) || index >= size(funcs.locals) || pack.thunk.startsWith("extern ") { return one("a boxed closure needs a concrete named thunk"); };
+        thunk = &get(p.functions, index);
+        if !(*thunk).hasReturn || size((*thunk).from) > 0 { return one("a boxed closure thunk must return a value with no reference origin"); };
+        target = functionTypeOf(p, thunk, &get(funcs.locals, index));
+        if !(target is Type::TFn) { return one("a boxed closure needs a concrete named thunk"); };
+        shape = target as Type::TFn;
+        expected = closureSignature(d);
+        if !expected.ok || !(expected.ty is Type::TFn) { return one("a boxed closure needs a function signature"); };
+        signature = expected.ty as Type::TFn;
+        if size(shape.args) != size(signature.args) + 1 || size(shape.args) < 1 { return one("boxed closure thunk arity does not match"); };
+        receiver = get(shape.args, 0);
+        if (d as Type::TBoxedClosure).mutable {
+            if !(receiver is Type::TMutRef) || !typeEq(Box::unbox((receiver as Type::TMutRef).inner), capture.ty) { return one("boxed closure thunk needs an exclusive capture receiver"); };
+        } else {
+            if !(receiver is Type::TRef) || !typeEq(Box::unbox((receiver as Type::TRef).inner), capture.ty) { return one("boxed closure thunk needs a shared capture receiver"); };
+        };
+        if !typeEq(Box::unbox(shape.ret), Box::unbox(signature.ret)) { return one("boxed closure thunk result does not match"); };
+        for i in 0..size(signature.args) { if i + 1 >= size(shape.args) || i >= size(signature.args) || !typeEq(get(shape.args, i + 1), get(signature.args, i)) { return one("boxed closure thunk parameter does not match"); }; };
+        if !thunkLends(thunk, shape.args, &get(funcs.locals, index)) { return one("a boxed closure thunk must explicitly lend its reference parameters"); };
+        return [];
+    };
     out = [];
     match rv {
+        Rvalue::PackClosure { env: env, thunk: thunk } => { },
         Rvalue::Use { o: o } => {
             if !fits(p, funcs, f, locals, d, o) { out = expectedWhy(p, f, locals, d, o); };
         },
@@ -1656,7 +1793,14 @@ fn callArgFits(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMa
 fn callWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, callee: &Operand, args: &List<Operand>, dest: Int) -> List<String> ~ {
     ct = operandTy(p, funcs, f, locals, callee);
     if !ct.ok { return one("the callee is not a function"); };
-    ctt = fnTypeAfterSizes(f, locals, ct.ty, args);
+    ctt = noTy();
+    if ct.ty is Type::TRef {
+        inner = Box::unbox((ct.ty as Type::TRef).inner);
+        if inner is Type::TBoxedClosure && !(inner as Type::TBoxedClosure).mutable { ctt = closureSignature(inner); };
+    } else if ct.ty is Type::TMutRef {
+        inner = Box::unbox((ct.ty as Type::TMutRef).inner);
+        if inner is Type::TBoxedClosure { ctt = closureSignature(inner); };
+    } else { ctt = fnTypeAfterSizes(f, locals, ct.ty, args); };
     if !ctt.ok { return one("the callee is not a function"); };
     t = ctt.ty;
     if !(t is Type::TFn) { return one("the callee is not a function"); };
@@ -1793,9 +1937,10 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &FunctionIndex, 
         for st in b.stmts {
             match st {
                 Statement::Assign { local: dl, rv: rv } => { dst = localTy(f, locals, dl); if dst.ok { for w in rvalueWhy(p, funcs, f, locals, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
-                Statement::Peek { local: dl, rv: rv } => { dst = localTy(f, locals, dl); if dst.ok { for w in rvalueWhy(p, funcs, f, locals, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
+                Statement::Peek { local: dl, rv: rv } => { if rv is Rvalue::PackClosure { out = push(out, clone(bp).then("packclosure cannot be peeked")); }; dst = localTy(f, locals, dl); if dst.ok { for w in rvalueWhy(p, funcs, f, locals, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
                 Statement::AssignRef { local: dl, steps: steps, rv: rv } => {
                     dst = placeWhy(p, f, locals, dl, steps);
+                    if rv is Rvalue::PackClosure { out = push(out, clone(bp).then("packclosure needs a local destination")); };
                     if dst.ok {
                         for w in rvalueWhy(p, funcs, f, locals, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); };
                         held = heldTy(p, f, locals, dl, steps);
@@ -1822,6 +1967,18 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &FunctionIndex, 
     return out;
 };
 
+fn capturesNeedProvenance(p: &Program, f: &Function, locals: &HashMap<Int, Int>) -> Bool ~ {
+    for block in f.blocks { for st in block.stmts {
+        if st is Statement::Assign && (st as Statement::Assign).rv is Rvalue::PackClosure {
+            pack = (st as Statement::Assign).rv as Rvalue::PackClosure;
+            if !(pack.env is Operand::Move) { return true; };
+            ty = localTy(f, locals, (pack.env as Operand::Move).local);
+            if !ty.ok || !packable(p, ty.ty, []) { return true; };
+        };
+    }; };
+    return false;
+};
+
 // The first problem of the program, or the empty string when it is well formed
 fn verifyProgram(p: &Program) -> String ~ {
     names = [];
@@ -1843,6 +2000,13 @@ fn verifyProgram(p: &Program) -> String ~ {
         if size(ps) > 0 { return clone(get(ps, 0)); };
         i = i + 1;
     };
+    // The raw verifier has no authority to accept compiler-owned source permissions.
+    if capturesNeedProvenance(p, &p.entry, &funcs.entry) { return "boxed capture effects require source provenance"; };
+    i = 0;
+    while i < size(p.functions) && i < size(funcs.locals) [{ affirm i >= 0; affirm i <= size(p.functions); }] shrinks size(p.functions) - i {
+        if capturesNeedProvenance(p, &get(p.functions, i), &get(funcs.locals, i)) { return "boxed capture effects require source provenance"; };
+        i = i + 1;
+    };
     return "";
 };
 
@@ -1851,10 +2015,6 @@ fn verifyProgram(p: &Program) -> String ~ {
 read = readLines();
 if !read.ok {
     "the input is not the MIR as data: a bad name\n".printError();
-    return 1;
-};
-if boxedClosureInRows(&read.value) {
-    "boxed closure types are not supported by the runtime MIR ABI\n".printError();
     return 1;
 };
 program = programAt(read.value);
@@ -1869,5 +2029,6 @@ if problem = "" {
 } else {
     problem.printError();
     writeError(toByte(10));
+    if problem = "boxed capture effects require source provenance" { return 2; };
     return 1;
 };

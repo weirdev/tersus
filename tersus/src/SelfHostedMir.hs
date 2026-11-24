@@ -19,7 +19,7 @@ import Pretty (renderVarProof)
 import MirEval (MirValue (..), runNamedFunction)
 import LibPackage (LibPackage (..), libPackage)
 import Compile (lowerSource)
-import MirHousekeeping (eraseGhosts, verifyProgram, toolProgram, validationEntry)
+import MirHousekeeping (eraseGhosts, verifyProgram, verifyCaptureEffects, boxedSignatureStable, toolProgram, validationEntry)
 import MirMono (monomorphizeForValidation)
 import StdLib (builtinFunct, eqVarProof, stdLibRuleCtx)
 import StdLibDefs (stdLibValCtx)
@@ -1104,6 +1104,11 @@ fnValueType ty = case ty of
 localTypeOf :: M.Function -> M.Local -> Maybe Type
 localTypeOf fn l = M.localType <$> Map.lookup l (M.fnLocals fn)
 
+boxedLoan :: Type -> Maybe (Bool, Type)
+boxedLoan (TRef (TBoxedClosure False signature)) = Just (False, signature)
+boxedLoan (TMutRef (TBoxedClosure mutable signature)) = Just (mutable, signature)
+boxedLoan _ = Nothing
+
 fnValueSignature :: Map.Map Name M.TypeDecl -> Type -> Maybe ([Type], Type, FnContract, [ValidationStatement], [ValidationStatement])
 fnValueSignature types ty = do
     (args, result, contract) <- fnValueType ty
@@ -1135,7 +1140,8 @@ fnValueSignature types ty = do
 indirectCall :: Map.Map Name M.TypeDecl -> Rules -> M.Function -> M.Local -> [M.Operand] -> M.Local -> Build -> Maybe ([MirValue], Build)
 indirectCall types rules caller callee args dest b0 = do
     ty <- localTypeOf caller callee
-    (parameters, _, contract, requires, ensures) <- fnValueSignature types ty
+    let signature = maybe ty snd (boxedLoan ty)
+    (parameters, _, contract, requires, ensures) <- fnValueSignature types signature
     guard (length args == length parameters)
     (snaps, b1) <- foldM snapshot ([], b0) args
     let env = Map.fromList [(name, M.Copy local) | (name, (local, _)) <- zip (fnParamNames contract) snaps, not (null name)]
@@ -1427,6 +1433,9 @@ statement rules (M.Assign (M.Local dest) (M.Use source)) b = do
 -- Boxes and unsizing preserve the proof value, as in the reference MIR
 -- validator. Ownership and representation are handled by later passes.
 statement rules (M.Assign dest (M.MakeBox source)) b = statement rules (M.Assign dest (M.Use source)) b
+statement _ (M.Assign (M.Local dest) (M.PackClosure (M.Move capture) _)) b = do
+    (value, b') <- operand (M.Copy capture) b
+    pure ([step "RequireDefined" [("value", value)], step "Havoc" [("local", MInt (toInteger dest))]], b')
 statement rules (M.Assign dest (M.Unbox source)) b = statement rules (M.Assign dest (M.Use source)) b
 statement rules (M.Assign dest (M.Unsize source)) b = statement rules (M.Assign dest (M.Use source)) b
 statement rules (M.Assign dest (M.CopyOf source)) b = statement rules (M.Assign dest (M.Use source)) b
@@ -2809,7 +2818,14 @@ indirectCallee :: M.Terminator -> Maybe M.Local
 indirectCallee (M.Call op _ _ _) = operandLocal op
 indirectCallee _ = Nothing
 
-fnConversions :: M.Function -> Either String [(Name, Type)]
+data CallableConversion = ThinConversion Name Type | BoxedConversion Name Bool Type Type
+    deriving (Eq, Ord)
+
+conversionName :: CallableConversion -> Name
+conversionName (ThinConversion name _) = name
+conversionName (BoxedConversion name _ _ _) = name
+
+fnConversions :: M.Function -> Either String [CallableConversion]
 fnConversions fn = concat <$> traverse inBlock (Map.elems (M.fnBlocks fn))
   where
     inBlock blk = do
@@ -2820,8 +2836,12 @@ fnConversions fn = concat <$> traverse inBlock (Map.elems (M.fnBlocks fn))
         rejectConstants valueOperands
         concat <$> traverse conversion (M.blockStatements blk)
     conversion (M.Assign dest (M.Use (M.Const (M.CFn name)))) = case localTypeOf fn dest of
-        Just ty | isJust (fnValueType ty) -> Right [(name, ty)]
+        Just ty | isJust (fnValueType ty) -> Right [ThinConversion name ty]
         _ -> Left ("a function pointer without a function type in " ++ M.fnName fn)
+    conversion (M.Assign dest (M.PackClosure (M.Move src) thunk)) = case (localTypeOf fn src, localTypeOf fn dest) of
+        (Just capture, Just (TBoxedClosure mutable signature)) | src `notElem` (M.fnBorrowed fn ++ M.fnMutBorrowed fn) -> Right [BoxedConversion thunk mutable capture signature]
+        _ -> Left ("an invalid boxed closure allocation in " ++ M.fnName fn)
+    conversion (M.Assign _ M.PackClosure{}) = Left ("a boxed closure must move its capture in " ++ M.fnName fn)
     conversion (M.Assign dest (M.Use source)) | Just src <- operandLocal source,
         Just a <- localTypeOf fn src, Just b <- localTypeOf fn dest, a /= b,
         isJust (fnValueType a), isJust (fnValueType b) = Left ("a local function value retyped in " ++ M.fnName fn)
@@ -2854,31 +2874,42 @@ functionShape fn = do
 
 -- Synthetic proof-only functions isolate the implication from facts at the
 -- conversion site, and let the existing call and return checks prove it.
-conversionWitness :: Map.Map Name M.TypeDecl -> Map.Map Name M.Function -> Int -> (Name, Type) -> Maybe M.Function
-conversionWitness types functions index (name, target) = do
+conversionWitness :: Map.Map Name M.TypeDecl -> Map.Map Name M.Function -> Int -> CallableConversion -> Maybe M.Function
+conversionWitness types functions index conversion = do
+    let (name, target, receiver) = case conversion of
+            ThinConversion n ty -> (n, ty, Nothing)
+            BoxedConversion n mutable capture ty -> (n, ty, Just (mutable, capture))
     (args, result, contract, requires, ensures) <- fnValueSignature types target
-    let params = map M.Local [1 .. length args]
+    let self = M.Local (length args + 1)
+        params = map M.Local [1 .. length args]
+        receiverDecls = [(self, M.LocalDecl ty (Just "$capture")) | Just (_, ty) <- [receiver]]
+        receiverParams = map fst receiverDecls
+        mutations = [self | Just (True, _) <- [receiver]]
         argNames = fnParamNames contract
         env = Map.fromList [(n, M.Copy p) | (n, p) <- zip argNames params, not (null n)]
-        spec = M.emptySpec{M.specEnv = env, M.specRequires = requires, M.specEnsures = ensures}
+        spec = M.emptySpec{M.specEnv = env, M.specRequires = requires, M.specEnsures = ensures, M.specMutParams = ["$capture" | not (null mutations)]}
         dest = M.Local 0
-        locs = Map.fromList ((dest, M.LocalDecl result Nothing) : [(p, M.LocalDecl (unref ty) (if null n then Nothing else Just n)) | (p, ty, n) <- zip3 params args argNames])
-        callBlocks callee = Map.fromList [(M.BlockId 0, M.BasicBlock [] (M.Call callee (map M.Copy params) dest (M.BlockId 1))), (M.BlockId 1, M.BasicBlock [] M.Return)]
+        locs = Map.fromList ((dest, M.LocalDecl result Nothing) : [(p, M.LocalDecl (unref ty) (if null n then Nothing else Just n)) | (p, ty, n) <- zip3 params args argNames] ++ receiverDecls)
+        callBlocks callee = Map.fromList [(M.BlockId 0, M.BasicBlock [] (M.Call callee (map M.Copy (receiverParams ++ params)) dest (M.BlockId 1))), (M.BlockId 1, M.BasicBlock [] M.Return)]
         borrowed = [p | (p, TRef _) <- zip params args]
         witness label locals parameters blocks = M.Function
             { M.fnName = "function conversion " ++ label ++ " #" ++ show index, M.fnParams = parameters, M.fnReturns = Just result
-            , M.fnLocals = locals, M.fnBlocks = blocks, M.fnSizeParams = [], M.fnTypeParams = [], M.fnBorrowed = borrowed
-            , M.fnMutBorrowed = [], M.fnFrom = [], M.fnSpec = spec }
+            , M.fnLocals = locals, M.fnBlocks = blocks, M.fnSizeParams = [], M.fnTypeParams = [], M.fnBorrowed = receiverParams ++ borrowed
+            , M.fnMutBorrowed = mutations, M.fnFrom = [], M.fnSpec = spec }
     callee <- Map.lookup name functions
     guard (not ("extern " `isPrefixOf` name) && not (isStubName name) && not (mayDivergeFn callee))
     guard (null (M.fnSizeParams callee) && null (M.fnTypeParams callee) && null (M.fnFrom callee))
-    guard (null (M.specMutParams (M.fnSpec callee)) && null (M.specWrites (M.fnSpec callee)) && null (M.specFrom (M.fnSpec callee)))
-    guard (functionShape callee == Just (args, result))
+    let calleeSpec = M.fnSpec callee
+        receiverNames = [n | Just (True, _) <- [receiver], p : _ <- [M.fnParams callee], Just n <- [Map.lookup p (M.fnLocals callee) >>= M.localName]]
+        receiverTypes = [if mutable then TMutRef ty else TRef ty | Just (mutable, ty) <- [receiver]]
+    guard (M.specMutParams calleeSpec == receiverNames && null (M.specWrites calleeSpec) && null (M.specFrom calleeSpec))
+    guard (functionShape callee == Just (receiverTypes ++ args, result))
+    guard (all (not . holdsRefStored types . snd) receiver)
     if "builtin::" `isPrefixOf` name
         then do
-            guard (M.fnParams callee == params && Map.keys (M.fnLocals callee) == Map.keys locs)
+            guard (receiver == Nothing && M.fnParams callee == params && Map.keys (M.fnLocals callee) == Map.keys locs)
             pure (witness name locs params (M.fnBlocks callee))
-        else pure (witness name locs params (callBlocks (M.Const (M.CFn name))))
+        else pure (witness name locs (receiverParams ++ params) (callBlocks (M.Const (M.CFn name))))
 
 -- This summary only restricts termination edges, never the contract of a call.
 -- Count every write, even one on a different path or after the call.
@@ -2924,17 +2955,23 @@ localTerminationTargets functions fn = \local -> do
 
 -- Contracts say nothing about the call chain. Reject cycles that could go
 -- through a pointer; direct cycles still use their ordinary shrinks checks.
-indirectCycle :: Map.Map Name M.Function -> M.Function -> [(Name, Type)] -> Maybe Name
+indirectCycle :: Map.Map Name M.Function -> M.Function -> [CallableConversion] -> Maybe Name
 indirectCycle fs main conversions = find inIndirectCycle (Map.keys allFns)
   where
     allFns = Map.insert (M.fnName main) main fs
     addressTaken = Map.fromListWith Set.union
-        [(shape, Set.singleton name) | (name, _) <- conversions, Just shape <- [Map.lookup name fs >>= functionShape]]
+        [(shape, Set.singleton name) | ThinConversion name _ <- conversions, Just shape <- [Map.lookup name fs >>= functionShape]]
+    boxedTaken = Map.fromListWith Set.union
+        [((mutable, signature), Set.singleton name) | BoxedConversion name mutable _ signature <- conversions]
     indirectEdges fn = Set.unions
-        [ fromMaybe (Map.findWithDefault Set.empty (args, ret) addressTaken) (known local)
+        [ targets local ty
         | blk <- Map.elems (M.fnBlocks fn), Just local <- [indirectCallee (M.blockTerminator blk)]
-        , Just (args, ret, _) <- [localTypeOf fn local >>= fnValueType] ]
-      where known = localTerminationTargets allFns fn
+        , Just ty <- [localTypeOf fn local] ]
+      where
+        targets local ty = case boxedLoan ty of
+            Just (mutable, signature) -> Map.findWithDefault Set.empty (mutable, signature) boxedTaken
+            _ | Just (args, ret, _) <- fnValueType ty -> fromMaybe (Map.findWithDefault Set.empty (args, ret) addressTaken) (localTerminationTargets allFns fn local)
+            _ -> Set.empty
     indirect = Map.map indirectEdges allFns
     edges name fn = callNamesOf fn ++ Set.toList (Map.findWithDefault Set.empty name indirect)
     components = stronglyConnComp [(name, name, edges name fn) | (name, fn) <- Map.toList allFns]
@@ -4075,8 +4112,10 @@ encodeNoted :: Bool -> M.Program -> Either String [(Name, (MirValue, MirValue, I
 -- written in Tersus is given the same copies, so a call of a generic
 -- function names the copy of it the call decides).
 encodeNoted physical raw
-    | any containsBoxedClosure annotations = Left "boxed closure types"
-    | otherwise = encodeMono physical withTemplates
+    | any badBoxedSignature annotations = Left "a boxed closure has an unsupported signature"
+    | otherwise = case verifyCaptureEffects raw of
+        Error e -> Left e
+        Ok _ -> encodeMono physical withTemplates
   where
     program0 = viewFor physical raw
     annotations =
@@ -4086,6 +4125,19 @@ encodeNoted physical raw
                 M.EnumDecl variants -> map snd (concatMap snd variants)]
         ++ [ty | (_, fields) <- Map.elems (M.progGenerics raw), (_, ty) <- fields]
         ++ [ty | (_, args) <- Map.elems (M.progInstances raw), ArgType ty <- args]
+    badBoxedSignature ty = case ty of
+        TBoxedClosure _ signature -> not (boxedSignatureStable signature && isJust (fnValueSignature (M.progTypes program0) signature)) || badBoxedSignature signature
+        TFn args result -> any badBoxedSignature (result : args)
+        TFnContract args result _ -> any badBoxedSignature (result : args)
+        TNamed _ args -> any badBoxedSignature [t | ArgType t <- args]
+        TArrayOf t _ -> badBoxedSignature t
+        TForall _ _ t -> badBoxedSignature t
+        TRef t -> badBoxedSignature t
+        TMutRef t -> badBoxedSignature t
+        TBlock t -> badBoxedSignature t
+        TAddr t -> badBoxedSignature t
+        TUninit t -> badBoxedSignature t
+        _ -> False
     mono = monomorphizeForValidation program0
     -- A contract can name a generic function nothing calls (a method
     -- the contract measures by, like size): monomorphisation keeps
@@ -4124,8 +4176,11 @@ encodeMono physical program
         case indirectCycle functions (M.progMain program) conversions of
             Just name -> Left ("potential recursion through a function value in " ++ name)
             Nothing -> Right ()
-        witnesses <- traverse (\(index, coercion@(source, _)) ->
-            maybe (Left ("an unsupported function conversion: " ++ show source)) Right (conversionWitness types functions index coercion)) (zip [1 ..] conversions)
+        witnesses <- traverse (\(index, coercion) -> case coercion of
+            BoxedConversion name _ _ _ | Just fn <- Map.lookup name functions, mayDivergeFn fn ->
+                Left "a boxed closure cannot use a potentially diverging callable"
+            _ -> maybe (Left ("an unsupported function conversion: " ++ show (conversionName coercion))) Right
+                (conversionWitness types functions index coercion)) (zip [1 ..] conversions)
         -- Bounded bodies and their check functions are validated generically, not again in every copy.
         checked <- traverse encodeOne [fn | fn <- Map.elems functions, not (externFunction fn), not ("builtin::" `isPrefixOf` M.fnName fn), validated fn]
         checkedConversions <- traverse encodeOne witnesses
@@ -4141,6 +4196,7 @@ encodeMono physical program
     validAnnotation ty = case ty of
         TFnContract args result c -> isJust (fnContractSpec args result c) && all validAnnotation (result : args)
         TFn args result -> all validAnnotation (result : args)
+        TBoxedClosure _ signature -> isJust (fnValueSignature (M.progTypes program) signature) && validAnnotation signature
         TNamed _ args -> all validAnnotation [t | ArgType t <- args]
         TArrayOf t _ -> validAnnotation t
         TForall _ _ t -> validAnnotation t

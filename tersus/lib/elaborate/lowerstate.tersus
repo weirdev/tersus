@@ -1,5 +1,5 @@
 import data::ast::ast { AstNode };
-import data::codec::codec { Size, Token, Type, sizeAt, typeAt, wordAt };
+import data::codec::codec { Size, Token, Type, sizeAt, typeAt, wordAt, tokenize, boxedClosureKey };
 import elaborate::out { quotedName };
 import parser::syntax::syntax as ps;
 import elaborate::state { fnContractSuffix, fnNameWithContract, intText };
@@ -367,10 +367,25 @@ fn lwInstanceText(ls: &LowSt, base: &String, args: &List<Int>) -> String ~ {
     i = 0;
     for a in args {
         if i > 0 { out = lwCat(out, ", "); };
-        out = lwCat(out, forNameOf(ls, a));
+        out = lwCat(out, lwInstanceArgName(ls, a));
         i = i + 1;
     };
     return lwCat(out, ">");
+};
+
+fn lwHasBoxedType(ls: &LowSt, t: Int) -> Bool ~ {
+    x = tyOf(ls, t);
+    if x.kind = 16 { return true; };
+    for arg in x.args { if lwHasBoxedType(ls, arg) { return true; }; };
+    return false;
+};
+
+fn lwInstanceArgName(ls: &LowSt, t: Int) -> String ~ {
+    if lwHasBoxedType(ls, t) {
+        tokens = tokenize(tyText(ls, t));
+        if tokens.ok { return boxedClosureKey(&tokens.value, 0, size(tokens.value)); };
+    };
+    return forNameOf(ls, t);
 };
 
 fn namedType(ls: LowSt, base: String, args: List<Int>) -> LowSt ~ {
@@ -464,7 +479,15 @@ fn fromCodecTy(ls: LowSt, t: &Type) -> LowSt ~ {
         Type::TBox { inner: e } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); name = clone(ls.boxName); return namedType(ls, name, push([], ls.ty)); },
         Type::TArray { elem: e, size: s } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); return arrayType(ls, ls.ty, clone(s)); },
         Type::TFn { args: args, ret: r } => { return fromCodecFn(ls, args, r, ""); },
-        Type::TBoxedClosure { mutable: mutable, signature: signature } => { return lfail(ls, "boxed closure types are not supported in lowering"); },
+        Type::TBoxedClosure { mutable: mutable, signature: signature, key: key } => {
+            ls = fromCodecTy(ls, Box::unbox(signature));
+            if !ls.ok { return ls; };
+            inner = ls.ty;
+            tag = "closure";
+            if mutable { tag = "closuremut"; };
+            ownerTy = lwBlank(16, lwSp(clone(tag), tyText(&ls, inner)), clone(key));
+            return intern(ls, LTy { args: push([], inner), name: tag, ..ownerTy });
+        },
         Type::TFnContract { args: args, ret: r, contract: contract } => {
             c = Box::unbox(clone(contract));
             return fromCodecFn(ls, args, r, fnContractSuffix(&c));

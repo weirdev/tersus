@@ -98,6 +98,7 @@ operandsOf rv = case rv of
     ListOp _ os -> os
     MakeList os -> os
     MakeBox o -> [o]
+    PackClosure o thunk -> [o, Const (CFn thunk)]
     Unbox o -> [o]
     Unsize o -> [o]
     MakeData _ fs -> map snd fs
@@ -447,6 +448,7 @@ lowerFunction renames original fn =
             os' <- mapM (\(i, o) -> operandFor (if isElement i then element else TInt) o) (zip [0 ..] os)
             return (ListOp op os')
         MakeBox o -> MakeBox <$> operandFor (case destTy of TBox t -> t; t -> t) o
+        PackClosure o thunk -> return (PackClosure (renameOperand o) thunk)
         Unbox o -> return (Unbox (renameOperand o))
         Unsize o -> return (Unsize (renameOperand o))
         MakeData name fs -> do

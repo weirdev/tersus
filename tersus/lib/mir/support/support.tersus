@@ -73,20 +73,23 @@ fn renderSize(s: &Size) -> String [{ }] [{ }] {
     };
 };
 
-fn renderType(t: &Type) -> String ~ {
+fn renderType(t: &Type) -> String ~ { return renderTypeWith(t, false); };
+fn runtimeTypeKey(t: &Type) -> String ~ { return renderTypeWith(t, true); };
+
+fn renderTypeWith(t: &Type, keys: Bool) -> String ~ {
     r = "";
     match t {
         Type::TInt => { r = "Int"; },
         Type::TByte => { r = "Byte"; },
         Type::TBool => { r = "Bool"; },
-        Type::TList { elem: e } => { r = catStrings(catStrings("List<", renderType(Box::unbox(e))), ">"); },
-        Type::TBox { inner: e } => { r = catStrings(catStrings("Box<", renderType(Box::unbox(e))), ">"); },
-        Type::TArray { elem: e, size: s } => { r = catStrings(catStrings(catStrings(catStrings("Array<", renderType(Box::unbox(e))), ", "), renderSize(s)), ">"); },
-        Type::TRef { inner: e } => { r = catStrings("&", renderType(Box::unbox(e))); },
-        Type::TMutRef { inner: e } => { r = catStrings("&mut ", renderType(Box::unbox(e))); },
-        Type::TAddr { inner: e } => { r = catStrings(catStrings("Addr<", renderType(Box::unbox(e))), ">"); },
-        Type::TBlock { inner: e } => { r = catStrings(catStrings("Block<", renderType(Box::unbox(e))), ">"); },
-        Type::TUninit { inner: e } => { r = catStrings(catStrings("Uninit<", renderType(Box::unbox(e))), ">"); },
+        Type::TList { elem: e } => { r = catStrings(catStrings("List<", renderTypeWith(Box::unbox(e), keys)), ">"); },
+        Type::TBox { inner: e } => { r = catStrings(catStrings("Box<", renderTypeWith(Box::unbox(e), keys)), ">"); },
+        Type::TArray { elem: e, size: s } => { r = catStrings(catStrings(catStrings(catStrings("Array<", renderTypeWith(Box::unbox(e), keys)), ", "), renderSize(s)), ">"); },
+        Type::TRef { inner: e } => { r = catStrings("&", renderTypeWith(Box::unbox(e), keys)); },
+        Type::TMutRef { inner: e } => { r = catStrings("&mut ", renderTypeWith(Box::unbox(e), keys)); },
+        Type::TAddr { inner: e } => { r = catStrings(catStrings("Addr<", renderTypeWith(Box::unbox(e), keys)), ">"); },
+        Type::TBlock { inner: e } => { r = catStrings(catStrings("Block<", renderTypeWith(Box::unbox(e), keys)), ">"); },
+        Type::TUninit { inner: e } => { r = catStrings(catStrings("Uninit<", renderTypeWith(Box::unbox(e), keys)), ">"); },
         Type::TWord { signed: signed, bits: bits } => {
             if signed { r = catStrings("I", showInt(bits)); } else { r = catStrings("U", showInt(bits)); };
         },
@@ -95,18 +98,18 @@ fn renderType(t: &Type) -> String ~ {
             names = noStrings();
             for tn in types { names = push(names, clone(tn)); };
             for sn in sizes { names = push(names, clone(sn)); };
-            r = catStrings(catStrings(catStrings("<", joinWith(", ", names)), ">"), renderType(Box::unbox(body)));
+            r = catStrings(catStrings(catStrings("<", joinWith(", ", names)), ">"), renderTypeWith(Box::unbox(body), keys));
         },
         Type::TFn { args: args, ret: ret } => {
             parts = noStrings();
-            for a in args { parts = push(parts, renderType(a)); };
-            r = catStrings(catStrings(catStrings("fn(", joinWith(", ", parts)), ") -> "), renderType(Box::unbox(ret)));
+            for a in args { parts = push(parts, renderTypeWith(a, keys)); };
+            r = catStrings(catStrings(catStrings("fn(", joinWith(", ", parts)), ") -> "), renderTypeWith(Box::unbox(ret), keys));
         },
-        Type::TBoxedClosure { mutable: mutable, signature: signature } => { r = catStrings(catStrings("Closure<", renderType(Box::unbox(signature))), ">"); if mutable { r = catStrings(catStrings("ClosureMut<", renderType(Box::unbox(signature))), ">"); }; },
+        Type::TBoxedClosure { mutable: mutable, signature: signature, key: key } => { if keys { return clone(key); }; r = catStrings(catStrings("Closure<", renderType(Box::unbox(signature))), ">"); if mutable { r = catStrings(catStrings("ClosureMut<", renderType(Box::unbox(signature))), ">"); }; },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             parts = noStrings();
-            for a in args { parts = push(parts, renderType(a)); };
-            r = catStrings(catStrings(catStrings("fn(", joinWith(", ", parts)), ") -> "), renderType(Box::unbox(ret)));
+            for a in args { parts = push(parts, renderTypeWith(a, keys)); };
+            r = catStrings(catStrings(catStrings("fn(", joinWith(", ", parts)), ") -> "), renderTypeWith(Box::unbox(ret), keys));
         },
         Type::TNamed { name: name } => { r = withoutBackticks(name); },
         Type::TVariant { name: name } => { r = clone(name); },

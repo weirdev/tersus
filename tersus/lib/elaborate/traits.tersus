@@ -1229,6 +1229,48 @@ fn closureAbsorb(st: St, stmt: Int) -> St ~ {
     return St { genericOut: genOut, genericTypes: genTypes, outs: outerOuts, te: outerTe, tes: outerTes, current: outerCurrent, names: outerNames, ..st };
 };
 
+fn boxedNamedThunk(st: St, name: &String, mutable: Bool) -> St ~ {
+    rec = directFnArgRecord(&st, name);
+    if !rec.ok || st.defChecking { return typeError(st, "boxing a named function needs its concrete declaration"); };
+    st = fnSigOf(st, rec.ps, rec.sig);
+    if st.status != 0 { return st; };
+    sig = clone(st.fnSig);
+    if size(sig.sizes) > 0 || size(sig.types) > 0 || size(sig.froms) > 0 || size(sig.writes) > 0 { return typeError(st, "unsupported boxed closure function signature"); };
+    st = simpleTy(st, 0);
+    recv = 10;
+    if mutable { recv = 11; };
+    st = wrapTy(st, recv, st.ty);
+    ps = push([], "$boxedCapture");
+    tys = push([], st.ty);
+    for p in &sig.params { ps = push(ps, clone(p)); };
+    for ty in &sig.ptys { tys = push(tys, ty); };
+    wrapper = FnSig { params: ps, ptys: tys, ..clone(sig) };
+    st = emitVar(st, clone(name));
+    f = st.nid;
+    args = [];
+    for p in &sig.params { st = emitVar(st, clone(p)); args = push(args, st.nid); };
+    st = emitCall(st, f, &args);
+    st = emit(st, AstNode::Statement { value: AstStatement::Return { e: st.nid } });
+    stmts = push([], st.nid);
+    st = emitStatements(st, &stmts);
+    body = st.nid;
+    st = emitSignature(st, &wrapper);
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: st.nid, term: rec.term, stmts: body } });
+    bodyNode = st.nid;
+    st = emitNames(st, &wrapper.params);
+    params = st.nid;
+    st = emitProofs(st, []);
+    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: params, ins: rec.ins, outs: rec.outs, body: bodyNode, exports: st.nid } });
+    st = emitVal(st, st.nid);
+    expr = st.nid;
+    thunk = catStrings(catStrings(catStrings("$boxed$", &st.unitKey), "$"), intText(st.next));
+    st = St { next: st.next + 1, ..st };
+    st = emitName(st, clone(thunk));
+    st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: st.nid, e: expr } });
+    st = closureAbsorb(st, st.nid);
+    return St { names: push([], thunk), ..st };
+};
+
 fn closureStructValue(st: St, structName: &String, structTy: Int, structArgs: &List<Int>, caps: &List<ClosureCap>, expected: Int, hasBound: Bool) -> St ~ {
     fieldExprs = [];
     for c in caps {

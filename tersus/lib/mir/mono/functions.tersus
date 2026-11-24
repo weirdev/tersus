@@ -1,7 +1,7 @@
 import data::codec::codec { Token };
 import mir::full::full { FullRecord, FullBlock, FullFunction };
 import mir::full as full;
-import mir::mono::tokens { MonoBinding, monoLookup, monoBind, monoTypeName, monoInstanceTypeName, monoSubstitute, monoCompareText, monoCompareNames, monoCompareTypeLists };
+import mir::mono::tokens { MonoBinding, monoLookup, monoBind, monoTypeName, monoInstanceTypeName, monoSubstitute, monoCompareText, monoCompareNames, monoCompareTypeLists , monoArgumentName };
 
 struct MonoKey { name: String, types: List<List<Token>>, sizes: List<String> };
 impl Clone for MonoKey { };
@@ -59,11 +59,11 @@ fn monoMatch(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>) -> 
     pw = full::tokens::textAt(pat, 0);
     aw = full::tokens::textAt(actual, 0);
     if pw != aw { return bs; };
-    if pw = "box" || pw = "list" || pw = "addr" || pw = "block" || pw = "uninit" || pw = "array" {
+    if pw = "box" || pw = "list" || pw = "addr" || pw = "block" || pw = "uninit" || pw = "array" || pw = "closure" || pw = "closuremut" {
         return monoMatch(bs, full::tokens::sliceTokens(pat, 1, full::tokens::typeEnd(pat, 1)), full::tokens::sliceTokens(actual, 1, full::tokens::typeEnd(actual, 1)));
     };
     if pw = "named" { return monoMatchNamed(bs, pat, actual); };
-    if pw = "fn" { return monoMatchFn(bs, pat, actual); };
+    if pw = "fn" || pw = "fnc" { return monoMatchFn(bs, pat, actual); };
     return bs;
 };
 
@@ -140,7 +140,7 @@ fn monoCallTypes(caller: &FullFunction, target: &FullFunction, args: &List<List<
 fn monoInstanceName(key: &MonoKey) -> String ~ {
     out = clone(key.name).concat("<");
     parts = [];
-    for ty in key.types { parts = push(parts, monoTypeName(ty, 0, false)); };
+    for ty in key.types { parts = push(parts, monoArgumentName(ty)); };
     for s in key.sizes { parts = push(parts, clone(s)); };
     for i in 0..size(parts) { if i > 0 { out = out.concat(", "); }; out = out.concat(get(parts, i)); };
     return out.concat(">");

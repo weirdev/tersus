@@ -57,6 +57,7 @@ enum Rvalue {
     ListOp { op: Int, args: List<Operand> },
     MakeList { items: List<Operand> },
     MakeBox { o: Operand },
+    PackClosure { env: Operand, thunk: String },
     Unbox { o: Operand },
     Unsize { o: Operand },
     MakeData { name: String, fields: List<String>, values: List<Operand> },
@@ -446,6 +447,15 @@ fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; af
     if !w.ok || w.pos >= size(ts) { return bad; };
     next = w.pos;
     kw = w.value;
+    if kw = "packclosure" {
+        env = operandAt(ts, next);
+        if !env.ok || env.pos >= size(ts) { return bad; };
+        target = operandAt(ts, env.pos);
+        if !target.ok || !(target.value is Operand::Const) { return bad; };
+        c = (target.value as Operand::Const).value;
+        if !(c is Constant::CFn) { return bad; };
+        return done(Rvalue::PackClosure { env: env.value, thunk: clone((c as Constant::CFn).name) }, target.pos);
+    };
     if kw = "use" || kw = "makebox" || kw = "unbox" || kw = "unsize" || kw = "clone" {
         o = operandAt(ts, next);
         if !o.ok { return bad; };

@@ -1,5 +1,5 @@
-import mir::emit::types { Ctx, LT, assignRefType, bytesIn, constructedType, ctorAt, dropRangeSymbol, dropSymbol, fieldIndex, fieldIndex2, fieldOffset, isBoxStruct, isListStruct, isNumberWord, listElement, localTypeOf, needsDropIn, ownsIn, sharedType };
-import mir::emit::values { Gen, arrayLength, arrayPtr, cloneValue, constructorG, copyWords, dataBase, descriptor, dropElement, dropSlot, elementAddress, elementValue, emit, entryTemp, failG, freshLabel, giving, ins, isArrayOperand, label, lastIndex, loadAt, loadSlot, operandAddress, operandLocalType, operandPointer, operandValue, placeAddress, slot, storeAt, storeSlot, typeText, writeElement, zeroOf, zeroWords };
+import mir::emit::types { Ctx, LT, assignRefType, bytesIn, constructedType, ctorAt, dropRangeSymbol, dropSymbol, functionSymbol, fieldIndex, fieldIndex2, fieldOffset, isBoxStruct, isListStruct, isNumberWord, listElement, localTypeOf, needsDropIn, ownsIn, sharedType };
+import mir::emit::values { Gen, arrayLength, arrayPtr, cloneValue, constructorG, copyWords, dataBase, descriptor, dropElement, dropSlot, elementAddress, elementValue, emit, entryTemp, failG, freshLabel, giving, ins, isArrayOperand, label, lastIndex, loadAt, loadSlot, operandAddress, operandLocalType, operandPointer, operandValue, placeAddress, slot, storeAt, memcpyText, storeSlot, typeText, writeElement, zeroOf, zeroWords };
 import mir::support::support { noStrings, showInt, sizedArray, isAggregate };
 import data::codec::codec { Size, Type };
 import mir::reader::reader { Constant, Operand, Rvalue, Statement, Function, noOperand };
@@ -211,8 +211,7 @@ fn addressOp(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, args: &Li
     if op = 31 && n = 2 {
         e = addressElement(f, get(args, 0));
         if !e.ok { return failG(g, "Not an address"); };
-        if !needsDropIn(cx, e.ty) { return giving(g, "0"); };
-        if !(e.ty is Type::TNamed || e.ty is Type::TVariant || sizedArray(e.ty).ok) { return giving(g, "0"); };
+            if !ownsIn(cx, e.ty) { return giving(g, "0"); };
         g1 = slotAddress(g, cx, f, get(args, 0), get(args, 1));
         at = clone(g1.last);
         g2 = descriptor(g1, cx, e.ty);
@@ -221,8 +220,7 @@ fn addressOp(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, args: &Li
     if op = 32 && n = 3 {
         e = addressElement(f, get(args, 0));
         if !e.ok { return failG(g, "Not an address"); };
-        if !needsDropIn(cx, e.ty) { return giving(g, "0"); };
-        if !(e.ty is Type::TNamed || e.ty is Type::TVariant || sizedArray(e.ty).ok) { return giving(g, "0"); };
+            if !ownsIn(cx, e.ty) { return giving(g, "0"); };
         g1 = slotNumber(g, cx, f, get(args, 0), get(args, 1));
         at = clone(g1.last);
         g2 = operandValue(g1, cx, f, Type::TInt, get(args, 2));
@@ -234,6 +232,30 @@ fn addressOp(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, args: &Li
 };
 
 fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~ {
+    if rv is Rvalue::PackClosure {
+        pack = rv as Rvalue::PackClosure;
+        ty = operandLocalType(f, pack.env);
+        if !(destType is Type::TBoxedClosure) || !ty.ok { return failG(g, "a boxed closure needs a typed capture local"); };
+        bytes = bytesIn(cx, ty.ty);
+        g1 = descriptor(g, cx, ty.ty);
+        g1 = ins(g1, "heap", "call i64 @tersus_addr_alloc(i64 1, i64 ".then(showInt(24 + bytes)).then(")"));
+        g1 = ins(g1, "env", "inttoptr i64 ".then(clone(g1.last)).then(" to ptr"));
+        env = clone(g1.last);
+        g1 = emit(g1, "store ptr ".then(functionSymbol(pack.thunk)).then(", ptr ").then(env));
+        g1 = ins(g1, "drop", "getelementptr ptr, ptr ".then(env).then(", i64 1"));
+        drop = "null";
+        if ownsIn(cx, ty.ty) { drop = dropSymbol(cx.types, ty.ty); };
+        g1 = emit(g1, "store ptr ".then(drop).then(", ptr ").then(clone(g1.last)));
+        g1 = ins(g1, "clone", "getelementptr ptr, ptr ".then(env).then(", i64 2"));
+        g1 = emit(g1, "store ptr null, ptr ".then(clone(g1.last)));
+        g1 = ins(g1, "capture", "getelementptr ptr, ptr ".then(env).then(", i64 3"));
+        payload = clone(g1.last);
+        g1 = operandValue(g1, cx, f, ty.ty, pack.env);
+        v = clone(g1.last);
+        if isAggregate(ty.ty) { g1 = copyWords(g1, payload, v, bytes); }
+        else { g1 = storeAt(g1, ty.ty, payload, v); };
+        return giving(g1, env);
+    };
     if rv is Rvalue::Use { return operandValue(g, cx, f, destType, (rv as Rvalue::Use).o); };
     if rv is Rvalue::Borrow { return placeAddress(g, cx, f, (rv as Rvalue::Borrow).root, (rv as Rvalue::Borrow).steps); };
     if rv is Rvalue::Deref {
@@ -701,6 +723,7 @@ fn storeResult(g: Gen, cx: &Ctx, entry: Bool, f: &Function, dest: Int, value: &S
 
 // A copy of the value that a local owns, which shares nothing with it, given to another local (which frees the value it held)
 fn cloneInto(g: Gen, cx: &Ctx, f: &Function, dest: Int, destType: &Type, o: &Operand) -> Gen ~ {
+    if destType is Type::TBoxedClosure { return failG(g, "a boxed closure cannot be cloned"); };
     source = "";
     if o is Operand::Copy { source = slot((o as Operand::Copy).local); };
     if o is Operand::Move { source = slot((o as Operand::Move).local); };

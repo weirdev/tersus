@@ -1,4 +1,4 @@
-import mir::emit::types { Ctx, Storage, cloneImplName, cloneSymbol, containsName, dropRangeSymbol, dropSymbol, fieldsLayout, functionSymbol, layoutOf, needsDrop, needsDropIn, printSymbol };
+import mir::emit::types { Ctx, Storage, cloneImplName, cloneSymbol, containsName, dropRangeSymbol, dropSymbol, fieldsLayout, functionSymbol, hasDropHelper, holdsBoxedOwner, layoutOf, needsDrop, needsDropIn, printSymbol };
 import mir::support::support { noStrings, showInt, beforeAngle, canonical, variantsOf, isEnum, sizedArray, isAggregate, declaredName, roundUp, simpleLayout };
 import data::codec::codec { Type };
 import mir::reader::reader { Field, Variant, TypeDecl, Program, dropOf };
@@ -29,6 +29,26 @@ fn dropFunctionLines(types: &List<TypeDecl>, p: &Program, t: &Type) -> List<Stri
     out = push(out, "define internal void ".then(dropSymbol(types, t)).then("(ptr %slot) {"));
     out = push(out, "entry:");
     arr = sizedArray(t);
+    if t is Type::TBoxedClosure {
+        out = push(out, "    %env = load ptr, ptr %slot");
+        out = push(out, "    %empty = icmp eq ptr %env, null");
+        out = push(out, "    br i1 %empty, label %done, label %owned");
+        out = push(out, "owned:");
+        out = push(out, "    %drop = getelementptr ptr, ptr %env, i64 1");
+        out = push(out, "    %dropfn = load ptr, ptr %drop");
+        out = push(out, "    %trivial = icmp eq ptr %dropfn, null");
+        out = push(out, "    br i1 %trivial, label %free, label %capture");
+        out = push(out, "capture:");
+        out = push(out, "    %payload = getelementptr ptr, ptr %env, i64 3");
+        out = push(out, "    call void %dropfn(ptr %payload)");
+        out = push(out, "    br label %free");
+        out = push(out, "free:");
+        out = push(out, "    call void @tersus_box_free(ptr %env)");
+        out = push(out, "    br label %done");
+        out = push(out, "done:");
+        out = push(out, "    ret void");
+        return push(out, "}");
+    };
     if arr.ok {
         step = layoutOf(types, arr.elem).size;
         out = push(out, "    br label %ahead");
@@ -118,7 +138,7 @@ fn dropRangeFunctionLines(types: &List<TypeDecl>, p: &Program, t: &Type) -> List
 fn dropFunctions(types: &List<TypeDecl>, p: &Program, closed: &List<Type>) -> List<String> ~ {
     out = noStrings();
     for t in closed {
-        if needsDrop(types, p, t) && (t is Type::TNamed || sizedArray(t).ok) {
+        if needsDrop(types, p, t) && hasDropHelper(t) {
             for l in dropFunctionLines(types, p, t) { out = push(out, clone(l)); };
             for l in dropRangeFunctionLines(types, p, t) { out = push(out, clone(l)); };
             out = push(out, "");
@@ -337,7 +357,7 @@ fn cloneFunctionLines(cx: &Ctx, t: &Type) -> List<String> ~ {
 fn cloneFunctions(cx: &Ctx, closed: &List<Type>) -> List<String> ~ {
     out = noStrings();
     for t in closed {
-        if t is Type::TNamed || sizedArray(t).ok {
+        if (t is Type::TNamed || sizedArray(t).ok) && !holdsBoxedOwner(cx, t, []) {
             for l in cloneFunctionLines(cx, t) { out = push(out, clone(l)); };
             out = push(out, "");
         };
@@ -530,8 +550,10 @@ fn printFunctionLines(types: &List<TypeDecl>, st: &Storage, t: &Type) -> List<St
         out = push(out, "}");
         return out;
     };
-    if t is Type::TFn {
-        for l in printTextLines("u", "<function>") { out = push(out, clone(l)); };
+    if t is Type::TFn || t is Type::TBoxedClosure {
+        text = "<function>";
+        if t is Type::TBoxedClosure { text = "<boxed closure>"; };
+        for l in printTextLines("u", text) { out = push(out, clone(l)); };
         out = push(out, "    ret void");
         out = push(out, "}");
         return out;

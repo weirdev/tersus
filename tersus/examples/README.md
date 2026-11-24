@@ -22,6 +22,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `basics.tersus` | Integer lists, `size`/`first`/`last`, arithmetic, and a nested block that updates an outer variable | returns `6` |
 | `functions.tersus` | `fn` definitions, multiple arguments, and a function that calls `first`/`last` under an input contract | returns `21` |
 | `closures.tersus` | Closures: captures copied, borrowed and moved (`move fn`), an updating closure through an `FnMut` bound, types taken from the bound, a capture-only contract proved at creation, and a closure called directly | returns `21130122` |
+| `stored_callbacks.tersus` | Owned boxed callbacks made from a named function and a capturing closure, stored in a list and a field, and returned from a function | returns `29` |
 | `higher_order.tersus` | Higher-order library functions: `map`/`filter`/`fold`/`any`/`all`/`find`/`sortBy` over lists, the `mapArray`/`sortArrayBy`/`foldArray` array forms, and the `hashMap`/`hashSet` `ForEach`/`Fold`/`RetainIf` free functions with closures | returns `187971457` |
 | `threads.tersus` | Threads: a sum split across four threads, each part a closure started with `Thread::spawn` and joined | returns `499500` |
 | `booleans.tersus` | `true`/`false` literals and relations such as `x < 6` producing booleans | returns `true` |

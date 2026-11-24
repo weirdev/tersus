@@ -95,6 +95,7 @@ data Program = Program
     , progInvariants :: Map Name [ValidationStatement] -- what every value of a struct meets, by the name of the struct (not of an instance of it)
     , progBounded :: Map Name BoundedFn -- the functions with bounds, lowered once with their type parameters (MirCopies makes their copies)
     , progInstances :: Map Name (Name, [Arg]) -- what each name a reference to a copy is written with stands for: the function with bounds and its type and bounded size arguments
+    , progCaptureStorage :: Map Name ([Variable], [(Variable, Type)]) -- selected compiler storage definitions, never read from MIR data
     }
     deriving (Show, Eq, Read)
 
@@ -198,6 +199,7 @@ data Rvalue
     | MakeList [Operand]
     | -- The value held in a Box. A Box has the value of what it holds, so this is the same value; what differs is where it lives.
       MakeBox Operand
+    | PackClosure Operand Name
     | -- The value that a Box holds, taken out of it
       Unbox Operand
     | -- A Box of an array of a size, as a Box of an array of any size: the same value, with the size carried by the Box
@@ -409,6 +411,7 @@ completeInstancesWith erased program
         ListOp _ os -> concatMap operandNames os
         MakeList os -> concatMap operandNames os
         MakeBox o -> operandNames o
+        PackClosure o thunk -> thunk : operandNames o
         Unbox o -> operandNames o
         Unsize o -> operandNames o
         MakeData name fields -> name : concatMap (operandNames . snd) fields
@@ -625,6 +628,7 @@ renderRvalue (Use o) = renderOperand o
 renderRvalue (BinaryOp op a b) = renderBinOp op ++ "(" ++ renderOperand a ++ ", " ++ renderOperand b ++ ")"
 renderRvalue (ListOp op os) = show op ++ "(" ++ intercalate ", " (map renderOperand os) ++ ")"
 renderRvalue (MakeBox o) = "box " ++ renderOperand o
+renderRvalue (PackClosure o thunk) = "packclosure " ++ renderOperand o ++ " " ++ thunk
 renderRvalue (Unbox o) = "unbox " ++ renderOperand o
 renderRvalue (Unsize o) = "unsize " ++ renderOperand o
 renderRvalue (MakeList os) = "[" ++ intercalate ", " (map renderOperand os) ++ "]"
@@ -772,6 +776,7 @@ operandsOfRvalue rv = case rv of
     ListOp _ os -> os
     MakeList os -> os
     MakeBox o -> [o]
+    PackClosure o _ -> [o]
     Unbox o -> [o]
     Unsize o -> [o]
     MakeData _ fields -> map snd fields

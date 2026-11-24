@@ -1,4 +1,4 @@
-import mir::emit::types { Ctx, Held, LT, bytesIn, cloneImplName, cloneSymbol, ctorAt, ctorIndex, dropSymbol, fieldIndex, fieldIndex2, fieldOffset, functionSymbol, global, isArray, isBoxStruct, isListStruct, isNumberWord, listElement, llvmType, localTypeOf, needsDropIn, noTypes, ownsIn, refTargetOf, slotsIn };
+import mir::emit::types { Ctx, Held, LT, bytesIn, cloneImplName, cloneSymbol, ctorAt, ctorIndex, dropSymbol, fieldIndex, fieldIndex2, fieldOffset, functionSymbol, global, holdsBoxedOwner, isArray, isBoxStruct, isListStruct, isNumberWord, listElement, llvmType, localTypeOf, noTypes, ownsIn, refTargetOf, slotsIn };
 import mir::support::support { Res, noStrings, showInt, joinWith, renderType, sizedArray, isAggregate };
 import data::codec::codec { Type, parseInt };
 import mir::reader::reader { Constant, Operand, RefStep, Function };
@@ -92,6 +92,7 @@ fn descriptor(g: Gen, cx: &Ctx, t: &Type) -> Gen ~ {
 // copies of its parts, as the impl the language makes for `impl Clone for T { };` is) and the made function
 // of the type when it does not
 fn cloneValue(g: Gen, cx: &Ctx, current: &String, t: &Type, to: &String, from: &String) -> Gen ~ {
+    if holdsBoxedOwner(cx, t, []) { return failG(g, "a boxed closure cannot be cloned"); };
     g1 = descriptor(g, cx, t);
     implName = cloneImplName(cx, t);
     // (a copy inside the `Clone` impl of the type itself is the copy the impl is made of, not the impl called
@@ -421,8 +422,7 @@ fn elementValue(g: Gen, cx: &Ctx, f: &Function, elementTy: &Type, o: &Operand) -
 
 // Frees what an element owns, before another is written over it
 fn dropElement(g: Gen, cx: &Ctx, elementTy: &Type, base: &String, index: &String) -> Gen ~ {
-    if !needsDropIn(cx, elementTy) { return g; };
-    if !(elementTy is Type::TNamed || elementTy is Type::TVariant || sizedArray(elementTy).ok) { return g; };
+    if !ownsIn(cx, elementTy) { return g; };
     bytes = bytesIn(cx, elementTy);
     g1 = elementAddress(g, base, index, bytes);
     p = clone(g1.last);

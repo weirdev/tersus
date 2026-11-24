@@ -52,6 +52,15 @@ testClosures =
                         "app/main.tersus"
                         closureModuleFiles
                 pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
+            , testCase "boxed closure calls use the declared result contract" (checked ("let f: Closure<" ++ positiveStep ++ "> = fn(x: Int) -> Int [{ }] [{ affirm return > x; }] => x + 1; y = f(41); affirm y > 41; return y;") 42)
+            , testCase "boxing does not infer a postcondition from the closure body" (rejects ("let f: Closure<" ++ positiveStep ++ "> = fn(x: Int) -> Int => x + 1; return 0;") "Could not prove")
+            , testCase "a boxed call must prove the type's input contract" (rejects ("let f: Closure<" ++ positiveStep ++ "> = fn(x: Int) -> Int [{ }] [{ affirm return > x; }] => x + 1; return f(0);") "Could not prove")
+            , testCase "a mutable boxed closure retains its owned state across calls" (checked "count = 0; let f: ClosureMut<fn() -> Int> = move fn() -> Int { count = count + 1; return count; }; a = f(); b = f(); return a * 10 + b;" 12)
+            , testCase "boxed calls with separate contracts do not introduce a spurious cycle" (checked "fn good() -> Int [{ }] [{ affirm return = 42; }] { return 42; };\nfn invoke(f: &Closure<fn() -> Int [{ }] [{ affirm return = 42; }]>) -> Int { return f(); };\nfn second() -> Int [{ }] [{ affirm return = 2; }] {\n    let f: Closure<fn() -> Int [{ }] [{ affirm return = 42; }]> = good;\n    n = invoke(&f);\n    return 2;\n};\nlet g: Closure<fn() -> Int [{ }] [{ affirm return = 2; }]> = second;\nreturn g() + 40;\n" 42)
+            , testCase "an indirect cycle through a boxed closure is refused" (rejects "fn invoke(f: &Closure<fn() -> Int>) -> Int { return f(); };\nfn cycle() -> Int {\n    let f: Closure<fn() -> Int> = cycle;\n    return invoke(&f);\n};\nreturn 0;\n" "potential recursion through a function value")
+            , testCase "mutable boxed calls give fresh results even with identical arguments" (rejects "n = 0;\nlet f: ClosureMut<fn() -> Int> = move fn() -> Int {\n    n = n + 1;\n    return n;\n};\na = f();\nb = f();\naffirm a = b;\nreturn b;\n" "Could not prove: a = b")
+            , testCase "boxing refuses a potentially diverging callable" (rejects "fn spin() -> Int [{ }] [{ }] ~ { return spin(); };\nlet f: Closure<fn() -> Int> = spin;\nreturn 0;\n" "a boxed closure cannot use a potentially diverging callable")
+            , testCase "a boxed element view cannot survive replacement of its owner" (rejects "fn make(n: Int) -> Closure<fn() -> Int> { return move fn() -> Int => n; };\nlet xs: List<Closure<fn() -> Int>> = [make(42)];\npart = get(xs, 0);\nxs = set(xs, 0, make(7));\nreturn part();\n" "still looks at xs[0]")
             , TestList
                 "closures"
                 [ testCase "a closure reads a Copy capture, copied at creation" (runs "n = 10; f = fn(x: Int) -> Int => x + n; return f(5);" 15)

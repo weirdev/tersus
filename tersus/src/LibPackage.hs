@@ -144,6 +144,7 @@ stripDeclaredFromUnit declared (moduId, program) =
         { M.progTypes = Map.withoutKeys (M.progTypes program) declared
         , M.progGenerics = Map.withoutKeys (M.progGenerics program) declared
         , M.progInvariants = Map.withoutKeys (M.progInvariants program) declared
+        , M.progCaptureStorage = Map.withoutKeys (M.progCaptureStorage program) declared
         , M.progFunctions = Map.withoutKeys (M.progFunctions program) replacedBounded
         , M.progBounded = Map.withoutKeys (M.progBounded program) declared
         }
@@ -159,6 +160,8 @@ libCatalog pkg = [Library name (Map.findWithDefault [] name (libImports pkg)) if
 
 libUnit :: LibPackage -> String -> Result (ModuleId, M.Program) String
 libUnit pkg name = case Map.lookup name (libPrograms pkg) of
-    Just program -> Ok (libModuleId name, program)
+    Just program
+        | name == "types" -> Ok (libModuleId name, program{M.progCaptureStorage = Map.restrictKeys (M.progGenerics program) (Set.fromList ["List", "Box"])})
+        | otherwise -> Ok (libModuleId name, program)
     Nothing -> Error ("internal: no compiled unit for assembly library " ++ name)
 

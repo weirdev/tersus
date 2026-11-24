@@ -24,8 +24,20 @@ import Utils
 linkPrograms :: [(ModuleId, M.Program)] -> Result M.Program String
 linkPrograms [] = Error "link error: no modules to link"
 linkPrograms units = flatResultMap unitData units `bindResult` \parts ->
-    profiledLinkPass ("merge-copies " ++ show (length units) ++ "\n" ++ concat parts) `bindResult` checkSpawns library
+    profiledLinkPass ("merge-copies " ++ show (length units) ++ "\n" ++ concat parts) `bindResult` \linked ->
+        checkSpawns library linked{M.progCaptureStorage = captureStorage linked}
   where
+    captureStorage program
+        | any packs (M.progMain program : Map.elems (M.progFunctions program)) = Map.fromList
+            [ (name, declaration)
+            | (ModuleId "tersuslib" (Just "types"), storage) <- units
+            , (name, declaration) <- Map.toList (M.progCaptureStorage storage)
+            , Just invariant <- [Map.lookup name (M.progInvariants storage)]
+            , Map.lookup name (M.progGenerics program) == Just declaration
+            , Map.lookup name (M.progInvariants program) == Just invariant
+            ]
+        | otherwise = Map.empty
+    packs fn = or [True | block <- Map.elems (M.fnBlocks fn), M.Assign _ M.PackClosure{} <- M.blockStatements block]
     library = Set.fromList [name | (ModuleId "tersuslib" _, program) <- units, name <- Map.keys (M.progBounded program)]
     unitData (ModuleId pkg modu, program) = programData program `bindResult` \text ->
         Ok ("unit " ++ quote pkg ++ " " ++ maybe "none" (\name -> "some " ++ quote name) modu

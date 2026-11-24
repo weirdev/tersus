@@ -225,6 +225,29 @@ type does not carry a decreases clause. Use a direct call for recursion that
 relies on `shrinks`. Contracted function types cannot be used as nominal
 generic type arguments.
 
+### Boxed closures
+
+`Closure<fn(...) -> R>` owns its captured environment. It is not a `fn`
+pointer and it is neither `Copy` nor `Clone`. For example, an annotated
+binding can take ownership of a static closure:
+
+```tersus
+offset = 40;
+let callback: Closure<fn(Int) -> Int> = move fn(x: Int) -> Int => x + offset;
+return callback(2);
+```
+
+A boxed call borrows the owner rather than consuming it; `ClosureMut` instead
+takes an exclusive loan, so consecutive calls can update the same captured
+state. The signature is the contract at the call site; conversion must prove
+that the callable meets it. The environment cannot contain borrowed references,
+including references in stored fields or elements, or user-held permissions.
+A compiler-provided `List` or `Box` can move into the environment as a whole
+when its elements satisfy the same capture rule. Moving a capture does not
+clone it, and dropping the closure drops its captures. See
+[`stored_callbacks.tersus`](examples/stored_callbacks.tersus) for list, field,
+and return storage.
+
 ```tersus
 fn scale(values: List<Int>, factor: Int) -> List<Int> {
     out = [];
