@@ -3,7 +3,7 @@ import data::codec::codec { Token, utf8Point };
 import mir::full::full { FullBlock, FullFunction, FullProgram, FullRecord, fnIndex, rowIndex };
 import mir::full::environments { baseIndex, functionEntry, resolveEnv };
 import mir::full::records { envEntries, envTokens, keyOrder, nodeAt, replaceEnv, statementAt };
-import mir::full::tokens { appendTokens, integerAt, intToken, intsEnd, name, namesEnd, textAt, typeEnd, word, wordIs };
+import mir::full::tokens { appendTokens, integerAt, intToken, intsEnd, name, namesEnd, sliceTokens, textAt, typeEnd, word, wordIs };
 import mir::instances::complete { completeInstancesWith };
 import mir::instances::names { InstanceNameClasses, instanceNameAt };
 import mir::pack::expand { expandPack };
