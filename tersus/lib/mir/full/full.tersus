@@ -1,6 +1,7 @@
 import data::codec::codec { Token, Parsed };
 import data::ast::ast { AstNode };
 import mir::full::read { parseFull };
+import mir::full::tokens { textAt };
 import mir::full::write { outputFull, emitFull, clearMetadata };
 
 fn fullAt(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ { return parseFull(lines, false); };
@@ -34,3 +35,6 @@ struct FullProgram {
     trailer: List<List<Token>>, arena: List<AstNode>, shared: List<List<Token>>
 };
 impl Clone for FullProgram { };
+
+fn rowIndex(rows: &List<FullRecord>, n: &String) -> Int ~ { i = 0; for r in rows { if r.name = n { return i; }; i = i + 1; }; return 0 - 1; };
+fn fnIndex(fns: &List<FullFunction>, n: &String) -> Int ~ { i = 0; for f in fns { if textAt(&f.header, 1) = n { return i; }; i = i + 1; }; return 0 - 1; };

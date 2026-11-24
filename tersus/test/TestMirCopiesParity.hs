@@ -222,7 +222,7 @@ packProbeSource = unlines
     , "import mir::full::environments { resolveEnv };"
     , "import mir::full::records { envEntries, replaceEnv };"
     , "import mir::full::tokens { integerAt, intToken, name, textAt, tokenLine, word };"
-    , "import mir::link::merge { fnIndex, rowIndex };"
+    , "import mir::full::full { fnIndex, rowIndex };"
     , "import mir::pack::body { PackSpread };"
     , "import mir::pack::expand { expandPack };"
     , "fn inlineFunction(fun: FullFunction, shared: &List<List<Token>>) -> FullFunction ~ {"

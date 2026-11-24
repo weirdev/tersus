@@ -27,7 +27,7 @@ extra-source-files:
 - lib/mir/full/environments.tersus
 - lib/mir/link/link.tersus
 - lib/mir/link/merge.tersus
-- lib/mir/link/prune.tersus
+- lib/mir/reachability/prune.tersus
 - lib/mir/pack/*.tersus
 - lib/mir/copies/*.tersus
 - dev/mir-copies/probe.tersus

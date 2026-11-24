@@ -1,7 +1,7 @@
 import data::codec::codec { Token, Parsed, catStrings };
 import data::ast::ast { AstNode };
 import data::arena::arena { remapNode };
-import mir::full::full { FullProgram, FullFunction, FullRecord, FullBlock };
+import mir::full::full { FullProgram, FullFunction, FullRecord, FullBlock, rowIndex, fnIndex };
 import mir::full::tokens { appendTokens, integerAt, intToken, name, namesEnd, intsEnd, quotedAt, sliceTokens, textAt, typeEnd, word, wordIs };
 import mir::full::records { EnvEntry, entryAt, envEnd, envEntries, envTokens, envStart, mapPayloadLine, payloadSlots, replaceEnv, mergeEntries, orderEntries, emptyEntries };
 import mir::full::write { mapProgramPayloads, mapProgramEnvRefs, mapFunctionEnvRefs, sortFunctions, sortRecords };
@@ -17,8 +17,6 @@ fn failedLink(message: String) -> Linked ~ { return Linked { ok: false, message:
 fn unitName(unit: &LinkUnit) -> String ~ { if unit.hasModule { return catStrings(catStrings(clone(unit.pkg), "::"), clone(unit.modu)); }; return clone(unit.pkg); };
 fn sameId(a: &LinkUnit, b: &LinkUnit) -> Bool ~ { return a.pkg = b.pkg && a.hasModule = b.hasModule && (!a.hasModule || a.modu = b.modu); };
 fn privateUnit(u: &LinkUnit) -> Bool ~ { return (u.pkg = "tersuslib" || u.pkg = "std") && u.hasModule && (u.modu = "lists" || u.modu = "box"); };
-fn rowIndex(rows: &List<FullRecord>, n: &String) -> Int ~ { i = 0; for r in rows { if r.name = n { return i; }; i = i + 1; }; return 0 - 1; };
-fn fnIndex(fns: &List<FullFunction>, n: &String) -> Int ~ { i = 0; for f in fns { if textAt(&f.header, 1) = n { return i; }; i = i + 1; }; return 0 - 1; };
 fn sameRow(a: &List<Token>, an: &List<AstNode>, b: &List<Token>, bn: &List<AstNode>) -> Bool ~ {
     return sameRowWithEnvs(a, an, b, bn, [], [], true);
 };

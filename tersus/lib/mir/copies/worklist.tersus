@@ -1,6 +1,6 @@
 import data::ast::ast { AstNode, AstTermination, AstOptTermination, AstStatement, AstStatements, AstValidations, AstValue, AstExpression };
 import data::codec::codec { Token, utf8Point };
-import mir::full::full { FullBlock, FullFunction, FullProgram, FullRecord };
+import mir::full::full { FullBlock, FullFunction, FullProgram, FullRecord, fnIndex, rowIndex };
 import mir::full::environments { baseIndex, functionEntry, resolveEnv };
 import mir::full::records { envEntries, envTokens, keyOrder, nodeAt, replaceEnv, statementAt };
 import mir::full::tokens { appendTokens, integerAt, intToken, intsEnd, name, namesEnd, textAt, typeEnd, word, wordIs };
@@ -15,8 +15,7 @@ import mir::copies::finish { finishCopies, isStubName, usedNames };
 import mir::copies::frame { boxedArraySizeAt, frameRefusal };
 import mir::copies::keys { copyGround, copyMentionsPack, copyStorageName, sameCopyType };
 import mir::copies::types { substituteArg, substituteType };
-import mir::link::prune { liveRoots, typePositions, functionTypes, functionImages, constantRoots };
-import mir::link::merge { fnIndex, rowIndex };
+import mir::reachability::prune { liveRoots, typePositions, reachableFunctionTypes, functionImages, constantRoots };
 import mir::mono::functions { MonoKey, monoSection, monoInstantiate, monoRedirect, monoKeyCompare, monoReturn };
 
 struct CopySources { functions: HashMap<String, Int>, bounded: HashMap<String, Int>, order: List<String> };
@@ -517,7 +516,7 @@ fn reachedFrameOwners(program: &FullProgram, supplied: &List<MonoKey>, live: &Ha
             seen = push(seen, clone(k)); n = fnIndex(&program.functions, &k.name);
             if n >= 0 && n < size(program.functions) {
                 frame = monoInstantiate(clone(get(program.functions, n)), k);
-                for owner in functionTypes(program, &frame) { owners = owners.insert(owner); };
+                for owner in reachableFunctionTypes(program, &frame) { owners = owners.insert(owner); };
                 for owner in functionImages(program, &frame) { owners = owners.insert(owner); };
                 for owner in constantRoots(program, &frame) { owners = owners.insert(owner); };
                 for next in monoRedirect(frame, &program.functions).needs { pending = push(pending, next); };

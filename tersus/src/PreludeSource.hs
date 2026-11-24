@@ -263,7 +263,7 @@ mirPackageFiles = dataPackageFiles ++
                 , "lib/mir/link/profile.tersus"
                 , "lib/mir/link/link.tersus"
                 , "lib/mir/link/merge.tersus"
-                , "lib/mir/link/prune.tersus"
+                , "lib/mir/reachability/prune.tersus"
                 , "lib/mir/emit/emit.tersus"
                 , "lib/mir/emit/types.tersus"
                 , "lib/mir/emit/values.tersus"

@@ -1,10 +1,9 @@
 import data::codec::codec { Token, Type, catStrings, typeAt };
 import data::ast::ast { AstNode, AstProof, AstExpression, AstValue, AstValidation, AstRule, AstStatement };
 import data::reader::reader { nodeKind, nodeRefs, nameValue };
-import mir::full::full { FullProgram, FullFunction, FullRecord, FullBlock };
+import mir::full::full { FullProgram, FullFunction, FullRecord, FullBlock, rowIndex, fnIndex };
 import mir::full::tokens { appendTokens, argEnd, constantEnd, integerAt, intsEnd, intToken, name, numberAt, operandEnd, namesEnd, runtimeRefs, sizeEnd, sliceTokens, stepsEnd, textAt, typeEnd, wordIs, word, quotedAt };
 import mir::full::records { nodeAt, statementAt, envStart, envEnd, envEntries, envTokens, replaceEnv, EnvEntry };
-import mir::link::merge { rowIndex, fnIndex };
 import mir::full::environments { replaceEnvBase };
 
 fn listIds(nodes: &List<AstNode>, root: Int, kind: Int) -> List<Int> ~ {
@@ -172,7 +171,7 @@ fn stepOwners(p: &FullProgram, row: &List<Token>, start: Int) -> List<String> ~ 
     };
     return out;
 };
-fn functionTypes(p: &FullProgram, f: &FullFunction) -> List<String> ~ {
+fn reachableFunctionTypes(p: &FullProgram, f: &FullFunction) -> List<String> ~ {
     out = [];
     for r in &f.locals { at = 3; if wordIs(&r.tokens, 2, "some") { at = 4; }; out = addTexts(out, typeNames(&r.tokens, at)); };
     end = intsEnd(&f.header, 3); if wordIs(&f.header, end + 1, "some") { out = addTexts(out, typeNames(&f.header, end + 2)); };
@@ -484,7 +483,7 @@ fn constantRoots(p: &FullProgram, f: &FullFunction) -> List<String> ~ {
 };
 struct LiveRoots { functions: HashSet<String>, types: HashSet<String> };
 fn liveRoots(p: &FullProgram) -> LiveRoots ~ {
-    fns = addNames(HashSet::new(), functionRefs(p, &p.entry)); types = addNames(HashSet::new(), functionTypes(p, &p.entry)); changed = true;
+    fns = addNames(HashSet::new(), functionRefs(p, &p.entry)); types = addNames(HashSet::new(), reachableFunctionTypes(p, &p.entry)); changed = true;
     types = addNames(addNames(types, functionImages(p, &p.entry)), constantRoots(p, &p.entry));
     processedFns = HashSet::new(); processedTypes = HashSet::new();
     while changed ~ {
@@ -495,7 +494,7 @@ fn liveRoots(p: &FullProgram) -> LiveRoots ~ {
                 i = fnIndex(&p.functions, n);
                 if i >= 0 && i < size(p.functions) {
                     fun = clone(get(&p.functions, i));
-                    fns = addNames(fns, functionRefs(p, &fun)); types = addNames(addNames(addNames(types, functionTypes(p, &fun)), functionImages(p, &fun)), constantRoots(p, &fun));
+                    fns = addNames(fns, functionRefs(p, &fun)); types = addNames(addNames(addNames(types, reachableFunctionTypes(p, &fun)), functionImages(p, &fun)), constantRoots(p, &fun));
                 };
             };
         };

@@ -35,7 +35,7 @@ extra-source-files:
     lib/mir/full/environments.tersus
     lib/mir/link/link.tersus
     lib/mir/link/merge.tersus
-    lib/mir/link/prune.tersus
+    lib/mir/reachability/prune.tersus
     lib/mir/pack/body.tersus
     lib/mir/pack/expand.tersus
     lib/mir/pack/numbers.tersus

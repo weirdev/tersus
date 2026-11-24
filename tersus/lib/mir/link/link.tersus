@@ -3,7 +3,7 @@ import mir::full::full { FullProgram, fullAtForLink, printFull };
 import mir::full::tokens { boxedClosureInFullRows, integerAt, textAt, wordIs, quotedAt };
 import mir::full::read { recordAt };
 import mir::link::merge { LinkUnit, linkPrograms, completeSpecEnvs };
-import mir::link::prune { pruneProgram };
+import mir::reachability::prune { pruneProgram };
 import mir::link::fused { runFusedUnits, standaloneReply };
 
 fn isLinkRequest(lines: &List<List<Token>>) -> Bool ~ {
