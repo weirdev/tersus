@@ -96,7 +96,16 @@ fn monoSubstitute(ts: &List<Token>, sizes: &List<MonoBinding>, types: &List<Mono
     i = 0;
     while i < size(ts) [{ affirm i >= 0; affirm i <= size(ts); }] ~ {
         if full::tokens::wordIs(ts, i, "forall") { return full::tokens::appendTokens(out, monoSubstituteForall(ts, i, sizes, types)); };
-        if i + 1 < size(ts) && (full::tokens::wordIs(ts, i, "param") || full::tokens::wordIs(ts, i, "p")) {
+        if full::tokens::wordIs(ts, i, "fnc") {
+            n = full::tokens::numberAt(ts, i + 1);
+            contract = full::tokens::fnReturnEnd(ts, i + 2, n);
+            end = full::tokens::fnContractEnd(ts, contract, n);
+            if end < 0 { return full::tokens::appendTokens(out, full::tokens::sliceTokens(ts, i, size(ts))); };
+            out = full::tokens::appendTokens(out, full::tokens::sliceTokens(ts, i, i + 2));
+            out = full::tokens::appendTokens(out, monoSubstitute(full::tokens::sliceTokens(ts, i + 2, contract), sizes, types));
+            out = full::tokens::appendTokens(out, full::tokens::sliceTokens(ts, contract, end));
+            i = end;
+        } else if i + 1 < size(ts) && (full::tokens::wordIs(ts, i, "param") || full::tokens::wordIs(ts, i, "p")) {
             replacement = monoLookup(types, full::tokens::textAt(ts, i + 1));
             if full::tokens::wordIs(ts, i, "p") { replacement = monoLookup(sizes, full::tokens::textAt(ts, i + 1)); };
             if size(replacement) > 0 { out = full::tokens::appendTokens(out, replacement); i = i + 2; }

@@ -617,8 +617,30 @@ codecCases =
     , TestCase "changed source and stage actually reach the fallback" binaryKeyMisses
     , TestCase "invalid binary and legacy entries recompute without decoder fallback" binaryRejects
     , TestCase "runtime overrides cannot reuse process-local successes" binaryRuntimeScopes
+    , TestCase "native cache keys reuse an emitter-only local seed without a frontend override" nativeLocalEmitterKey
     , TestCase "failed binary-cache computations can be retried" binaryFailureRetry
     ]
+
+nativeLocalEmitterKey :: IO TestResult
+nativeLocalEmitterKey = do
+    emitter <- Seed.emitterSeedFile
+    case emitter of
+        Error e -> pure (Just e)
+        Ok source -> withNativeHome $ \home -> do
+            let bootstrap = home </> "bootstrap"
+            createDirectoryIfMissing True bootstrap
+            copyFileCloexec source (bootstrap </> "emitter.ll")
+            withCurrentDirectory home $ without "TERSUS_SEED_FILE" $ without "TERSUS_FRONTEND_SEED_FILE" $ without "TERSUS_PARSER_SEED_FILE" $ do
+                first <- nativeCacheKey ["local-emitter"]
+                case first of
+                    Error e -> pure (Just e)
+                    Ok _ -> do
+                        warm <- nativeCacheKey ["local-emitter"]
+                        pure (testAssertEq warm first)
+  where
+    without variable action = bracket (lookupEnv variable)
+        (maybe (unsetEnv variable) (setEnv variable))
+        (\_ -> unsetEnv variable >> action)
 
 binarySource :: String
 binarySource = "return 314159;"

@@ -1,0 +1,118 @@
+import data::codec::codec { Token };
+import mir::copies::keys { CopyCx };
+import mir::copies::keys { CopyBinding, copyLookup };
+import mir::full::full { FullFunction };
+import mir::full::tokens { appendTokens, argEnd, numberAt, sliceTokens, textAt, typeEnd, wordIs };
+import mir::mono::functions { monoReturn };
+import mir::instances::names { InstanceNameClasses, instanceNameAt };
+import mir::mono::tokens { monoForallBody };
+
+fn substituteSize(ts: &List<Token>, sizes: &List<CopyBinding>) -> List<Token> ~ {
+    if wordIs(ts, 0, "p") {
+        replacement = copyLookup(sizes, textAt(ts, 1));
+        if size(replacement) > 0 { return replacement; };
+    };
+    return clone(ts);
+};
+fn substituteArg(arg: &List<Token>, sizes: &List<CopyBinding>, types: &List<CopyBinding>) -> List<Token> ~ {
+    inner = sliceTokens(arg, 1, size(arg));
+    if wordIs(arg, 0, "size") { return appendTokens(sliceTokens(arg, 0, 1), substituteSize(&inner, sizes)); };
+    if wordIs(arg, 0, "type") { return appendTokens(sliceTokens(arg, 0, 1), substituteType(&inner, sizes, types)); };
+    return clone(arg);
+};
+fn unshadowed(bindings: &List<CopyBinding>, ts: &List<Token>, start: Int, count: Int) -> List<CopyBinding> ~ {
+    out = [];
+    if count < 0 { return out; };
+    for b in bindings {
+        shadowed = false;
+        for i in 0..count { if textAt(ts, start + i) = b.name { shadowed = true; }; };
+        if !shadowed { out = push(out, clone(b)); };
+    };
+    return out;
+};
+fn substituteType(ty: &List<Token>, sizes: &List<CopyBinding>, types: &List<CopyBinding>) -> List<Token> ~ {
+    if size(sizes) = 0 && size(types) = 0 { return clone(ty); };
+    tag = textAt(ty, 0);
+    if tag = "param" {
+        bound = copyLookup(types, textAt(ty, 1));
+        if size(bound) > 0 { return bound; };
+    };
+    if tag = "forall" {
+        body = monoForallBody(ty, 0); ns = numberAt(ty, 1);
+        if body >= 0 && ns >= 0 {
+            nt = numberAt(ty, ns + 2);
+            ss = unshadowed(sizes, ty, 2, ns);
+            tt = unshadowed(types, ty, ns + 3, nt);
+            return appendTokens(sliceTokens(ty, 0, body), substituteType(sliceTokens(ty, body, size(ty)), &ss, &tt));
+        };
+    };
+    if tag = "named" {
+        n = numberAt(ty, 2); if n < 0 { return clone(ty); };
+        out = sliceTokens(ty, 0, 3); at = 3;
+        for i in 0..n {
+            end = argEnd(ty, at); if end <= at { return clone(ty); };
+            out = appendTokens(out, substituteArg(sliceTokens(ty, at, end), sizes, types)); at = end;
+        };
+        return out;
+    };
+    if tag = "fn" || tag = "fnc" {
+        n = numberAt(ty, 1); if n < 0 { return clone(ty); };
+        out = sliceTokens(ty, 0, 2); at = 2;
+        for i in 0..n + 1 {
+            end = typeEnd(ty, at); if end <= at { return clone(ty); };
+            out = appendTokens(out, substituteType(sliceTokens(ty, at, end), sizes, types)); at = end;
+        };
+        return appendTokens(out, sliceTokens(ty, at, size(ty)));
+    };
+    if tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "box" || tag = "list" || tag = "closure" || tag = "closuremut" {
+        end = typeEnd(ty, 1);
+        if end <= 1 { return clone(ty); };
+        out = appendTokens(sliceTokens(ty, 0, 1), substituteType(sliceTokens(ty, 1, end), sizes, types));
+        if tag = "array" { return appendTokens(out, substituteSize(sliceTokens(ty, end, size(ty)), sizes)); };
+        return out;
+    };
+    return clone(ty);
+};
+
+fn typeNameIn(renames: &HashMap<String, String>, key: &String) -> String ~ {
+    return HashMap::lookup(renames, key, key.slice(0, size(key.bytes)));
+};
+fn collectRenames(classes: &InstanceNameClasses, ty: &List<Token>, cx: &CopyCx, renames: HashMap<String, String>) -> HashMap<String, String> ~ {
+    tag = textAt(ty, 0);
+    if tag = "named" {
+        n = numberAt(ty, 2); if n < 0 { return renames; };
+        renamed = substituteType(ty, &cx.sizes, &cx.types);
+        renames = renames.insert(instanceNameAt(classes, ty, 0), instanceNameAt(classes, &renamed, 0)); at = 3;
+        for i in 0..n {
+            end = argEnd(ty, at); if end <= at { return renames; };
+            if wordIs(ty, at, "type") { renames = collectRenames(classes, sliceTokens(ty, at + 1, end), cx, renames); };
+            at = end;
+        };
+    };
+    if tag = "fn" {
+        n = numberAt(ty, 1); if n < 0 { return renames; };
+        at = 2;
+        for i in 0..n {
+            at = typeEnd(ty, at); if at < 0 { return renames; };
+        };
+        renames = collectRenames(classes, sliceTokens(ty, at, size(ty)), cx, renames); at = 2;
+        for i in 0..n {
+            end = typeEnd(ty, at); if end <= at { return renames; };
+            renames = collectRenames(classes, sliceTokens(ty, at, end), cx, renames); at = end;
+        };
+    };
+    if tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "box" || tag = "list" {
+        end = typeEnd(ty, 1);
+        if end > 1 { renames = collectRenames(classes, sliceTokens(ty, 1, end), cx, renames); };
+    };
+    return renames;
+};
+fn renamesOf(classes: &InstanceNameClasses, cx: &CopyCx, fun: &FullFunction) -> HashMap<String, String> ~ {
+    renames = HashMap::new();
+    if size(cx.types) = 0 && size(cx.sizes) = 0 { return renames; };
+    for d in &fun.locals {
+        p = 3; if wordIs(d.tokens, 2, "some") { p = 4; };
+        renames = collectRenames(classes, sliceTokens(d.tokens, p, size(d.tokens)), cx, renames);
+    };
+    return collectRenames(classes, monoReturn(fun), cx, renames);
+};

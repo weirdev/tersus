@@ -1,0 +1,50 @@
+import data::codec::codec { Token };
+import mir::copies::worklist { makeCopiesWith };
+import mir::full::full { FullProgram, fullAt, printFull };
+import mir::full::tokens { integerAt, textAt, wordIs };
+import mir::instances::complete { completeInstancesWith };
+import mir::instances::names { InstanceNameClasses };
+import mir::link::merge { LinkUnit, linkPrograms };
+import mir::link::profile { parseNameProfile };
+
+fn originalLibraryNames(units: &List<LinkUnit>) -> HashSet<String> ~ {
+    names = HashSet::new();
+    for u in units {
+        if u.pkg = "tersuslib" {
+            for b in &u.program.bounded { names = names.insert(clone(b.name)); };
+        };
+    };
+    return names;
+};
+fn runFusedUnits(lines: &List<List<Token>>, at: Int, units: &List<LinkUnit>) -> String ~ {
+    profile = parseNameProfile(lines, at);
+    if !profile.ok { return "the linking request has invalid or incomplete name classes"; };
+    linked = linkPrograms(units);
+    if !linked.ok { return linked.message; };
+    return fusedLinkReply(&profile.value, units, linked.program);
+};
+fn fusedLinkReply(classes: &InstanceNameClasses, units: &List<LinkUnit>, merged: FullProgram) -> String ~ {
+    program = completeInstancesWith(merged, classes);
+    library = originalLibraryNames(units);
+    copies = makeCopiesWith(classes, program, &library);
+    if copies.error != "" { return "Validation failed: ".concat(&copies.error); };
+    printFull(&copies.value);
+    return "";
+};
+fn standaloneReply(lines: &List<List<Token>>) -> String ~ {
+    if size(lines) < 3 { return "the copies request is not program data"; };
+    request = get(lines, 1); n = integerAt(request, 1);
+    if size(request) < 2 || !n.ok || n.value < 1 || n.value > size(lines) - 2 { return "the copies request is not program data"; };
+    rows = [];
+    for i in 2..2 + n.value { rows = push(rows, clone(get(lines, i))); };
+    parsed = fullAt(&rows);
+    if !parsed.ok { return "the copies request contains unreadable MIR3"; };
+    library = HashSet::new();
+    for i in 2..size(request) { library = library.insert(textAt(request, i)); };
+    profile = parseNameProfile(lines, 2 + n.value);
+    if !profile.ok { return "the copies request has invalid or incomplete name classes"; };
+    copies = makeCopiesWith(&profile.value, parsed.value, &library);
+    if copies.error != "" { return copies.error; };
+    printFull(&copies.value);
+    return "";
+};

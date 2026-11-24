@@ -10,6 +10,7 @@ import mir::ownership::ownership { isOwnershipRequest, runOwnership };
 import mir::mono::mono { isMonoRequest, runMono };
 import mir::ownership::mono { isMonoOwnershipRequest, runMonoOwnership };
 import mir::link::link { isLinkRequest, runLink };
+import mir::full::tokens { boxedClosureInFullRows };
 
 // The lowering from the MIR to LLVM IR, written in Tersus (step 31 of the roadmap, see STEP31.md): the compiler's only emitter. It was written function by function
 // oracle. It reads the MIR as data from the standard input (what `tersus mir --data` prints) and writes the LLVM IR.
@@ -277,13 +278,19 @@ fn readEmitterInput() -> Parsed<List<List<Token>>> ~ {
     return Parsed<List<List<Token>>> { value: rows, pos: 0, ok: true };
 };
 
+fn boxedClosureRefused(lines: &List<List<Token>>) -> Bool ~ {
+    if isLinkRequest(lines) { return false; };
+    if isMonoRequest(lines) || isMonoOwnershipRequest(lines) { return boxedClosureInFullRows(lines); };
+    return boxedClosureInRows(lines);
+};
+
 mode = String::arg(0, 100);
 read = readEmitterInput();
 if !read.ok {
     "the input is not the MIR as data: a bad name\n".printError();
     return 1;
 };
-if !isLinkRequest(&read.value) && boxedClosureInRows(&read.value) {
+if boxedClosureRefused(&read.value) {
     "boxed closure types are not supported by the runtime MIR ABI\n".printError();
     return 1;
 };

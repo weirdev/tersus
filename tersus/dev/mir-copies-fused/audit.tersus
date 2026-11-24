@@ -1,0 +1,76 @@
+import data::codec::codec { Token };
+import data::reader::reader { nodeRefs };
+import mir::full::full { FullProgram, FullFunction, FullRecord, fullAt, printFull };
+import mir::full::records { beforeText, envEntries, envStart, payloadSlots };
+import mir::full::tokens { integerAt, textAt, wordIs };
+import mir::link::merge { sameProgram, sameRow };
+
+fn validPayloads(p: &FullProgram, row: &List<Token>) -> Bool ~ {
+    for at in payloadSlots(row) {
+        id = integerAt(row, at);
+        if !id.ok || id.value < 0 || id.value >= size(p.arena) { return false; };
+    };
+    return true;
+};
+fn rawEnv(p: &FullProgram, row: &List<Token>) -> Bool ~ {
+    if !validPayloads(p, row) { return false; };
+    at = envStart(row);
+    if at < 0 { return true; };
+    if textAt(row, at) != "none" {
+        id = integerAt(row, at);
+        if !id.ok || id.value < 0 || id.value >= size(p.shared) { return false; };
+    };
+    first = true; previous = "";
+    for e in envEntries(row, at) {
+        if !first && !beforeText(&previous, &e.name) { return false; };
+        previous = clone(e.name); first = false;
+    };
+    return true;
+};
+fn orderedRecords(rows: &List<FullRecord>, numeric: Bool) -> Bool ~ {
+    for i in 1..size(rows) {
+        prev = get(rows, i - 1); next = get(rows, i);
+        if numeric {
+            if integerAt(&prev.tokens, 1).value >= integerAt(&next.tokens, 1).value { return false; };
+        } else { if !beforeText(&prev.name, &next.name) { return false; }; };
+    };
+    return true;
+};
+fn rawFunction(p: &FullProgram, f: &FullFunction) -> Bool ~ {
+    if !orderedRecords(&f.locals, true) || !orderedRecords(&f.loops, true) || !rawEnv(p, &f.env) || !validPayloads(p, &f.spec) { return false; };
+    for l in &f.loops { if !rawEnv(p, &l.tokens) { return false; }; };
+    for i in 0..size(f.blocks) {
+        b = get(f.blocks, i);
+        if i > 0 && get(f.blocks, i - 1).id >= b.id { return false; };
+        for r in &b.lines { if !rawEnv(p, r) { return false; }; };
+    };
+    return true;
+};
+fn hasValidMergeInput(p: &FullProgram) -> Bool ~ {
+    for i in 0..size(p.arena) { for child in nodeRefs(get(p.arena, i)) { if child < 0 || child >= i { return false; }; }; };
+    for i in 0..size(p.functions) {
+        f = get(p.functions, i);
+        if !rawFunction(p, f) { return false; };
+    };
+    for d in &p.invariants { if !validPayloads(p, &d.tokens) { return false; }; };
+    for d in &p.trailer { if !validPayloads(p, d) { return false; }; };
+    return rawFunction(p, &p.entry);
+};
+fn auditMerge(lines: &List<List<Token>>, at: Int, actual: FullProgram) -> String ~ {
+    if at >= size(lines) { return "merge audit: missing expected-program data"; };
+    header = get(lines, at);
+    n = integerAt(header, 1);
+    if size(header) != 2 || !wordIs(header, 0, "expect-merge") || !n.ok || n.value != size(lines) - at - 1 { return "merge audit: invalid expected-program data"; };
+    rows = [];
+    for i in at + 1..size(lines) { rows = push(rows, clone(get(lines, i))); };
+    expected = fullAt(&rows);
+    if !expected.ok { return "merge audit: unreadable expected MIR3"; };
+    if !hasValidMergeInput(&actual) { return "merge audit: in-memory order, environment or arena check failed"; };
+    if !sameProgram(&actual, &expected.value) { return "merge audit: in-memory program differs from the old decoded Link output"; };
+    if size(actual.trailer) != size(expected.value.trailer) { return "merge audit: trailer count differs"; };
+    for i in 0..size(actual.trailer) {
+        if !sameRow(get(&actual.trailer, i), &actual.arena, get(&expected.value.trailer, i), &expected.value.arena) { return "merge audit: trailer differs"; };
+    };
+    printFull(&actual);
+    return "";
+};

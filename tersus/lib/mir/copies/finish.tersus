@@ -1,0 +1,461 @@
+import data::codec::codec { Token };
+import data::ast::ast { AstNode };
+import mir::full::read { noFunction };
+import mir::full::full { FullProgram, FullFunction, FullBlock, FullRecord };
+import mir::full::environments { functionEntry, replaceEnvBase };
+import mir::full::records { EnvEntry, envStart, envEnd, envEntries, envTokens, keyOrder, mergeEntries, replaceEnv };
+import mir::full::tokens { appendTokens, constantEnd, intToken, name, namesEnd, numberAt, runtimeRefs, sliceTokens, textAt, word, wordIs };
+import mir::instances::names { InstanceNameClasses };
+import mir::instances::complete { tupleArity };
+import mir::pack::body { RowKind, rowSites };
+import mir::pack::expand { headerTypes };
+import mir::copies::keys { CopyMade, DispatchEdge };
+import mir::copies::keys { NamedCopy, instanceAt, concreteKey, nameOf, companionOf, boundCallParts, parseImplCheckName };
+import mir::copies::finishProofs { NameMode, payloadNames, namedPayload, proofTargets };
+import mir::copies::finishPack { isVariadic, packGeneric, packSlice, packCons };
+
+fn functionName(fun: &FullFunction) -> String ~ { return textAt(&fun.header, 1); };
+fn stubName(traitName: &String, method: &String) -> String ~ { return clone(traitName).concat(" for $Self::").concat(method); };
+fn isStubName(n: &String) -> Bool ~ {
+    parsed = parseImplCheckName(n);
+    return parsed.found && parsed.value.owner = "$Self";
+};
+fn fnOperand(n: String) -> List<Token> ~ { return push(push(push([], word("const")), word("fn")), name(n)); };
+fn markerEntry(n: String) -> EnvEntry ~ { return EnvEntry { value: fnOperand(clone(n)), name: n }; };
+fn orderedNames(names: &HashSet<String>) -> List<String> ~ {
+    keys = HashSet::elements(names);
+    out = [];
+    for i in keyOrder(&keys, false) { if i >= 0 && i < size(keys) { out = push(out, clone(get(&keys, i))); }; };
+    return out;
+};
+fn addDirectNames(names: HashSet<String>, row: &List<Token>) -> HashSet<String> ~ {
+    if wordIs(row, 0, "assign") && wordIs(row, 2, "packclosure") {
+        for n in runtimeRefs(row) { names = names.insert(clone(n)); };
+        return names;
+    };
+    if wordIs(row, 0, "assign") || wordIs(row, 0, "call") {
+        for site in rowSites(row, false, false) {
+            if site.kind is RowKind::Operand && wordIs(row, site.at, "const") && wordIs(row, site.at + 1, "fn") {
+                names = names.insert(textAt(row, site.at + 2));
+            };
+        };
+    };
+    return names;
+};
+struct UsedProofNames { resolved: HashSet<String>, remaining: HashSet<String> };
+fn resolveUsedNames(out: UsedProofNames, row: &List<Token>, at: Int) -> UsedProofNames ~ {
+    if HashSet::size(&out.remaining) = 0 { return out; };
+    for e in envEntries(row, at) {
+        if HashSet::contains(&out.remaining, &e.name) {
+            remaining = out.remaining.remove(&e.name);
+            resolved = out.resolved;
+            if functionEntry(&e) { resolved = resolved.insert(textAt(&e.value, 2)); };
+            out = UsedProofNames { resolved: resolved, remaining: remaining };
+        };
+    };
+    return out;
+};
+fn usedNames(fun: &FullFunction, arena: &List<AstNode>) -> List<String> ~ {
+    names = HashSet::new(); terms = payloadNames(&fun.spec, arena, NameMode::Used);
+    for lp in &fun.loops {
+        for n in payloadNames(&lp.tokens, arena, NameMode::Used).elements() { terms = terms.insert(clone(n)); };
+    };
+    for block in &fun.blocks {
+        for row in &block.lines {
+            names = addDirectNames(names, row);
+            if wordIs(row, 0, "ghost") && wordIs(row, 1, "validation") {
+                for n in payloadNames(row, arena, NameMode::Used).elements() { terms = terms.insert(clone(n)); };
+            };
+        };
+    };
+    out = resolveUsedNames(UsedProofNames { resolved: names, remaining: terms }, &fun.env, 1);
+    for lp in &fun.loops { out = resolveUsedNames(out, &lp.tokens, 9); };
+    for block in &fun.blocks {
+        for row in &block.lines {
+            if wordIs(row, 0, "ghost") { out = resolveUsedNames(out, row, 2); };
+        };
+    };
+    return orderedNames(&out.resolved);
+};
+
+struct FinishIndex { functions: HashMap<String, Int>, bounded: HashMap<String, Int>, lifted: HashSet<String> };
+fn liftedNames(row: &List<Token>) -> List<String> ~ {
+    at = namesEnd(row, namesEnd(row, 2)); count = numberAt(row, at);
+    out = []; if count < 0 { return out; };
+    for i in 0..count { out = push(out, textAt(row, at + 1 + i)); };
+    return out;
+};
+fn finishIndex(program: &FullProgram) -> FinishIndex ~ {
+    functions = HashMap::new(); bounded = HashMap::new(); lifted = HashSet::new();
+    for i in 0..size(program.functions) { functions = functions.insert(functionName(get(&program.functions, i)), i); };
+    for i in 0..size(program.bounded) {
+        b = get(&program.bounded, i);
+        bounded = bounded.insert(clone(b.name), i);
+        for n in liftedNames(&b.tokens) { lifted = lifted.insert(clone(n)); };
+    };
+    return FinishIndex { functions: functions, bounded: bounded, lifted: lifted };
+};
+fn refusedRef(program: &FullProgram, ix: &FinishIndex, kept: &HashSet<String>, n: &String) -> Bool ~ {
+    bound = boundCallParts(n);
+    if bound.found { return !HashMap::contains(&ix.functions, stubName(&bound.value.trait, &bound.value.method)); };
+    inst = instanceAt(program, n);
+    if !inst.found || concreteKey(&inst.value).found { return false; };
+    g = &inst.value.function;
+    return !isStubName(g) && HashMap::contains(&ix.bounded, g) && !HashSet::contains(kept, g);
+};
+fn bodyNames(program: &FullProgram, ix: &FinishIndex, f: &FullRecord) -> List<String> ~ {
+    slots = push([], clone(f.name));
+    for n in liftedNames(&f.tokens) { slots = push(slots, clone(n)); };
+    names = [];
+    for n in &slots {
+        i = HashMap::lookup(&ix.functions, n, -1);
+        if i >= 0 && i < size(program.functions) {
+            for r in usedNames(get(&program.functions, i), &program.arena) { names = push(names, clone(r)); };
+        };
+    };
+    return names;
+};
+fn refusedBody(program: &FullProgram, ix: &FinishIndex, kept: &HashSet<String>, refs: &List<String>) -> Bool ~ {
+    for n in refs { if refusedRef(program, ix, kept, n) { return true; }; };
+    return false;
+};
+fn retained(program: &FullProgram, ix: &FinishIndex, used: &HashSet<String>) -> HashSet<String> ~ {
+    pool = []; refs = []; kept = HashSet::new();
+    for b in &program.bounded {
+        if HashSet::contains(used, &b.name) && !isStubName(&b.name) && !HashSet::contains(&ix.lifted, &b.name) && HashMap::contains(&ix.functions, &b.name) {
+            pool = push(pool, clone(b.name)); refs = push(refs, bodyNames(program, ix, b)); kept = kept.insert(clone(b.name));
+        };
+    };
+    changed = true;
+    while changed ~ {
+        next = HashSet::new(); changed = false;
+        for i in 0..size(pool) {
+            f = get(&pool, i);
+            if HashSet::contains(&kept, f) {
+                if refusedBody(program, ix, &kept, get(&refs, i)) { changed = true; } else { next = next.insert(clone(f)); };
+            };
+        };
+        kept = next;
+    };
+    return kept;
+};
+fn renameTarget(classes: &InstanceNameClasses, program: &FullProgram, named: &List<NamedCopy>, n: &String) -> String ~ {
+    bound = boundCallParts(n);
+    if bound.found { return stubName(&bound.value.trait, &bound.value.method); };
+    inst = instanceAt(program, n);
+    if !inst.found { return clone(n); };
+    key = concreteKey(&inst.value);
+    if key.found { return nameOf(classes, named, &key.value); };
+    return clone(inst.value.function);
+};
+fn renameConstant(classes: &InstanceNameClasses, value: List<Token>, at: Int, program: &FullProgram, named: &List<NamedCopy>) -> List<Token> ~ {
+    if wordIs(&value, at, "fn") {
+        next = at + 1;
+        if next >= 0 && next < size(value) { return set(value, next, name(renameTarget(classes, program, named, textAt(&value, next)))); };
+        return value;
+    };
+    data = wordIs(&value, at, "data");
+    if !(data || wordIs(&value, at, "list") || wordIs(&value, at, "array")) { return value; };
+    p = at + 1; if data { p = p + 1; };
+    count = numberAt(&value, p); p = p + 1;
+    if count < 0 { return value; };
+    for i in 0..count {
+        if data { p = p + 1; };
+        end = constantEnd(&value, p); if end < 0 { return value; };
+        value = renameConstant(classes, value, p, program, named); p = end;
+    };
+    return value;
+};
+fn renameRow(classes: &InstanceNameClasses, row: List<Token>, program: &FullProgram, named: &List<NamedCopy>) -> List<Token> ~ {
+    for site in rowSites(&row, true, false) {
+        if site.kind is RowKind::Operand && wordIs(&row, site.at, "const") {
+            if (wordIs(&row, 0, "assign") || wordIs(&row, 0, "peek")) && (wordIs(&row, 2, "borrow") || wordIs(&row, 2, "borrowmut")) { return row; };
+            row = renameConstant(classes, row, site.at + 1, program, named);
+        };
+    };
+    return row;
+};
+fn renameFunction(classes: &InstanceNameClasses, fun: FullFunction, program: &FullProgram, named: &List<NamedCopy>) -> FullFunction ~ {
+    env = renameRow(classes, fun.env, program, named); loops = []; blocks = [];
+    for l in fun.loops { loops = push(loops, FullRecord { name: clone(l.name), tokens: renameRow(classes, clone(l.tokens), program, named) }); };
+    for b in fun.blocks {
+        rows = []; for row in b.lines { rows = push(rows, renameRow(classes, clone(row), program, named)); };
+        blocks = push(blocks, FullBlock { id: b.id, lines: rows });
+    };
+    return FullFunction { env: env, loops: loops, blocks: blocks, ..fun };
+};
+fn markFunction(fun: FullFunction, key: String) -> FullFunction ~ {
+    mark = EnvEntry { name: key, value: push(push(push([], word("const")), word("int")), intToken(0)) };
+    env = replaceEnv(&fun.env, mergeEntries(push([], mark), envEntries(&fun.env, 1)));
+    return FullFunction { env: env, ..fun };
+};
+fn unionTypeParams(fun: FullFunction, body: &FullFunction) -> FullFunction ~ {
+    header = &fun.header;
+    at = headerTypes(header); b = headerTypes(&body.header);
+    end = namesEnd(header, at); bEnd = namesEnd(&body.header, b);
+    seen = HashSet::new(); out = [];
+    if bEnd >= b + 1 {
+        for i in b + 1..bEnd {
+            n = textAt(&body.header, i); if !HashSet::contains(&seen, &n) { seen = seen.insert(clone(n)); out = push(out, name(n)); };
+        };
+    };
+    if end >= at + 1 {
+        for i in at + 1..end {
+            n = textAt(header, i); if !HashSet::contains(&seen, &n) { seen = seen.insert(clone(n)); out = push(out, name(n)); };
+        };
+    };
+    h = appendTokens(push(sliceTokens(header, 0, at), intToken(size(out))), &out);
+    return FullFunction { header: appendTokens(h, sliceTokens(header, end, size(header))), ..fun };
+};
+fn stubClosure(bodies: &List<FullFunction>, stubs: &HashMap<String,FullFunction>, arena: &List<AstNode>) -> HashSet<String> ~ {
+    seen = HashSet::new(); pending = [];
+    for body in bodies {
+        for n in usedNames(body, arena) { if HashMap::contains(stubs, n) { pending = push(pending, clone(n)); }; };
+    };
+    at = 0;
+    while at < size(pending) [{ affirm at >= 0; }] ~ {
+        n = clone(get(&pending, at)); at = at + 1;
+        if !HashSet::contains(&seen, &n) && HashMap::contains(stubs, &n) {
+            seen = seen.insert(clone(n));
+            for next in usedNames(HashMap::lookupRef(stubs, &n), arena) {
+                if HashMap::contains(stubs, next) && !HashSet::contains(&seen, next) { pending = push(pending, clone(next)); };
+            };
+        };
+    };
+    return seen;
+};
+fn isDerived(generics: &HashSet<String>, n: &String) -> Bool ~ {
+    at = n.find(toByte(60), 0);
+    if at = size(n.bytes) { return false; };
+    base = n.slice(0, at);
+    return HashSet::contains(generics, &base) || tupleArity(&base) > 0;
+};
+fn addMarkerRows(entry: FullFunction, ix: &FinishIndex, markers: &HashSet<String>, markerEnv: &List<EnvEntry>) -> FullFunction ~ {
+    prefix = [];
+    for n in orderedNames(markers) {
+        row = appendTokens(push(push([], word("ghost")), word("function")), envTokens(markerEnv));
+        prefix = push(prefix, push(push(push(row, name(clone(n))), name(clone(n))), word("true")));
+    };
+    blocks = [];
+    for b in entry.blocks {
+        rows = []; if b.id = 0 { rows = clone(prefix); };
+        for row in b.lines {
+            if !(wordIs(row, 0, "ghost") && wordIs(row, 1, "function") && HashMap::contains(&ix.bounded, textAt(row, envEnd(row, 2)))) { rows = push(rows, clone(row)); };
+        };
+        blocks = push(blocks, FullBlock { id: b.id, lines: rows });
+    };
+    return FullFunction { blocks: blocks, ..entry };
+};
+
+struct FinishEnv { alive: HashSet<String>, instances: HashSet<String>, checkTargets: HashMap<String, ImplBinding>, checkOverlays: HashMap<String, List<EnvEntry>>, mainName: String };
+struct ImplBinding { owner: String, check: String };
+impl Clone for ImplBinding { };
+fn emptyCheckTargets() -> HashMap<String, ImplBinding> ~ { return HashMap::new(); };
+fn emptyCheckOverlays() -> HashMap<String, List<EnvEntry>> ~ { return HashMap::new(); };
+fn buildFinishEnv(alive: HashSet<String>, instances: HashSet<String>, mainName: String) -> FinishEnv ~ {
+    targets = emptyCheckTargets(); overlays = emptyCheckOverlays();
+    for n in orderedNames(&alive) {
+        c = companionOf(n);
+        if c.found && HashSet::contains(&alive, &c.value) {
+            parsed = parseImplCheckName(&c.value);
+            if parsed.found {
+                owner = clone(parsed.value.owner);
+                targets = targets.insert(clone(n), ImplBinding { owner: clone(owner), check: clone(c.value) });
+                if n != mainName {
+                    entries = HashMap::lookup(&overlays, &owner, []);
+                    overlays = overlays.insert(owner, push(entries, EnvEntry { name: clone(n), value: fnOperand(c.value) }));
+                };
+            };
+        };
+    };
+    return FinishEnv { alive: alive, instances: instances, checkTargets: targets, checkOverlays: overlays, mainName: mainName };
+};
+fn checkOperand(ctx: &FinishEnv, owner: &String, callee: &String, value: &List<Token>) -> List<Token> ~ {
+    if owner != "" {
+        c = HashMap::lookup(&ctx.checkTargets, callee, ImplBinding { owner: "", check: "" });
+        if c.owner = owner { return fnOperand(c.check); };
+    };
+    return clone(value);
+};
+fn scrubEnv(row: &List<Token>, ctx: &FinishEnv, generic: Bool, renameOwner: &String) -> List<Token> ~ {
+    at = envStart(row); if at < 0 { return clone(row); };
+    kept = [];
+    for e in envEntries(row, at) {
+        if !HashSet::contains(&ctx.instances, &e.name) && !(generic && boundCallParts(&e.name).found) {
+            if functionEntry(&e) {
+                callee = textAt(&e.value, 2);
+                if HashSet::contains(&ctx.alive, &callee) && (e.name != callee || e.name = ctx.mainName) {
+                    kept = push(kept, EnvEntry { name: clone(e.name), value: checkOperand(ctx, renameOwner, &callee, &e.value) });
+                };
+            } else { kept = push(kept, clone(e)); };
+        };
+    };
+    if renameOwner = "" { return replaceEnvBase(row, intToken(0), &kept); };
+    overrides = HashMap::lookup(&ctx.checkOverlays, renameOwner, []);
+    return replaceEnvBase(row, intToken(0), mergeEntries(&kept, &overrides));
+};
+fn completeEnvs(fun: FullFunction, ctx: &FinishEnv, generic: Bool, contracts: Bool) -> FullFunction ~ {
+    owner = "";
+    if contracts {
+        c = parseImplCheckName(functionName(&fun));
+        if c.found && c.value.owner != "$Self" { owner = clone(c.value.owner); };
+    };
+    env = scrubEnv(&fun.env, ctx, generic, &owner);
+    loops = []; blocks = [];
+    for l in fun.loops { loops = push(loops, FullRecord { name: clone(l.name), tokens: scrubEnv(&l.tokens, ctx, generic, "") }); };
+    for b in fun.blocks {
+        lines = []; for row in b.lines { lines = push(lines, scrubEnv(row, ctx, generic, "")); };
+        blocks = push(blocks, FullBlock { id: b.id, lines: lines });
+    };
+    return FullFunction { env: env, loops: loops, blocks: blocks, ..fun };
+};
+struct FinishProofRow { arena: List<AstNode>, row: List<Token>, env: List<Token> };
+fn nameProofRow(arena: List<AstNode>, row: List<Token>, env: List<Token>, instances: &HashSet<String>) -> FinishProofRow ~ {
+    entries = envEntries(&env, envStart(&env)); picked = HashSet::new();
+    for e in &entries {
+        if HashSet::contains(instances, &e.name) || boundCallParts(&e.name).found { picked = picked.insert(clone(e.name)); };
+    };
+    uses = proofTargets(&row, &arena, &entries, &picked);
+    if HashMap::size(&uses) = 0 { return FinishProofRow { arena: arena, row: row, env: env }; };
+    add = HashSet::new(); for e in HashMap::entries(&uses) { add = add.insert(clone(e.value)); };
+    aliases = []; for n in orderedNames(&add) { aliases = push(aliases, markerEntry(clone(n))); };
+    r = namedPayload(arena, row, &uses);
+    return FinishProofRow { arena: r.arena, row: r.row, env: replaceEnv(&env, mergeEntries(&entries, &aliases)) };
+};
+struct FinishedFunction { arena: List<AstNode>, fun: FullFunction };
+fn proofsNamed(arena: List<AstNode>, fun: FullFunction, instances: &HashSet<String>) -> FinishedFunction ~ {
+    r = nameProofRow(arena, fun.spec, fun.env, instances);
+    return nameProofsInBody(r.arena, FullFunction { spec: r.row, env: r.env, ..fun }, instances);
+};
+fn nameProofsInBody(arena: List<AstNode>, fun: FullFunction, instances: &HashSet<String>) -> FinishedFunction ~ {
+    loops = []; blocks = [];
+    for l in fun.loops {
+        p = nameProofRow(arena, clone(l.tokens), clone(l.tokens), instances);
+        entries = envEntries(&p.env, 9);
+        loops = push(loops, FullRecord { name: clone(l.name), tokens: replaceEnv(&p.row, &entries) });
+        arena = p.arena;
+    };
+    for b in fun.blocks {
+        lines = [];
+        for row in b.lines {
+            if wordIs(row, 0, "ghost") && wordIs(row, 1, "validation") {
+                p = nameProofRow(arena, clone(row), clone(row), instances);
+                lines = push(lines, replaceEnv(&p.row, envEntries(&p.env, 2))); arena = p.arena;
+            } else { lines = push(lines, clone(row)); };
+        };
+        blocks = push(blocks, FullBlock { id: b.id, lines: lines });
+    };
+    return FinishedFunction { arena: arena, fun: FullFunction { loops: loops, blocks: blocks, ..fun } };
+};
+struct GenericBodies { funs: List<FullFunction>, arena: List<AstNode>, variadic: Bool };
+fn genericBodies(classes: &InstanceNameClasses, program: &FullProgram, ix: &FinishIndex, named: &List<NamedCopy>, kept: &HashSet<String>, arena: List<AstNode>) -> GenericBodies ~ {
+    funs = []; variadic = false;
+    for n in orderedNames(kept) {
+        i = HashMap::lookup(&ix.functions, n, -1); j = HashMap::lookup(&ix.bounded, n, -1);
+        if i >= 0 && i < size(program.functions) && j >= 0 && j < size(program.bounded) {
+            body = get(&program.functions, i); bounded = get(&program.bounded, j);
+            variadic = variadic || isVariadic(body);
+            packed = packGeneric(renameFunction(classes, clone(body), program, named), arena, bounded, &program.functions, &ix.functions);
+            arena = packed.arena;
+            funs = push(funs, markFunction(packed.fun, "$generic"));
+            if size(packed.contract.header) > 0 { funs = push(funs, markFunction(packed.contract, "$generic")); };
+            for l in liftedNames(&bounded.tokens) {
+                k = HashMap::lookup(&ix.functions, &l, -1);
+                if k >= 0 && k < size(program.functions) {
+                    f = renameFunction(classes, clone(get(&program.functions, k)), program, named);
+                    funs = push(funs, markFunction(unionTypeParams(f, body), "$generic"));
+                };
+            };
+        };
+    };
+    return GenericBodies { funs: funs, arena: arena, variadic: variadic };
+};
+fn emptyFinishFunctions() -> HashMap<String, FullFunction> ~ { return HashMap::new(); };
+fn emptyDispatchTargets() -> HashSet<String> ~ { return HashSet::new(); };
+fn emptyDispatchIndex() -> HashMap<String, HashSet<String>> ~ { return HashMap::new(); };
+fn dispatchIndex(edges: &List<DispatchEdge>) -> HashMap<String, HashSet<String>> ~ {
+    index = emptyDispatchIndex();
+    for edge in edges {
+        targets = HashMap::lookup(&index, &edge.stub, emptyDispatchTargets());
+        index = index.insert(clone(edge.stub), targets.insert(clone(edge.callee)));
+    };
+    return index;
+};
+fn closeStubDispatch(fun: FullFunction, index: &HashMap<String, HashSet<String>>) -> FullFunction ~ {
+    n = functionName(&fun);
+    if !isStubName(&n) { return fun; };
+    targets = HashMap::lookup(index, &n, emptyDispatchTargets());
+    mark = EnvEntry { name: "$dispatch", value: push(push(push([], word("const")), word("int")), intToken(0)) };
+    entries = push([], mark);
+    for target in orderedNames(&targets) {
+        entries = push(entries, EnvEntry { name: "$dispatch ".concat(target), value: fnOperand(clone(target)) });
+    };
+    env = mergeEntries(&entries, envEntries(&fun.env, 1));
+    return FullFunction { env: replaceEnvBase(&fun.env, intToken(0), &env), ..fun };
+};
+fn finishCopies(classes: &InstanceNameClasses, program: FullProgram, named: &List<NamedCopy>, used: &HashSet<String>, roots: List<FullFunction>, entry: FullFunction, made: &List<CopyMade>, dispatch: List<DispatchEdge>) -> FullProgram ~ {
+    ix = finishIndex(&program); kept = retained(&program, &ix, used); stubs = emptyFinishFunctions();
+    for b in &program.bounded {
+        if isStubName(&b.name) {
+            i = HashMap::lookup(&ix.functions, &b.name, -1);
+            if i >= 0 && i < size(program.functions) { stubs = stubs.insert(clone(b.name), renameFunction(classes, clone(get(&program.functions, i)), &program, named)); };
+        };
+    };
+    generated = genericBodies(classes, &program, &ix, named, &kept, clone(program.arena));
+    generic = emptyFinishFunctions();
+    usedStubs = stubClosure(&generated.funs, &stubs, &generated.arena);
+    for f in generated.funs { generic = generic.insert(functionName(f), clone(f)); };
+    for n in orderedNames(&usedStubs) { generic = generic.insert(clone(n), HashMap::lookup(&stubs, n, noFunction())); };
+    return finishWithGenerics(program, &ix, &kept, roots, entry, made, generic, generated.arena, generated.variadic, dispatchIndex(&dispatch));
+};
+fn finishWithGenerics(program: FullProgram, ix: &FinishIndex, kept: &HashSet<String>, roots: List<FullFunction>, entry: FullFunction, made: &List<CopyMade>, generic: HashMap<String,FullFunction>, arena: List<AstNode>, variadic: Bool, dispatch: HashMap<String, HashSet<String>>) -> FullProgram ~ {
+    if variadic {
+        slice = packSlice(arena); cons = packCons(slice.arena); arena = cons.arena;
+        generic = generic.insert(functionName(&slice.fun), slice.fun);
+        generic = generic.insert(functionName(&cons.fun), cons.fun);
+    };
+    functions = emptyFinishFunctions(); markers = HashSet::new(); names = HashSet::new(); keptCopies = HashSet::new();
+    for f in roots { n = functionName(f); functions = functions.insert(clone(n), clone(f)); names = names.insert(n); };
+    for m in made {
+        n = functionName(&m.fun); markers = markers.insert(clone(n)); names = names.insert(clone(n));
+        covered = HashSet::contains(kept, &m.generic);
+        if covered { keptCopies = keptCopies.insert(clone(n)); };
+        functions = functions.insert(n, clone(m.fun));
+        for l in &m.lifted {
+            n = functionName(l); names = names.insert(clone(n));
+            if covered { keptCopies = keptCopies.insert(clone(n)); };
+            functions = functions.insert(n, clone(l));
+        };
+    };
+    for e in HashMap::entries(&generic) {
+        n = e.key; names = names.insert(clone(n));
+        if HashMap::contains(&ix.bounded, &n) || !HashMap::contains(&ix.functions, &n) { markers = markers.insert(clone(n)); };
+    };
+    mainName = functionName(&entry); names = names.insert(clone(mainName));
+    globals = []; markerEnv = [];
+    for n in orderedNames(&names) {
+        if n != mainName { globals = push(globals, markerEntry(clone(n))); };
+        if HashMap::contains(&functions, n) || HashMap::contains(&generic, n) { markerEnv = push(markerEnv, markerEntry(clone(n))); };
+    };
+    instanceKeys = HashSet::new(); for r in &program.instances { instanceKeys = instanceKeys.insert(clone(r.name)); };
+    shared = push([], envTokens(&globals));
+    ctx = buildFinishEnv(names, instanceKeys, mainName);
+    out = [];
+    for n in orderedNames(&ctx.alive) {
+        if HashMap::contains(&functions, n) {
+            f = HashMap::lookup(&functions, n, noFunction());
+            if HashSet::contains(&keptCopies, n) { f = markFunction(f, "$covered"); };
+            out = push(out, completeEnvs(f, &ctx, false, true));
+        } else {
+            if HashMap::contains(&generic, n) {
+                namedProofs = proofsNamed(arena, HashMap::lookup(&generic, n, noFunction()), &ctx.instances);
+                arena = namedProofs.arena;
+                out = push(out, closeStubDispatch(completeEnvs(namedProofs.fun, &ctx, true, true), &dispatch));
+            };
+        };
+    };
+    newEntry = completeEnvs(addMarkerRows(entry, ix, &markers, &markerEnv), &ctx, false, false);
+    generics = HashSet::new(); for g in &program.generics { generics = generics.insert(clone(g.name)); };
+    types = []; for t in &program.types { if !isDerived(&generics, &t.name) { types = push(types, clone(t)); }; };
+    return FullProgram { types: types, arena: arena, functions: out, entry: newEntry, bounded: [], instances: [], shared: shared, ..program };
+};

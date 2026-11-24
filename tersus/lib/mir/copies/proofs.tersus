@@ -1,0 +1,286 @@
+import data::ast::ast { AstBody, AstBuiltin, AstExpression, AstNames, AstNode, AstOptTermination, AstProof, AstProofs, AstRule, AstStatement, AstTermination, AstValidation, AstValidations, AstValue };
+import data::reader::reader { nameValue };
+import mir::copies::calls { CopyTarget, libraryBuiltin, sequenceType, target };
+import mir::copies::keys { CopyCx, CopyNeed, DispatchEdge, appendDispatch };
+import mir::copies::keys { Maybe, boundCallParts, copyLookup, instanceAt };
+import mir::full::full { FullProgram };
+import mir::full::read { noFunction };
+import mir::full::records { listItems, nodeAt, statementAt };
+import mir::instances::names { InstanceNameClasses };
+import mir::pack::proofs { PackTerm, addAtom, addCall, addName, addPayload, addTermList, addValidation, addValidationBlock, proofOf, proofWith, termItems, termView, unaryRuleTerm, unaryRuleWith };
+
+struct CopyProof { node: Int, needs: List<CopyNeed>, dispatch: List<DispatchEdge>, arena: List<AstNode>, error: String };
+
+fn kept(arena: List<AstNode>, id: Int) -> CopyProof ~ {
+    return CopyProof { node: id, needs: [], dispatch: [], arena: arena, error: "" };
+};
+fn proofNeeds(out: List<CopyNeed>, more: &List<CopyNeed>) -> List<CopyNeed> ~ {
+    for n in more { out = push(out, clone(n)); };
+    return out;
+};
+fn changed(r: CopyProof, node: AstNode) -> CopyProof ~ {
+    id = size(r.arena);
+    return CopyProof { node: id, arena: push(r.arena, node), ..r };
+};
+fn primitiveName(method: &String) -> String ~ {
+    if method = "size" { return "Size"; };
+    if method = "get" { return "Get"; };
+    if method = "set" { return "Set"; };
+    if method = "push" { return "Push"; };
+    if method = "pop" { return "Pop"; };
+    if method = "first" { return "First"; };
+    return "Last";
+};
+fn proofBuiltin(arena: List<AstNode>, method: &String, proof: Bool) -> CopyProof ~ {
+    names = push([], "list");
+    if method = "get" || method = "set" { names = push(names, "index"); };
+    if method = "set" || method = "push" { names = push(names, "x"); };
+    ps = size(arena); arena = push(arena, AstNode::Names { value: AstNames::End });
+    for i in 0..size(names) {
+        n = addName(arena, clone(get(&names, size(names) - 1 - i))); head = n.id;
+        tail = ps; ps = size(n.arena);
+        arena = push(n.arena, AstNode::Names { value: AstNames::Cons { head: head, tail: tail } });
+    };
+    b = size(arena); arena = push(arena, AstNode::Builtin { value: AstBuiltin::Primitive { name: primitiveName(method) } });
+    body = size(arena); arena = push(arena, AstNode::Body { value: AstBody::BuiltinFunct { b: b } });
+    ins = size(arena); arena = push(arena, AstNode::Validations { value: AstValidations::End });
+    outs = size(arena); arena = push(arena, AstNode::Validations { value: AstValidations::End });
+    exports = size(arena); arena = push(arena, AstNode::Proofs { value: AstProofs::End });
+    v = size(arena); arena = push(arena, AstNode::Value { value: AstValue::VFunct { ps: ps, ins: ins, outs: outs, body: body, exports: exports } });
+    id = size(arena);
+    if proof { return kept(push(arena, AstNode::Proof { value: AstProof::CTerm { v: v } }), id); };
+    return kept(push(arena, AstNode::Expression { value: AstExpression::Val { v: v } }), id);
+};
+fn rewriteName(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, arena: List<AstNode>, id: Int, n: &String, proof: Bool, fnRef: Bool) -> CopyProof ~ {
+    bound = boundCallParts(n);
+    if bound.found && (bound.value.method = "size" || bound.value.method = "get") && libraryBuiltin(program, n) {
+        ty = copyLookup(&cx.types, &bound.value.param);
+        if size(ty) > 0 && sequenceType(&ty) { return proofBuiltin(arena, &bound.value.method, proof); };
+    };
+    if !bound.found && !instanceAt(program, n).found && !HashMap::contains(&cx.lifted, n) { return kept(arena, id); };
+    result = target(classes, program, cx, HashMap::new(), noFunction(), n, [], Maybe<Int> { found: false, value: 0 });
+    if result.error != "" { return CopyProof { node: id, arena: arena, error: result.error, needs: [], dispatch: [] }; };
+    call = result.target;
+    if call is CopyTarget::Named {
+        named = call as CopyTarget::Named;
+        out = kept(arena, id);
+        if named.name != n {
+            if fnRef {
+                r = addName(out.arena, named.name); nameId = r.id;
+                r = addPayload(r.arena, AstNode::Value { value: AstValue::VFnRef { n: nameId } }); v = r.id;
+                r = addPayload(r.arena, AstNode::Expression { value: AstExpression::Val { v: v } });
+                out = kept(r.arena, r.id);
+            } else {
+                r = addAtom(out.arena, named.name, proof); out = kept(r.arena, r.id);
+            };
+        };
+        return CopyProof { needs: result.needs, dispatch: result.dispatch, ..out };
+    };
+    if call is CopyTarget::InlineBuiltin {
+        value = call as CopyTarget::InlineBuiltin;
+        out = proofBuiltin(arena, &value.builtin, proof);
+        return CopyProof { needs: result.needs, dispatch: result.dispatch, ..out };
+    };
+    return CopyProof { node: id, arena: arena, needs: [], dispatch: [], error: "internal compiler error: ".concat(n).concat(" is in a proof in ").concat(&cx.copy).concat(", which has no proof form for the type it is copied for") };
+};
+fn rewriteTermGroup(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, arena: List<AstNode>, id: Int, proof: Bool) -> CopyProof ~ {
+    old = termItems(&arena, id); ids = []; needs = []; dispatch = [];
+    for p in &old {
+        mapped = rewriteTerm(classes, program, cx, arena, p, proof);
+        if mapped.error != "" { return mapped; };
+        ids = push(ids, mapped.node); needs = proofNeeds(needs, &mapped.needs); dispatch = appendDispatch(dispatch, &mapped.dispatch); arena = mapped.arena;
+    };
+    if ids = old { return CopyProof { node: id, needs: needs, dispatch: dispatch, arena: arena, error: "" }; };
+    out = addTermList(arena, &ids, proof);
+    return CopyProof { node: out.id, needs: needs, dispatch: dispatch, arena: out.arena, error: "" };
+};
+fn rewriteTerm(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, arena: List<AstNode>, id: Int, proof: Bool) -> CopyProof ~ {
+    term = termView(&arena, id);
+    if term is PackTerm::Atom {
+        n = nameValue(&arena, (term as PackTerm::Atom).n);
+        return rewriteName(classes, program, cx, arena, id, &n, proof, false);
+    };
+    if !proof && term is PackTerm::Constant {
+        node = nodeAt(&arena, (term as PackTerm::Constant).v);
+        if node is AstNode::Value {
+            v = (node as AstNode::Value).value;
+            if v is AstValue::VFnRef {
+                n = nameValue(&arena, (v as AstValue::VFnRef).n);
+                return rewriteName(classes, program, cx, arena, id, &n, false, true);
+            };
+        };
+    };
+    if term is PackTerm::Call {
+        call = term as PackTerm::Call;
+        f = rewriteTerm(classes, program, cx, arena, call.f, proof);
+        if f.error != "" { return f; };
+        nameId = f.node; xs = rewriteTermGroup(classes, program, cx, f.arena, call.xs, proof);
+        if xs.error != "" { return xs; };
+        needs = proofNeeds(f.needs, &xs.needs); dispatch = appendDispatch(f.dispatch, &xs.dispatch);
+        if nameId = call.f && xs.node = call.xs { return CopyProof { node: id, needs: needs, dispatch: dispatch, ..xs }; };
+        r = addCall(xs.arena, nameId, xs.node, proof);
+        return CopyProof { node: r.id, needs: needs, dispatch: dispatch, arena: r.arena, error: "" };
+    };
+    if term is PackTerm::Quantifier {
+        q = term as PackTerm::Quantifier;
+        guards = rewriteTermGroup(classes, program, cx, arena, q.gs, true);
+        if guards.error != "" { return guards; };
+        gs = guards.node; body = rewriteTerm(classes, program, cx, guards.arena, q.b, true);
+        if body.error != "" { return body; };
+        b = body.node; body = CopyProof { node: id, needs: proofNeeds(guards.needs, &body.needs), dispatch: appendDispatch(guards.dispatch, &body.dispatch), ..body };
+        if gs = q.gs && b = q.b { return body; };
+        return changed(body, AstNode::Proof { value: AstProof::Forall { n: q.n, gs: gs, b: b } });
+    };
+    return kept(arena, id);
+};
+
+fn rewriteRuleNode(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, arena: List<AstNode>, id: Int) -> CopyProof ~ {
+    node = nodeAt(&arena, id);
+    if !(node is AstNode::Rule) { return kept(arena, id); };
+    rule = (node as AstNode::Rule).value; p = unaryRuleTerm(&rule);
+    if p >= 0 {
+        r = rewriteTerm(classes, program, cx, arena, p, true);
+        if r.error != "" { return r; };
+        newP = r.node; r = CopyProof { node: id, ..r };
+        if newP = p { return r; };
+        return changed(r, AstNode::Rule { value: unaryRuleWith(&rule, newP) });
+    };
+    if rule is AstRule::UserRewrite {
+        u = rule as AstRule::UserRewrite;
+        r = rewriteTermGroup(classes, program, cx, arena, u.xs, true);
+        if r.error != "" { return r; };
+        xs = r.node; r = CopyProof { node: id, ..r };
+        if xs = u.xs { return r; };
+        return changed(r, AstNode::Rule { value: AstRule::UserRewrite { n: u.n, xs: xs } });
+    };
+    return kept(arena, id);
+};
+fn rewriteValidationNode(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, arena: List<AstNode>, id: Int) -> CopyProof ~ {
+    node = nodeAt(&arena, id);
+    if !(node is AstNode::Validation) { return kept(arena, id); };
+    v = (node as AstNode::Validation).value;
+    p = proofOf(&v);
+    if p >= 0 {
+        r = rewriteTerm(classes, program, cx, arena, p, true);
+        if r.error != "" { return r; };
+        newP = r.node; r = CopyProof { node: id, ..r };
+        if newP = p { return r; };
+        return changed(r, AstNode::Validation { value: proofWith(&v, newP) });
+    };
+    if v is AstValidation::AssignProofVar {
+        a = v as AstValidation::AssignProofVar; r = rewriteTerm(classes, program, cx, arena, a.e, false);
+        if r.error != "" { return r; };
+        e = r.node; r = CopyProof { node: id, ..r };
+        if e = a.e { return r; };
+        return changed(r, AstNode::Validation { value: AstValidation::AssignProofVar { n: a.n, e: e } });
+    };
+    if v is AstValidation::Rewrite {
+        old = (v as AstValidation::Rewrite).r; result = rewriteRuleNode(classes, program, cx, arena, old);
+        if result.error != "" { return result; };
+        r = result.node; result = CopyProof { node: id, ..result };
+        if r = old { return result; };
+        return changed(result, AstNode::Validation { value: AstValidation::Rewrite { r: r } });
+    };
+    return kept(arena, id);
+};
+fn rewriteValidationChain(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, arena: List<AstNode>, id: Int) -> CopyProof ~ {
+    node = nodeAt(&arena, id);
+    if !(node is AstNode::Validations) { return kept(arena, id); };
+    vs = (node as AstNode::Validations).value;
+    if !(vs is AstValidations::Cons) { return kept(arena, id); };
+    c = vs as AstValidations::Cons;
+    head = rewriteValidationNode(classes, program, cx, arena, c.head);
+    if head.error != "" { return head; };
+    newHead = head.node; tail = rewriteValidationChain(classes, program, cx, head.arena, c.tail);
+    if tail.error != "" { return tail; };
+    newTail = tail.node; tail = CopyProof { node: id, needs: proofNeeds(head.needs, &tail.needs), dispatch: appendDispatch(head.dispatch, &tail.dispatch), ..tail };
+    if newHead = c.head && newTail = c.tail { return tail; };
+    return changed(tail, AstNode::Validations { value: AstValidations::Cons { head: newHead, tail: newTail } });
+};
+fn rewriteTerminationNode(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, arena: List<AstNode>, id: Int) -> CopyProof ~ {
+    node = nodeAt(&arena, id);
+    if !(node is AstNode::Termination) { return kept(arena, id); };
+    term = (node as AstNode::Termination).value; e = -1;
+    if term is AstTermination::Recursing {
+        t = (term as AstTermination::Recursing).t; r = rewriteTerminationOpt(classes, program, cx, arena, t);
+        if r.error != "" { return r; };
+        t1 = r.node; r = CopyProof { node: id, ..r };
+        if t1 = t { return r; };
+        return changed(r, AstNode::Termination { value: AstTermination::Recursing { t: t1 } });
+    };
+    if term is AstTermination::Shrinks { e = (term as AstTermination::Shrinks).e; };
+    if term is AstTermination::Counting { e = (term as AstTermination::Counting).e; };
+    if term is AstTermination::Parts { e = (term as AstTermination::Parts).e; };
+    if e < 0 { return kept(arena, id); };
+    r = rewriteTerm(classes, program, cx, arena, e, false);
+    if r.error != "" { return r; };
+    e1 = r.node; r = CopyProof { node: id, ..r };
+    if e1 = e { return r; };
+    next = AstTermination::Parts { e: e1 };
+    if term is AstTermination::Shrinks { next = AstTermination::Shrinks { e: e1 }; };
+    if term is AstTermination::Counting { next = AstTermination::Counting { e: e1 }; };
+    return changed(r, AstNode::Termination { value: next });
+};
+fn rewriteTerminationOpt(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, arena: List<AstNode>, id: Int) -> CopyProof ~ {
+    node = nodeAt(&arena, id);
+    if !(node is AstNode::OptTermination) { return kept(arena, id); };
+    opt = (node as AstNode::OptTermination).value;
+    if !(opt is AstOptTermination::SomeTermination) { return kept(arena, id); };
+    t = (opt as AstOptTermination::SomeTermination).t; r = rewriteTerminationNode(classes, program, cx, arena, t);
+    if r.error != "" { return r; };
+    t1 = r.node; r = CopyProof { node: id, ..r };
+    if t1 = t { return r; };
+    return changed(r, AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: t1 } });
+};
+fn rewriteCopyPayload(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, id: Int, arena: List<AstNode>) -> CopyProof ~ {
+    return rewriteStatement(classes, program, cx, arena, id);
+};
+fn rewriteStatement(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyCx, arena: List<AstNode>, id: Int) -> CopyProof ~ {
+    stmt = statementAt(&arena, id);
+    if stmt is AstStatement::ValidationStatement {
+        v = (stmt as AstStatement::ValidationStatement).v; r = rewriteValidationNode(classes, program, cx, arena, v);
+        if r.error != "" { return r; };
+        v1 = r.node; r = CopyProof { node: id, ..r };
+        if v1 = v { return r; };
+        return changed(r, AstNode::Statement { value: AstStatement::ValidationStatement { v: v1 } });
+    };
+    if stmt is AstStatement::Block {
+        old = listItems(&arena, (stmt as AstStatement::Block).xs); ids = []; needs = []; dispatch = [];
+        for v in &old {
+            r = rewriteStatement(classes, program, cx, arena, v);
+            if r.error != "" { return r; };
+            ids = push(ids, r.node); needs = proofNeeds(needs, &r.needs); dispatch = appendDispatch(dispatch, &r.dispatch); arena = r.arena;
+        };
+        if ids = old { return CopyProof { node: id, needs: needs, dispatch: dispatch, arena: arena, error: "" }; };
+        r = addValidationBlock(arena, &ids);
+        return CopyProof { node: r.id, needs: needs, dispatch: dispatch, arena: r.arena, error: "" };
+    };
+    if stmt is AstStatement::While {
+        w = stmt as AstStatement::While; r = rewriteTerminationOpt(classes, program, cx, arena, w.t);
+        if r.error != "" { return r; };
+        t = r.node; r = CopyProof { node: id, ..r };
+        if t = w.t { return r; };
+        return changed(r, AstNode::Statement { value: AstStatement::While { e: w.e, vs: w.vs, t: t, xs: w.xs } });
+    };
+    if stmt is AstStatement::AxiomDef {
+        a = stmt as AstStatement::AxiomDef; ins = rewriteValidationChain(classes, program, cx, arena, a.ins);
+        if ins.error != "" { return ins; };
+        i = ins.node; outs = rewriteValidationChain(classes, program, cx, ins.arena, a.outs);
+        if outs.error != "" { return outs; };
+        o = outs.node; outs = CopyProof { node: id, needs: proofNeeds(ins.needs, &outs.needs), dispatch: appendDispatch(ins.dispatch, &outs.dispatch), ..outs };
+        if i = a.ins && o = a.outs { return outs; };
+        return changed(outs, AstNode::Statement { value: AstStatement::AxiomDef { n: a.n, ps: a.ps, ins: i, outs: o } });
+    };
+    if stmt is AstStatement::ProofDef {
+        p = stmt as AstStatement::ProofDef; ins = rewriteValidationChain(classes, program, cx, arena, p.ins);
+        if ins.error != "" { return ins; };
+        i = ins.node; outs = rewriteValidationChain(classes, program, cx, ins.arena, p.outs);
+        if outs.error != "" { return outs; };
+        o = outs.node; body = rewriteValidationChain(classes, program, cx, outs.arena, p.body);
+        if body.error != "" { return body; };
+        b = body.node; body = CopyProof { node: id, needs: proofNeeds(proofNeeds(ins.needs, &outs.needs), &body.needs), dispatch: appendDispatch(appendDispatch(ins.dispatch, &outs.dispatch), &body.dispatch), ..body };
+        if i = p.ins && o = p.outs && b = p.body { return body; };
+        return changed(body, AstNode::Statement { value: AstStatement::ProofDef { n: p.n, ps: p.ps, ins: i, outs: o, body: b } });
+    };
+    return kept(arena, id);
+};
