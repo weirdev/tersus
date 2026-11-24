@@ -6,6 +6,7 @@ import mir::full::records { envEntries, envTokens, keyOrder, nodeAt, replaceEnv,
 import mir::full::tokens { appendTokens, integerAt, intToken, intsEnd, name, namesEnd, textAt, typeEnd, word, wordIs };
 import mir::instances::complete { completeInstancesWith };
 import mir::instances::names { InstanceNameClasses };
+import mir::pack::body { movesClosureCaptures };
 import mir::pack::expand { expandPack };
 import mir::pack::numbers { decimalFits };
 import mir::copies::keys { CopyBinding, CopyInstance, CopyKey, NamedCopy, boundCallParts, companionOf, concreteKey, instanceAt, nameOf, renderCopyType, sameKey, typeBigness };
@@ -471,6 +472,11 @@ fn divergingCopies(program: FullProgram) -> FullProgram ~ {
     return FullProgram { functions: functions, arena: arena, ..program };
 };
 fn makeCopiesWith(classes: &InstanceNameClasses, program: FullProgram, library: &HashSet<String>) -> CopiesResult ~ {
+    problem = "a boxed closure must move a capture local";
+    if !movesClosureCaptures(&program.entry) { return CopiesResult { value: program, error: problem }; };
+    for f in &program.functions {
+        if !movesClosureCaptures(f) { return CopiesResult { value: program, error: problem }; };
+    };
     if size(program.bounded) = 0 && size(program.instances) = 0 { return CopiesResult { value: program, error: "" }; };
     sources = copySources(&program); named = originalCopyNames(&program);
     lifted = HashSet::new(); always = HashSet::new();

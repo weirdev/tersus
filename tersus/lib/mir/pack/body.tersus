@@ -101,6 +101,15 @@ fn rowSites(row: &List<Token>, ghosts: Bool, assignRefIndices: Bool) -> List<Row
     };
     return sites;
 };
+fn movesClosureCaptures(fun: &FullFunction) -> Bool ~ {
+    for block in &fun.blocks {
+        for row in &block.lines {
+            if wordIs(row, 0, "assign") && wordIs(row, 2, "packclosure") && !wordIs(row, 3, "move") { return false; };
+        };
+    };
+    return true;
+};
+
 fn targets(row: &List<Token>) -> List<Int> ~ {
     out = [];
     for site in rowSites(row, false, false) {

@@ -24,7 +24,7 @@ import qualified Data.Set as Set
 
 import BuiltinRegistry (methodBuiltinByName)
 import Mir
-import MirPacksOracle (Expanded (..), expandPack, isPackName)
+import MirPacksOracle (Expanded (..), expandPack, isPackName, movesClosureCaptures)
 import Pretty (renderType)
 import StdLib (builtinFunct)
 import Syntax (Expression (..), FunctBody (..), Proof (..), RwRule (..), Termination (..), ValidationStatement (..), Value (..), VariableProof, exprToProof, parseImplCheckName)
@@ -81,6 +81,7 @@ makeCopies = makeCopiesWith Set.empty
 -- uses them (every other function with bounds is, where it is defined)
 makeCopiesWith :: Set.Set Name -> Program -> Result Program String
 makeCopiesWith library program
+    | not (all movesClosureCaptures (progMain program : Map.elems (progFunctions program))) = Error "a boxed closure must move a capture local"
     | Map.null (progBounded program) && Map.null (progInstances program) = Ok program
     | otherwise = case run of
         Left e -> Error e
@@ -837,8 +838,9 @@ transformBlock cx constants fn here (BasicBlock stmts term) = go here [] stmts [
         PackClosure o thunk -> do
             o' <- op o
             target <- op (Const (CFn thunk))
-            case target of
-                Const (CFn name) -> return (PackClosure o' name)
+            case (o', target) of
+                (Move _, Const (CFn name)) -> return (PackClosure o' name)
+                (_, Const (CFn _)) -> failC "a boxed closure must move a capture local after specialization"
                 _ -> failC "a boxed closure needs a named thunk"
         Unbox o -> Unbox <$> op o
         Unsize o -> Unsize <$> op o

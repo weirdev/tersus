@@ -2,6 +2,7 @@ module MirPacksOracle
     ( Expanded (..)
     , expandPack
     , isPackName
+    , movesClosureCaptures
     ) where
 
 import Data.Char (isDigit)
@@ -69,6 +70,7 @@ expandPack bounded pack n fn0 = do
                 }
         nextBlock = 1 + maximum (0 : [i | BlockId i <- Map.keys (fnBlocks fn1)])
     st <- unrollAll x (XS fn1 (next0 + fromInteger n) nextBlock Map.empty Map.empty (boundedPackLoops bounded))
+    if movesClosureCaptures (xsFn st) then Right () else Left "a boxed closure must move a capture local after pack expansion"
     (fn2a, bindings) <- resolveElements x (xsFn st)
     (fn2b, spreads) <- spreadForwards x (pruneUnreachable fn2a)
     let fn2 = pruneUnreachable fn2b
@@ -104,6 +106,12 @@ expandPack bounded pack n fn0 = do
             (Map.filterWithKey (\l m -> Set.member l kept && not (Map.null m)) localBindings)
             spreads
         )
+
+movesClosureCaptures :: Function -> Bool
+movesClosureCaptures fn = and
+    [ case operand of Move _ -> True; _ -> False
+    | block <- Map.elems (fnBlocks fn), Assign _ (PackClosure operand _) <- blockStatements block
+    ]
 
 -- The element types of the pack read at an index that is not a number a type names
 elementTypes :: X -> Type -> [Variable]
