@@ -493,7 +493,13 @@ it with its own lowering yet.
 
 Version 3 keeps the type, operand, constant, rvalue, statement and terminator
 words of the earlier versions. Its records come in this order, each kind by
-name (functions, then `main`), and a function's loops by header block:
+name (functions, then `main`), and a function's loops by header block. The pinned
+Link reader also reserves `assign L packclosure O const fn "thunk"` for merge
+and environment completion. The destination will carry the boxed signature;
+`O` will supply the owned concrete environment and the function constant will
+name the typed call thunk. This reader checks the record shape only. No pass
+produces or executes it yet; it is not accepted by prune, Mono or the runtime
+MIR readers.
 
 ```
 tersus-mir 3

@@ -101,7 +101,12 @@ fn ghostOk(ts: &List<Token>) -> Bool ~ {
 fn terminator(ts: &List<Token>) -> Bool ~ {
     return wordIs(ts, 0, "goto") || wordIs(ts, 0, "switch") || wordIs(ts, 0, "call") || wordIs(ts, 0, "return") || wordIs(ts, 0, "unreachable");
 };
-fn lineOk(ts: &List<Token>) -> Bool ~ {
+fn lineOk(ts: &List<Token>, linkTransport: Bool) -> Bool ~ {
+    if linkTransport && wordIs(ts, 0, "assign") && wordIs(ts, 2, "packclosure") {
+        if !integerAt(ts, 1).ok { return false; };
+        at = operandEnd(ts, 3);
+        return at >= 0 && wordIs(ts, at, "const") && wordIs(ts, at + 1, "fn") && quotedAt(ts, at + 2) && at + 3 = size(ts);
+    };
     if wordIs(ts, 0, "assign") || wordIs(ts, 0, "peek") { return integerAt(ts, 1).ok && rvalueEnd(ts, 2) = size(ts); };
     if wordIs(ts, 0, "assignref") { return integerAt(ts, 1).ok && rvalueEnd(ts, stepsEnd(ts, 2)) = size(ts); };
     if wordIs(ts, 0, "ghost") { return ghostOk(ts); };
@@ -115,7 +120,7 @@ fn lineOk(ts: &List<Token>) -> Bool ~ {
     };
     return false;
 };
-fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry>>) -> Parsed<FullFunction> ~ {
+fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry>>, linkTransport: Bool) -> Parsed<FullFunction> ~ {
     bad = Parsed<FullFunction> { value: noFunction(), pos: 0, ok: false };
     if start < 0 { return bad; };
     header = normalizeTypes(recordAt(lines, start)); spec = recordAt(lines, start + 1); env = recordAt(lines, start + 2);
@@ -150,7 +155,7 @@ fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry
             active = true;
             while active [{ affirm at >= 0; }] ~ {
                 if at >= size(lines) { return bad; };
-                row = recordAt(lines, at); if !lineOk(&row) { return bad; };
+                row = recordAt(lines, at); if !lineOk(&row, linkTransport) { return bad; };
                 e = expandEnv(&row, shared); if !e.ok { return bad; };
                 if terminator(&row) { active = false; };
                 block = FullBlock { lines: push(block.lines, e.value), ..block }; at = at + 1;
@@ -251,7 +256,7 @@ fn packLoopInvariants(nodes: List<AstNode>) -> List<AstNode> ~ {
     return nodes;
 };
 
-fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
+fn parseFull(lines: &List<List<Token>>, linkTransport: Bool) -> Parsed<FullProgram> ~ {
     bad = badFull();
     if size(lines) = 0 { return bad; };
     header = clone(get(lines, 0));
@@ -288,12 +293,12 @@ fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
     while readingFunctions ~ {
         row = recordAt(lines, at);
         if !wordIs(&row, 0, "function") { readingFunctions = false; } else {
-            fun = functionAt(lines, at, &shared); if !fun.ok { return bad; };
+            fun = functionAt(lines, at, &shared, linkTransport); if !fun.ok { return bad; };
             program = FullProgram { functions: push(program.functions, fun.value), ..program }; at = fun.pos;
         };
     };
     if !wordIs(recordAt(lines, at), 0, "main") { return bad; };
-    fun = functionAt(lines, at, &shared); if !fun.ok { return bad; };
+    fun = functionAt(lines, at, &shared, linkTransport); if !fun.ok { return bad; };
     program = FullProgram { entry: fun.value, ..program }; at = fun.pos;
     for i in 0..7 { program = FullProgram { trailer: push(program.trailer, recordAt(lines, at)), ..program }; at = at + 1; };
     if !trailerOk(&program.trailer) { return bad; };

@@ -230,6 +230,7 @@ testLinkNative = TestList "testLinkNative"
        , testCase "pinned Link preserves boxed closures, nested signatures and opaque clauses" (contractTypesThroughLinkWith boxedCallback)
        , TestCase "pinned Mono refuses boxed closure types before specialization" boxedMonoRefusal
        , testCase "pinned Link prune refuses boxed closure signature dependencies" boxedPruneRefusal
+       , TestCase "pinned Link transports closure allocation records without enabling runtime consumers" closurePackTransport
        , TestCase "actual prepared compiler/helper/generic inputs" realInputChecks
        , TestCase "native pruning preserves the entry and reachable program structure on actual owned MIR" $ do
             seed <- cachedSeed
@@ -409,6 +410,51 @@ boxedPruneRefusal = testAssertErrorContains "cannot prune MIR3 with boxed closur
         { M.progTypes = Map.singleton "Child<Int>" (M.StructDecl [("value", TInt)])
         , M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl ty Nothing)}
         }
+
+closurePackTransport :: IO TestResult
+closurePackTransport = case (programData boxed, programData unboxed) of
+    (Ok input, Ok noBox) -> do
+        tool <- cachedSeed
+        case tool of
+            Error e -> pure (Just e)
+            Ok emitter -> do
+                (status, merged, errors) <- Native.runWithInputFull emitter (merge (pack input))
+                (status', completed, errors') <- Native.runWithInputFull emitter ("pass link\nenvironments\n" ++ merged)
+                malformed <- mapM (refuses emitter unreadable . merge . (`replacePack` input))
+                    [ "assign 1 packclosure move 2 const fn"
+                    , "assign 1 packclosure move 2 const fn thunk"
+                    , "assign 1 packclosure move 2 const fn \"thunk\" extra"
+                    , "assign 1 packclosure move notALocal const fn \"thunk\""
+                    , "assign 1 packclosure move 2 copy 3"
+                    , "peek 1 packclosure move 2 const fn \"thunk\""
+                    , "assignref 1 0 packclosure move 2 const fn \"thunk\""
+                    ]
+                prune <- refuses emitter unreadable ("pass link\nprune\n" ++ pack input)
+                mono <- mapM (\pass -> refuses emitter "the input is not full MIR version 3\n" ("pass " ++ pass ++ "\n" ++ pack noBox)) ["mono", "mono-ownership"]
+                pure $ firstFailure
+                    ([ testAssertEq status ExitSuccess, testAssertEq errors ""
+                     , testAssertEq status' ExitSuccess, testAssertEq errors' ""
+                     , testAssertEq (filter (== packRow) (lines merged)) [packRow]
+                     , testAssertEq (filter (== packRow) (lines completed)) [packRow]
+                     , testAssertTrue (any (isPrefixOf "function \"thunk\"") (lines merged))
+                     , prune
+                     ] ++ malformed ++ mono)
+    (Error e, _) -> pure (Just e)
+    (_, Error e) -> pure (Just e)
+  where
+    unreadable = "the linking request contains unreadable MIR3\n"
+    merge text = "pass link\nmerge 1\nunit \"app\" none " ++ show (length (lines text)) ++ "\n" ++ text
+    control = "assign 1 use copy 2"
+    packRow = "assign 1 packclosure move 2 const fn \"thunk\""
+    replacePack row = unlines . map (\line -> if line == control then row else line) . lines
+    pack = replacePack packRow
+    refuses emitter expected request = do
+        (_, out, errors) <- Native.runWithInputFull emitter request
+        pure (firstFailure [testAssertEq out "1\n", testAssertEq errors expected])
+    boxed = fixture (boxedCallback (TFn [] TInt))
+    unboxed = fixture TInt
+    fixture ty = p{M.progMain = (M.progMain p){M.fnLocals = Map.fromList [(M.Local 1, M.LocalDecl ty Nothing), (M.Local 2, M.LocalDecl TInt Nothing)]}}
+    p = withMain (program [("thunk", 7)]) [M.Assign (M.Local 1) (M.Use (M.Copy (M.Local 2)))] M.Return
 
 boxedMonoRefusal :: IO TestResult
 boxedMonoRefusal = do
