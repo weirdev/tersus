@@ -212,15 +212,15 @@ ownershipPassWith _ "expand" program
     isReference _ = False
 ownershipPassWith _ "ownership" program
     | owner : _ <- uncoveredInstances program = pure (Error ("Type error: " ++ owner ++ " has no checked ownership facts, and its declaration's facts may not apply to it"))
-ownershipPassWith getTool pass program = case writeOwnedProgramWithGhosts (ownershipInput program) of
+ownershipPassWith getTool pass program = case serialized of
   Error e -> pure (Error e)
-  Ok owned -> do
-    let input = "pass " ++ pass ++ "\n" ++ owned
+  Ok wire -> do
+    let request = "pass " ++ pass ++ "\n" ++ wire
     tool <- getTool
     output <- case tool of
         ToolFailed e -> pure (Error e)
         ToolNative exe -> do
-            (code, out, errors) <- runWithInputFull exe input
+            (code, out, errors) <- runWithInputFull exe request
             pure $ case code of
                 ExitFailure n -> Error ("the ownership tool exited with " ++ show n ++ ": " ++ trimEnd errors)
                 ExitSuccess
@@ -232,6 +232,11 @@ ownershipPassWith getTool pass program = case writeOwnedProgramWithGhosts (owner
         if take 1 (lines text) /= ["tersus-mir 2"]
             then Error "the ownership tool did not write MIR version 2"
             else stage "the ownership tool wrote unreadable MIR: " (readProgram text) `bindResult` restoreOwnership program
+  where
+    input = ownershipInput program
+    serialized
+        | pass == "expand" = Ok (writeProgramWithGhosts input)
+        | otherwise = writeOwnedProgramWithGhosts input
 
 -- A program expanded, lowered and owned by one emitter executable (the seed's, for what the host builds itself)
 ownedWith :: FilePath -> Program -> IO (Result Program String)
