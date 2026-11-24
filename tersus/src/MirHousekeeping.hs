@@ -926,7 +926,7 @@ nativeProgramUsing tool library raw = case abiView raw of
             Error e -> pure (Error e)
             Ok () -> do
                 expanded <- ownershipPassWith tool "expand" program
-                case mapResult lowerThreads expanded of
+                case expanded `bindResult` lowerThreads of
                     Error e -> pure (Error e)
                     Ok written
                         | not (hasLists written) -> pure (Ok written)

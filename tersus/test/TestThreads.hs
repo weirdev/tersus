@@ -86,6 +86,8 @@ testThreads =
             , sameNatively "scoped threads that allocate" "xs = [5, 6, 7]; f = fn() -> List<Int> { out = []; i = 0; while i < 2000 [{ affirm i >= 0; }] shrinks 2000 - i { out = push(out, size(xs) + i); i = i + 1; }; return out; }; a = ScopedThread::spawn(&f); b = ScopedThread::spawn(&f); l = a.join(); m = b.join(); return size(l) + size(m);"
             , nativeSpawnIr "library scoped spawns use the runtime" True borrowedSum
             , nativeSpawnIr "a source-defined lookalike does not start a native thread" False scopedLookalike
+            , TestCase "the program cannot return a live thread" (nativeRefused "return Thread::spawn(fn() -> Int => 7);" "join it before returning")
+            , TestCase "the program cannot return a live thread inside a tuple" (nativeRefused "return (1, Thread::spawn(fn() -> Int => 7));" "join it before returning")
             ]
         ]
   where
@@ -151,6 +153,9 @@ testThreads =
 -- The program does natively what it does in `eval` (testNative's check; without clang the case passes)
 sameNatively :: String -> String -> Test
 sameNatively name source = TestCase name (sameAsMir name source)
+
+nativeRefused :: String -> String -> IO TestResult
+nativeRefused source expected = testAssertErrorContains expected <$> tersusLlvm source
 
 nativeSpawnIr :: String -> Bool -> String -> Test
 nativeSpawnIr name expected source = TestCase name $ do

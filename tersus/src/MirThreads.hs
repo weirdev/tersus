@@ -5,10 +5,12 @@ module MirThreads
 import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
+import qualified Data.Set as Set
 
 import Mir
 import MirMoves (isNativeSpawn, mayHoldReference, mayHoldUpdate)
 import Types (Arg (..), Name, Type (..), Variable, instanceName, mentionsParameter)
+import Utils (Result (..), bindResult)
 
 -- The validator and `eval` run a thread of lib/thread.tersus where it is started (its closure called by spawn, its value kept
 -- in the handle). Native code runs it on a thread of its own: this rewrites the library's spawn and join, as linking made
@@ -25,10 +27,12 @@ import Types (Arg (..), Name, Type (..), Variable, instanceName, mentionsParamet
 -- That is sound because of what MirMoves.checkSpawns refused: what a Thread's closure holds and what a thread gives hold no
 -- reference, and a ScopedThread's closure holds no update reference, so a thread shares nothing that another one writes
 -- (the copies are checked again here). Each kind is rewritten only when its struct, its spawn copies and its joins are
--- the library's, letter for letter, and nothing else reads or makes its fields; otherwise the program keeps running its
--- threads where they start.
-lowerThreads :: Program -> Program
-lowerThreads program = completeErasedInstances (foldl lowerKind program [threadKind, scopedKind])
+-- the library's, letter for letter, and nothing else reads or makes its fields.
+lowerThreads :: Program -> Result Program String
+lowerThreads program =
+    lowerKind program threadKind `bindResult` \withThreads ->
+        lowerKind withThreads scopedKind `bindResult` \withScoped ->
+            Ok (completeErasedInstances withScoped)
 
 data Kind = Kind
     { kindStruct :: Name
@@ -55,16 +59,18 @@ spawnExtern, joinExtern :: Name
 spawnExtern = "extern tersus_thread_spawn"
 joinExtern = "extern tersus_thread_join"
 
-lowerKind :: Program -> Kind -> Program
+lowerKind :: Program -> Kind -> Result Program String
 lowerKind program kind
-    | Map.lookup (kindStruct kind) (progGenerics program) /= Just (kindParams kind, kindFields kind) = program
-    | null spawns = program
-    | not (all (isNativeSpawn . fst) spawns) = program
-    | not (all (isJust . snd) spawns && all (isLibraryJoin kind) joins) = program
-    | any (not . shares) [s | (_, Just s) <- spawns] = program
-    | any touchesFields others = program
+    | not (any (isNativeSpawn . fst) spawns) = Ok program
+    | not (all (isNativeSpawn . fst) spawns) = unsupported
+    | Map.lookup (kindStruct kind) (progGenerics program) /= Just (kindParams kind, kindFields kind) = unsupported
+    | not (all (isJust . snd) spawns && all (isLibraryJoin kind) joins) = unsupported
+    | any (not . shares) [s | (_, Just s) <- spawns] = unsupported
+    | any touchesFields others = Error ("Native " ++ kindStruct kind ++ " handles can only be created by spawn and opened by join")
+    | maybe False (containsHandle Set.empty) (fnReturns (progMain program)) =
+        Error ("The program cannot return a " ++ kindStruct kind ++ " handle; join it before returning")
     | otherwise =
-        program
+        Ok program
             { progGenerics = Map.insert (kindStruct kind) (kindParams kind, nativeFields) (progGenerics program)
             , progTypes = Map.filterWithKey (\name _ -> not (isInstance name)) (progTypes program)
             , progFunctions =
@@ -89,6 +95,23 @@ lowerKind program kind
         | kindLent kind = not (mayHoldReference program (spawnResult s)) && not (mayHoldUpdate program (spawnClosure s))
         | otherwise = not (mayHoldReference program (spawnResult s)) && not (mayHoldReference program (spawnClosure s))
     isInstance name = name == kindStruct kind || (kindStruct kind ++ "<") `isPrefixOf` name
+    unsupported = Error ("Cannot lower the thread library's " ++ kindStruct kind ++ " operations to native code")
+    containsHandle seen ty = case ty of
+        TNamed base args -> named (instanceName base args)
+        TVariant variant -> maybe False named (ownerOf program variant)
+        TArrayOf element _ -> containsHandle seen element
+        TUninit inner -> containsHandle seen inner
+        _ -> False
+      where
+        named name
+            | isInstance name = True
+            | Set.member name seen = False
+            | otherwise = case Map.lookup name (progTypes program) of
+                Just (StructDecl fields) -> any inside fields
+                Just (EnumDecl variants) -> any (any inside . snd) variants
+                Nothing -> False
+          where
+            inside = containsHandle (Set.insert name seen) . snd
     touchesFields fn = any (blockTouches isInstance) (Map.elems (fnBlocks fn))
 
 -- The spawn copy, when its body is the library's: it calls the closure it is given (or lent), and gives the struct of the value
