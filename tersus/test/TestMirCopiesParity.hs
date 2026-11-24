@@ -380,7 +380,7 @@ testMirCopiesParity = TestList "testMirCopiesParity"
         standalone Set.empty (Ok standaloneFncLowered) (Right checkStandaloneFnc)
     , TestCase "native linked copies preserves boxed signatures, opaque clauses and last-wins aliases" $
         compareCopies "linked" Set.empty boxedSignatureProgram (Right checkBoxedSignatureCopies)
-    , TestCase "fused Link carries closure allocation through bounded copy work without enabling standalone Copies" closurePackCopies
+    , TestCase "pinned production fused Link and source copies rewrite a boxed thunk alias" closurePackCopies
     , TestCase "a retained bounded closure allocation keeps its nested callback copy" retainedClosurePackCapture
     ]
   where
@@ -622,40 +622,54 @@ wideKeys = empty
         }
 
 closurePackCopies :: IO TestResult
-closurePackCopies = withResult (programData p) $ \plain -> withResultIO nativeCopiesProbe $ \exe -> do
-    let packet = replace "assign 1 packclosure move 2 const fn \"thunkAlias\"" plain
-        malformed = replace "assign 1 packclosure move 2 copy 3" plain
+closurePackCopies = withResult (programData p) $ \packet -> withResultIO nativeCopiesProbe $ \exe -> do
+    let malformed = unlines [if row == alloc "thunkAlias" then "assign 1 packclosure move 2 copy 3" else row | row <- lines packet]
         request = profiledRequest . rawMergeRequest "merge-copies"
         run text = Native.runWithInputFull exe ("link\n" ++ text)
-    ordinary <- cachedSeed
-    transport <- case ordinary of
+    pinned <- cachedSeed
+    transport <- case pinned of
         Error e -> pure (Just e)
         Ok seed -> do
             (status, out, err) <- Native.runWithInputFull seed (rawMergeRequest "merge" packet)
             pure (testAssertEq (status, err) (ExitSuccess, "")
-                <|> testAssertTrue ("assign 1 packclosure move 2 const fn \"thunkAlias\"" `elem` lines out))
-    (_, out, err) <- run (request packet)
+                <|> testAssertTrue (alloc "thunkAlias" `elem` lines out))
+    (status, out, err) <- run (request packet)
     (_, _, malformedError) <- run (request malformed)
-    (_, _, standaloneError) <- run (rawCopiesRequest packet)
-    (_, _, pruneError) <- run ("pass link\nprune\n" ++ packet)
-    pure (transport <|> testAssertEq err ""
-        <|> testAssertTrue ("assign 1 packclosure move 2 const fn \"thunkLast\"" `elem` lines out)
-        <|> testAssertTrue (any (isPrefixOf "function \"thunkLast\"") (lines out))
+    (standaloneStatus, standalone, standaloneError) <- run (rawCopiesRequest packet)
+    (pruneStatus, pruned, pruneError) <- run ("pass link\nprune\n" ++ out)
+    let production = case Link.linkPrograms [(rootId, p)] of
+            Error e -> Just e
+            Ok linked -> compareProgram linked out
+    pure (transport <|> testAssertEq (status, err) (ExitSuccess, "")
+        <|> checkOutput out
+        <|> production
         <|> testAssertEq malformedError "the linking request contains unreadable MIR3\n"
-        <|> testAssertEq standaloneError "the copies request contains unreadable MIR3\n"
-        <|> testAssertEq pruneError "the linking request contains unreadable MIR3\n")
+        <|> testAssertEq (standaloneStatus, standaloneError) (ExitSuccess, "")
+        <|> checkOutput standalone
+        <|> testAssertEq (pruneStatus, pruneError) (ExitSuccess, "")
+        <|> checkOutput pruned)
   where
     withResultIO action k = action >>= (`withResult` k)
-    replace row = unlines . map (\line -> if line == "assign 1 use copy 2" then row else line) . lines
+    alloc n = "assign 1 packclosure move 2 const fn " ++ quote n
+    checkOutput out = testAssertTrue (alloc "thunkLast" `elem` lines out)
+        <|> testAssertTrue (any (isPrefixOf "function \"thunkLast\" ") (lines out))
+    l = M.Local
     mainFn = M.progMain empty
+    thunk = (template "thunk")
+        { M.fnParams = [l 1], M.fnBorrowed = [l 1]
+        , M.fnLocals = Map.insert (l 1) (M.LocalDecl TInt Nothing) (M.fnLocals (template "thunk"))
+        }
+    boxed = TBoxedClosure False (TFn [] TInt)
     p = empty
-        { M.progFunctions = Map.singleton "thunk" (template "thunk")
+        { M.progFunctions = Map.singleton "thunk" thunk
         , M.progBounded = Map.singleton "thunk" bounded
         , M.progInstances = Map.fromList [(a, ("thunk", [ArgType TInt])) | a <- ["thunkAlias", "thunkLast"]]
         , M.progMain = mainFn
-            { M.fnLocals = Map.union (M.fnLocals mainFn) (Map.fromList
-                [(M.Local 1, M.LocalDecl (TBoxedClosure False (TFn [] TInt)) Nothing), (M.Local 2, M.LocalDecl TInt Nothing)])
-            , M.fnBlocks = Map.singleton (M.BlockId 0) (block [M.Assign (M.Local 1) (M.Use (M.Copy (M.Local 2)))] M.Return)
+            { M.fnLocals = Map.union (M.fnLocals mainFn) (Map.fromList [(l i, M.LocalDecl ty Nothing) | (i, ty) <- [(1, boxed), (2, TInt), (3, TRef boxed)]])
+            , M.fnBlocks = Map.fromList
+                [ (M.BlockId 0, block [ M.Assign (l 2) (M.Use (int 7)), M.Assign (l 1) (M.PackClosure (M.Move (l 2)) "thunkAlias"), M.Assign (l 3) (M.Borrow (l 1) [] False) ] (M.Call (M.Copy (l 3)) [] (l 0) (M.BlockId 1)))
+                , (M.BlockId 1, block [] M.Return)
+                ]
             }
         }
 

@@ -229,6 +229,8 @@ mentionsParam ty = case ty of
     TMutRef t -> mentionsParam t
     TArrayOf t _ -> mentionsParam t
     TFn args ret -> any mentionsParam (ret : args)
+    TFnContract args ret _ -> any mentionsParam (ret : args)
+    TBoxedClosure _ signature -> mentionsParam signature
     TNamed _ args -> or [mentionsParam t | ArgType t <- args]
     TForall _ _ t -> mentionsParam t
     _ -> False
@@ -244,6 +246,8 @@ typeBigness ty = case ty of
     TMutRef t -> 1 + typeBigness t
     TNamed _ args -> 1 + sum [typeBigness t | ArgType t <- args]
     TFn args ret -> 1 + sum (map typeBigness (args ++ [ret]))
+    TFnContract args ret _ -> 1 + sum (map typeBigness (args ++ [ret]))
+    TBoxedClosure _ signature -> 1 + typeBigness signature
     _ -> 1
 
 -- An array held in a frame that a copy makes too big (the definition could not say, as its type had a parameter)
@@ -909,6 +913,8 @@ renamesOf cx fn
         TRef u -> namedSubs u
         TMutRef u -> namedSubs u
         TFn as r -> concatMap namedSubs (r : as)
+        TFnContract as r _ -> concatMap namedSubs (r : as)
+        TBoxedClosure _ signature -> namedSubs signature
         _ -> []
 
 operand :: Cx -> Map Local Integer -> Function -> Operand -> C Operand

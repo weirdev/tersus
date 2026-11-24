@@ -130,7 +130,7 @@ fn paramAt(ty: &List<Token>, at: Int) -> Bool ~ {
     tag = textAt(ty, at);
     if tag = "param" { return true; };
     if tag = "forall" { return paramAt(ty, monoForallBody(ty, at)); };
-    if tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "list" || tag = "box" { return paramAt(ty, at + 1); };
+    if tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "list" || tag = "box" || tag = "closure" || tag = "closuremut" { return paramAt(ty, at + 1); };
     if tag = "named" {
         n = numberAt(ty, at + 2); p = at + 3;
         if n < 0 { return false; };
@@ -139,7 +139,7 @@ fn paramAt(ty: &List<Token>, at: Int) -> Bool ~ {
             p = argEnd(ty, p);
         };
     };
-    if tag = "fn" {
+    if tag = "fn" || tag = "fnc" {
         n = numberAt(ty, at + 1); p = at + 2;
         if n < 0 { return false; };
         for i in 0..n + 1 { if paramAt(ty, p) { return true; }; p = typeEnd(ty, p); };
@@ -149,7 +149,7 @@ fn paramAt(ty: &List<Token>, at: Int) -> Bool ~ {
 fn typeBigness(ty: &List<Token>) -> Int ~ { return bignessAt(ty, 0); };
 fn bignessAt(ty: &List<Token>, p: Int) -> Int ~ {
     tag = textAt(ty, p);
-    if tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "list" || tag = "box" {
+    if tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "list" || tag = "box" || tag = "closure" || tag = "closuremut" {
         return 1 + bignessAt(ty, p + 1);
     };
     if tag = "named" {
@@ -161,7 +161,7 @@ fn bignessAt(ty: &List<Token>, p: Int) -> Int ~ {
         };
         return result;
     };
-    if tag = "fn" {
+    if tag = "fn" || tag = "fnc" {
         n = numberAt(ty, p + 1); at = p + 2; result = 1;
         if n < 0 { return result; };
         for i in 0..n + 1 { result = result + bignessAt(ty, at); at = typeEnd(ty, at); };
