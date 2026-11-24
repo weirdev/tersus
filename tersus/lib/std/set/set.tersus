@@ -1,8 +1,8 @@
-import tersuslib::types;
-import tersuslib::map;
-import tersuslib::prelude;
-import tersuslib::eq;
-import tersuslib::clone;
+import std::core::types { List };
+import std::map { HashMap, findNth };
+import std::core::ownership { Clone };
+import std::eq { Eq };
+import std::prelude { Hash };
 
 // The library a program has when it mentions `HashSet` and does not declare it itself (see Pipeline.parseSource): it is parsed
 // before the program, after the prelude, the string library and the map library, so the program's line numbers are its own.
@@ -11,7 +11,7 @@ import tersuslib::clone;
 // hashing are the set's. A set is a value like a map: insert and remove give a new set, and the set owns its keys. What a
 // caller can rely on is the contracts on the count (insert adds at most one, remove takes at most one); that a key that
 // was inserted is found is true when a set runs, and the tests say so, but a caller cannot prove it from these contracts,
-// for the reason lib/map.tersus gives for maps.
+// for the reason lib/std/map/map.tersus gives for maps.
 
 struct HashSet<K> {
     map: HashMap<K, Bool>,

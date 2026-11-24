@@ -1,16 +1,35 @@
 module TestDeref (testDeref) where
 
+import MirEval (fromMirValue, runProgram)
+import MirHousekeeping (eraseGhosts, verifyProgram)
+import Modules (LoadResult (..))
+import qualified Modules
+import PackageCompile (compileModulesLinked)
+import Pipeline (compileModulesValidated, loadFromEntry)
 import Syntax
 import TestHarness
+import Utils
 
 -- Deref<T>: a type that holds another is looked through to it where a struct or an enum is looked at (a field, `is`, `as`, a
 -- `match`, the base of an update, `shrinks`), through the value its `deref` gives. A Box is looked through the same way by the
 -- language itself, since what it holds is not a field of it.
 testDeref :: Test
 testDeref =
-    let runs body expected = parseEvalProgramHelper body (Just expected)
-        valid = parseValidProgramHelper
-        rejected = parseValidateFailProgramHelper
+    -- (the programs bind their own Deref and Clone, so each is a package of its own, without std)
+    let inPackage body = Modules.resolverFromFiles [("app/package.tersus", "noPrelude = true;\nClone = main::Clone;\nDeref = main::Deref;"), ("app/main.tersus", body)]
+        snapshotOf body = case loadFromEntry (inPackage body) "app/main.tersus" of
+            Right (PackageResult pkg) -> Ok (Modules.packageSnapshot pkg)
+            Right _ -> Error "not a package"
+            Left e -> Error e
+        runs body expected = case snapshotOf body `bindResult` compileModulesLinked `bindResult` \p -> verifyProgram p `bindResult` \_ -> eraseGhosts p `bindResult` runProgram of
+            Ok result -> testAssertEq (fmap fromMirValue result) (Just expected)
+            Error e -> Just ("Evaluation failed with error: " ++ e)
+        valid body = case snapshotOf body `bindResult` compileModulesValidated of
+            Ok _ -> Nothing
+            Error e -> Just ("Validation failed with error: " ++ e)
+        rejected body expected = case snapshotOf body `bindResult` compileModulesValidated of
+            Ok _ -> Just "Validation passed when it should have failed"
+            result@(Error _) -> testAssertErrorContains expected result
         prelude =
             unlines
                 [ "trait Deref<T> { fn deref(self: &Self) -> T [{ }] [{ }]; };"

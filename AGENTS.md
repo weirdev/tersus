@@ -23,8 +23,8 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   (`src/Modules.hs`, with the module graph types in `src/PackageData.hs`).
   The other package modules are `src/Interface.hs` (what a checked module exposes to
   its importers), `src/LibPackage.hs` (the
-  compiler libraries compiled once as a synthetic `tersuslib` package, one
-  module per lib file, from the `PreludeSource` texts) and `src/Link.hs`
+  compiler libraries compiled once as the modules of the package `std`, from
+  the `PreludeSource` texts) and `src/Link.hs`
   (transporting the lowered modules to the native linker in `lib/mir/link/`,
   which merges units, completes environments and prunes unreachable definitions); `src/ElaborateRequest.hs` is the elaborator's requests and responses: a load of
   a program, a package or the compiler libraries, and one module given as
@@ -35,47 +35,38 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   to load, parse, resolve, select libraries and check (the package path in
   `src/PackageCompile.hs`), then lowers and links the modules with the
   libraries the elaborator selected.
-- `tersus/lib/` (Tersus sources the Haskell implementation depends on). The
-  first eight are the compiler libraries: each is compiled as one module of the
-  synthetic `tersuslib` package (`src/LibPackage.hs`) from its `PreludeSource`
-  text, selected per module by the elaborator by the rule of
-  `lib/elaborate/libraries.tersus` (which also picks the declarations a single file is
-  parsed with) on both the single-file and package paths:
-  - `types.tersus`: the structs `List` and `Box` that a list and a Box are
-    values of, imported for every program that does not declare `List` or
-    `Box`. Embedded by `PreludeSource`.
-  - `eq.tersus`: the trait `Eq` that `=` and `!=` call, and its impls for lists, arrays and Boxes, imported for every program that does not
-    declare a trait `Eq`. Embedded by `PreludeSource`.
-  - `clone.tersus`: the trait `Clone` that `clone(x)` and `x.clone()` call, and its impls for lists, arrays and Boxes, imported for every program that does not
-    declare a trait `Clone`. Embedded by `PreludeSource`.
-  - `prelude.tersus`: the traits `Sequence`, `Growable`, `Copy`, `Drop`,
-    `Deref` and `Hash` (with `hashCombine`), imported for a program that
-    mentions any of them (or `hashCombine`) and declares none of them;
-    declaring any prelude trait suppresses the prelude and with it `string`,
-    `map` and `set`. It imports `clone`. Embedded by `PreludeSource`.
-  - `string.tersus`: the struct `String` that a string literal is a value of,
-    imported for a program that writes a string literal or mentions `String`
-    and does not declare `String` or a trait `Format`, both of which it defines.
-    It imports `prelude`, `eq` and `clone`. Embedded by `PreludeSource`.
-  - `map.tersus`: the struct `HashMap` (and its `Entry`), imported for a
-    program that mentions `HashMap` (a `HashSet` pulls it in too). It imports
-    `prelude`, `eq` and `clone`. Embedded by `PreludeSource`.
-  - `set.tersus`: the struct `HashSet`, made of a map, imported for a program
-    that mentions `HashSet`. It imports `map`, `prelude`, `eq` and `clone`.
-    Embedded by `PreludeSource`.
-  - `thread.tersus`: the linear struct `Thread`, a closure started by
-    `Thread::spawn` and joined for its result, imported for a program that
-    mentions `Thread`. It imports nothing. Embedded by `PreludeSource`.
-  - `lists.tersus` and `box.tersus`: native-only List/Box helper modules of
-    the same synthetic `tersuslib` package. They import the types and traits
-    they use; `types.tersus` alone owns the structs and layout invariants.
-    `LibPackage` checks and lowers them separately, and `MirHousekeeping`
-    links them and erases their ghosts. Native code of the validator is made
-    with them, so they are built unvalidated, and the validator, once built,
-    validates them (with a List and a Box as the structs they are) before it is
-    used (`ValidatorNative.validatorExecutable`).
+- `tersus/lib/` (Tersus sources the Haskell implementation depends on).
+  `lib/std/` holds the compiler libraries: the ordinary package `std`, whose
+  modules are compiled once (`src/LibPackage.hs`) from their `PreludeSource`
+  texts under canonical names (`std$core$types$List`). Its `package.tersus`
+  binds the protocol roles: `List` and `Box` to `core::types`, `Clone`, `Copy`,
+  `Drop` and `Deref` to `core::ownership`, and `Eq` to `eq::Eq` (LANGUAGE.md,
+  "Protocol bindings"); a module provides only the roles its package's marker
+  binds. Until default prelude activation, the elaborator still selects the
+  libraries a module is given (`lib/elaborate/libraries.tersus`) on both the
+  single-file and package paths:
+  - `core/ownership`: the traits `Clone`, `Copy`, `Drop` and `Deref`.
+  - `core/types`: the structs `List` and `Box` that a list and a Box are values
+    of, with their layout invariants and their Drop impls.
+  - `core/clone`: the Clone impls of lists, arrays and Boxes.
+  - `eq/eq`: the trait `Eq` that `=` and `!=` call, and its impls for lists,
+    arrays and Boxes.
+  - `prelude/prelude`: the traits `Sequence`, `Growable` and `Hash` (with
+    `hashCombine`).
+  - `string/string`, `map/map` and `set/set`: `String` (and the trait `Format`),
+    `HashMap` (and its `Entry`) and `HashSet`, each importing what it uses from
+    `std` explicitly.
+  - `thread/thread`: the linear `Thread`, selected for programs that mention it.
+  - `lists/lists` and `box/box`: native-only List/Box helper modules, the
+    temporary storage-operation hooks. `LibPackage` checks and lowers them
+    separately; `MirHousekeeping` links them with `core`, which owns the structs
+    and their drops, and erases their ghosts. Native code of the validator is
+    made with them, so they are built unvalidated, and the validator, once
+    built, validates that raw program (with a List and a Box as the structs
+    they are) before it is used (`ValidatorNative.validatorExecutable`).
     `MirLists` links only the helper units native lowering needs, after user
-    validation. Their bodies and Drop impls are never implicit user imports.
+    validation, with core's List and Box drops in their erased form. Their
+    bodies are never implicit user imports.
   - `stdlib.tersus`: the standard library written in Tersus. Embedded by
     `PreludeSource` and parsed by `StdLibDefs`, which is where the builtins it
     declares get their contracts; it is not linked into user programs.

@@ -11,8 +11,10 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.Exit (ExitCode(..))
 import Mir
-import MirData (readLowered, readProgram, writeProgram, writeProgramWithGhosts, writeLowered)
-import MirHousekeeping (Tool(..), ownershipTool, monomorphizeWith, monomorphizeOwnershipWith, eraseGhosts, nativeProgram)
+import MirData (readCheckedLowered, readLowered, readProgram, writeOwnedProgram, writeOwnedProgramWithGhosts, writeProgramWithGhosts, writeLowered)
+import MirPass (programData)
+import Link (pruneProgram)
+import MirHousekeeping (Tool(..), ownershipTool, monomorphizeWith, monomorphizeOwnershipWith, eraseGhosts, nativeProgram, verifyProgram)
 import MirOwnershipData (ownershipInput, restoreOwnership)
 import Native (runWithInputFull)
 import qualified Syntax as S
@@ -56,8 +58,12 @@ stagedOwnership getTool pass original = do
         ToolFailed e -> pure (Error e)
         ToolInterpreted _ -> pure (Error "the ownership passes run natively only")
         ToolNative exe -> do
-            (code,out,errors) <- runWithInputFull exe ("pass " ++ pass ++ "\n" ++ writeProgramWithGhosts (ownershipInput original))
-            pure $ case code of
+            -- (given with the checked facts, as MirHousekeeping.ownershipPassWith gives them)
+            case writeOwnedProgramWithGhosts (ownershipInput original) of
+              Error e -> pure (Error e)
+              Ok owned -> do
+               (code,out,errors) <- runWithInputFull exe ("pass " ++ pass ++ "\n" ++ owned)
+               pure $ case code of
                 ExitFailure n -> Error ("the ownership tool exited with " ++ show n ++ ": " ++ trimEnd errors)
                 ExitSuccess
                     | trim out == "1" -> Error ("the ownership tool refused " ++ pass ++ ": " ++ trimEnd errors)
@@ -75,7 +81,7 @@ compareAdapters tool p = do
     wire (Ok value) = writeLowered (unit value)
 
 compareRaw :: IO Tool -> Program -> IO TestResult
-compareRaw tool p = case writeLowered (unit p) of
+compareRaw tool p = case programData p of
     Error e -> pure (Just e)
     Ok input -> compareRawInput tool input
 
@@ -86,9 +92,11 @@ compareRawInput tool input = do
         ToolNative exe -> do
             mono@(code,monoOut,monoErrors) <- runWithInputFull exe ("pass mono\n" ++ input)
             fused <- runWithInputFull exe ("pass mono-ownership\n" ++ input)
-            case (code,monoErrors,readLowered monoOut) of
-                (ExitSuccess,"",Ok value) -> do
-                    (ownedCode,ownedOut,ownedErrors) <- runWithInputFull exe ("pass ownership\n" ++ writeProgramWithGhosts (ownershipInput (lowProgram value)))
+            case (code,monoErrors,readCheckedLowered monoOut) of
+                (ExitSuccess,"",Ok value) -> case writeOwnedProgramWithGhosts (ownershipInput (lowProgram value)) of
+                  Error e -> pure (Just e)
+                  Ok ownedInput -> do
+                    (ownedCode,ownedOut,ownedErrors) <- runWithInputFull exe ("pass ownership\n" ++ ownedInput)
                     pure (testAssertEq fused (ownedCode,monoOut ++ ownedOut,ownedErrors))
                 _ -> pure (testAssertEq fused mono)
         ToolFailed e -> pure (Just e)
@@ -154,39 +162,35 @@ replyControls = case writeLowered (unit metadataProgram) of
 
 testMirMonoOwnershipFnShapesUsing :: Loader -> IO Tool -> Test
 testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusion"
-    [ TestCase "borrowed Fn contract, zero-field object and named wrapper" $ checked "fn-contract" 12 (lower fnContract)
-    , TestCase "FnMut preserves updates through the borrowed receiver" $ checked "fn-mut" 1202 (lower (closureCounter ++ "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; c = Counter { count: 0 }; r = twice(&mut c); return r * 100 + c.count;"))
+    [ TestCase "borrowed Fn contract, zero-field object and named wrapper" $ checked "fn-contract" 12 (lowerForFusion fnContract)
+    , TestCase "FnMut preserves updates through the borrowed receiver" $ checked "fn-mut" 1202 (lowerForFusion (closureCounter ++ "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; c = Counter { count: 0 }; r = twice(&mut c); return fusionIdentity(r * 100 + c.count);"))
     , TestCase "FnOnce consumes the receiver and owning argument" $ checked "fn-once" 5 (lower fnOnce)
-    , TestCase "a Copy capture inferred from its Fn bound preserves fused metadata" $ checked "closure-copy" 15 (lower "fn apply<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; n = 10; return apply(fn(x) => x + n, 5);")
+    , TestCase "a Copy capture inferred from its Fn bound preserves fused metadata" $ checked "closure-copy" 15 (lowerForFusion "fn apply<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; n = 10; return fusionIdentity(apply(fn(x) => x + n, 5));")
     , TestCase "a borrowed capture preserves its Fn body through fusion" $ checked "closure-borrow" 12 (lower "fn apply<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; xs = [1, 2]; f = fn(x: Int) -> Int => x + size(xs); return apply(&f, 10);")
-    , TestCase "an FnMut capture retains updates across both calls" $ checked "closure-mut" 1202 (lower "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; count = 0; c = fn() -> Int { count = count + 1; return count; }; return twice(&mut c) * 100 + count;")
+    , TestCase "an FnMut capture retains updates across both calls" $ checked "closure-mut" 1202 (lowerForFusion "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; count = 0; c = fn() -> Int { count = count + 1; return count; }; return fusionIdentity(twice(&mut c) * 100 + count);")
     , TestCase "an FnOnce capture retains ownership of its list" $ checked "closure-once" 2 (lower "fn useOnce<F: FnOnce() -> List<Int>>(f: F) -> Int { ys = f(); return size(ys); }; xs = [1, 2]; f = fn() -> List<Int> => xs; return useOnce(f);")
     , TestCase "an inferred cross-module capture keeps the no-generic ownership path" $ checkedWithGeneric False "closure-modules" 15
         (Package.compileModulesWith loader (Mod.Snapshot (Mod.resolverFromFiles
             [("app/package.tersus", ""), ("app/main.tersus", "import app::apply; n = 10; return apply::apply(fn(x) => x + n, 5);"), ("app/apply.tersus", "fn apply<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")]) "app/main.tersus" False)
             `bindResult` Package.lowerCompiledPackage)
-    , TestCase "unsupported cross-module Fn is refused before native passes" $ do
-        let forbidden = error "unsupported cross-module Fn acquired a native pass tool"
-            afterLowering run = case package of
-                Error e -> pure (Error e)
-                Ok p -> run forbidden p
-            expected = Error "in module app: Type error: apply needs F to implement Fn(...), and app$provider$provider$Adder does not" :: Result Program String
-        stagedResult <- afterLowering staged
-        fusedResult <- afterLowering monomorphizeOwnershipWith
-        pure (testAssertEq stagedResult expected <> testAssertEq fusedResult expected)
+    -- (an Fn impl of another module meets the bound: the traits a shape mints are the shape's in every module)
+    , TestCase "an imported module's Fn impl meets a bound through fusion" $ checked "closure-cross-module" 15 package
     ]
   where
     lower = lowerSourceUsing loader libPackage False True
+    lowerForFusion source = lower ("fn fusionIdentity<T>(x: T) -> T { return x; }; " ++ source)
     package = Package.compileModulesWith loader (Mod.Snapshot (Mod.resolverFromFiles moduleFiles) "app/main.tersus" False) `bindResult` Package.lowerCompiledPackage
     moduleFiles = [(path,case path of
         "app/main.tersus" -> "import app::apply; import app::provider; fn hold<F>(f: &F) -> &F from f [{ }] [{ }] { return f; }; a = provider::Adder { n: 10 }; return apply::apply(hold(&a), 5);"
         "app/apply.tersus" -> source
         _ -> source) | (path,source) <- closureModuleFiles]
         ++ [("app/provider/provider.tersus", closureAdder)]
-    fnContract = "struct Inc { }; impl Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] for Inc { fn call(self: &Self, x: Int) -> Int [{ }] [{ affirm return > x; }] { return x + 1; }; }; fn inc(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return x + 1; }; fn useIt<F: Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }]>(f: &F, x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return f(x); }; i = Inc { }; return useIt(&i, 5) + useIt(inc, 5);"
+    fnContract = "struct Inc { }; impl Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] for Inc { fn call(self: &Self, x: Int) -> Int [{ }] [{ affirm return > x; }] { return x + 1; }; }; fn inc(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return x + 1; }; fn useIt<F: Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }]>(f: &F, x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return f(x); }; i = Inc { }; return fusionIdentity(useIt(&i, 5) + useIt(inc, 5));"
     fnOnce = "struct Once { xs: List<Int> }; impl FnOnce(x: List<Int>) -> Int for Once { fn call(self: Self, x: List<Int>) -> Int { return size(self.xs) + size(x); }; }; fn useOnce<F: FnOnce(x: List<Int>) -> Int>(f: F, x: List<Int>) -> Int { return f(x); }; o = Once { xs: [1, 2] }; return useOnce(o, [3, 4, 5]);"
     checked = checkedWithGeneric True
-    checkedWithGeneric requireGeneric label wanted lowered = case lowered of
+    -- (native code is made of what the program reaches, as MirHousekeeping.nativeProgramUsing prunes it before the expansion:
+    -- std's core templates, which every program is given, are not part of a program that does not reach them)
+    checkedWithGeneric requireGeneric label wanted lowered = case lowered `bindResult` pruneProgram of
         Error e -> pure (Just (label ++ " lowering: " ++ e))
         Ok p -> do
             let generics program = [fnName fn | fn <- Map.elems (progFunctions program), not (null (fnTypeParams fn) && null (fnSizeParams fn))]
@@ -216,23 +220,25 @@ testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusio
                                     <> testAssertEq emitted (Ok (ExitSuccess,show wanted ++ "\n","")))
                             _ -> pure (Just (label ++ " staged/fused failure: " ++ show (expected,actual)))
     wireHash program = mapResult (fingerprint . pure) (writeLowered (unit program))
-    execute label program = do
-        selected <- tool
-        case selected of
-            ToolNative exe -> do
-                ir <- runWithInput exe (writeProgram program)
-                case ir of
-                    Error e -> pure (Error e)
-                    Ok text -> do
-                        directory <- getTemporaryDirectory
-                        bracket (openTempFile directory ("tersus-" ++ label)) (\(path,_) -> removeFile path) $ \(path,handle) -> do
-                            hClose handle
-                            made <- buildExecutableWith [] path text
-                            case made of
-                                Error e -> pure (Error e)
-                                Ok _ -> Ok <$> runWithInputFull path ""
-            ToolFailed e -> pure (Error e)
-            ToolInterpreted _ -> pure (Error "Fn native output requires a native emitter")
+    execute label program = case verifyProgram program `bindResult` \() -> writeOwnedProgram program of
+        Error e -> pure (Error e)
+        Ok wire -> do
+            selected <- tool
+            case selected of
+                ToolNative exe -> do
+                    ir <- runWithInput exe wire
+                    case ir of
+                        Error e -> pure (Error e)
+                        Ok text -> do
+                            directory <- getTemporaryDirectory
+                            bracket (openTempFile directory ("tersus-" ++ label)) (\(path,_) -> removeFile path) $ \(path,handle) -> do
+                                hClose handle
+                                made <- buildExecutableWith [] path text
+                                case made of
+                                    Error e -> pure (Error e)
+                                    Ok _ -> Ok <$> runWithInputFull path ""
+                ToolFailed e -> pure (Error e)
+                ToolInterpreted _ -> pure (Error "Fn native output requires a native emitter")
 
 landedOwnershipReceipt :: IO Tool -> IO TestResult
 landedOwnershipReceipt tool = case lowerSourceUsing bootstrapLoader libPackage False True source `bindResult` eraseGhosts `bindResult` nativeProgram of
@@ -240,13 +246,13 @@ landedOwnershipReceipt tool = case lowerSourceUsing bootstrapLoader libPackage F
     Ok program -> do
         raw <- compareRaw tool program
         selected <- tool
-        case (selected, writeLowered (unit program)) of
+        case (selected, programData program) of
             (ToolNative exe, Ok input) -> do
                 (monoCode, monoText, monoErrors) <- runWithInputFull exe ("pass mono\n" ++ input)
                 (fusedCode, fusedText, fusedErrors) <- runWithInputFull exe ("pass mono-ownership\n" ++ input)
                 actual <- monomorphizeOwnershipWith tool program
                 pure (raw <> testAssertEq monoCode ExitSuccess <> testAssertEq monoErrors ""
-                    <> testAssertTrue (case readLowered monoText of Ok _ -> True; Error _ -> False)
+                    <> testAssertTrue (case readCheckedLowered monoText of Ok _ -> True; Error _ -> False)
                     <> testAssertEq fusedCode ExitSuccess
                     <> testAssertEq fusedText (monoText ++ "1\n")
                     <> testAssertTrue ("still looks at a part of it that holds a value with a drop" `isInfixOf` fusedErrors)

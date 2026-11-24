@@ -3,7 +3,7 @@ import mir::full::full { FullProgram, fullAtForLink, printFull };
 import mir::full::tokens { integerAt, textAt, wordIs, quotedAt };
 import mir::full::read { recordAt };
 import mir::link::merge { LinkUnit, linkPrograms, completeSpecEnvs };
-import mir::link::prune { pruneProgram };
+import mir::reachability::prune { pruneProgram };
 import mir::link::fused { runFusedUnits, standaloneReply };
 
 fn isLinkRequest(lines: &List<List<Token>>) -> Bool ~ {
@@ -17,7 +17,7 @@ fn takeRows(lines: &List<List<Token>>, lo: Int, hi: Int) -> List<List<Token>> ~ 
 fn linkError(message: &String) -> Bool ~ { message.printError(); "\n".printError(); return false; };
 fn mergeRequest(lines: &List<List<Token>>, copies: Bool) -> Bool ~ {
     header = recordAt(lines, 1); count = integerAt(&header, 1);
-    if size(header) != 2 || !count.ok || count.value < 0 || count.value > size(lines) { return linkError("the linking request is not unit data"); };
+    if !(size(header) = 2 || copies && size(header) = 4) || !count.ok || count.value < 0 || count.value > size(lines) { return linkError("the linking request is not unit data"); };
     units = []; at = 2;
     for i in 0..count.value {
         row = recordAt(lines, at); sizeAt = 3; hasModule = false;

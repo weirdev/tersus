@@ -36,10 +36,13 @@ monoDifference expected actual
     | writeLowered (unitOf expected) /= writeLowered (unitOf actual) = Just "native mono reserializes differently"
     | otherwise = Nothing
 
+-- (master's oracle specializes data without checked records: the program is compared as that data writes it)
 compareWire :: Program -> IO TestResult
-compareWire original = case writeLowered (unitOf original) of
+compareWire checked = case writeLowered (unitOf original) of
     Error e -> pure (Just e)
     Ok input -> compareInput original input
+  where
+    original = checked{progProtocols = Map.empty, progOwnership = Nothing}
 
 compareInput :: Program -> String -> IO TestResult
 compareInput original input = do
@@ -274,7 +277,7 @@ metadataProgram = Program
     emptyFunction{fnSpec = metadataSpec, fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Ghost (Map.singleton "value" (Const (CInt 7))) (GhostValidation (S.ProofAssert (S.CTerm (S.VBool True)))), Assign (Local 0) (Use (Const (CInt 1)))] Return)}
     (Map.singleton "Unused" (["T"], [("ghost", TBlock (TParam "T"))]))
     (Map.singleton "Plain" [S.ProofAssert (S.CTerm (S.VBool True))])
-    Map.empty Map.empty Map.empty
+    Map.empty Map.empty Map.empty Map.empty Nothing
   where
     metadataSpec = emptySpec{specEnv = Map.singleton "builtin" (Const (CFn "plain")), specWrites = ["x"], specMutParams = ["x"], specFrom = ["x"]}
 

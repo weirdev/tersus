@@ -161,7 +161,7 @@ forwarding = realTemplate "forward" $ unlines
 
 fixture :: [M.PackLoop] -> M.Function -> M.Program
 fixture loops f = M.Program Map.empty (Map.singleton "fixture" f) entry Map.empty Map.empty
-    (Map.singleton "fixture" (M.BoundedFn [] [] [] loops)) Map.empty Map.empty
+    (Map.singleton "fixture" (M.BoundedFn [] [] [] loops [])) Map.empty Map.empty Map.empty Nothing
   where
     entry = M.Function "main" [] Nothing Map.empty (Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)) [] [] [] [] [] M.emptySpec
 
@@ -229,7 +229,7 @@ boxedCaptureThunk name = (function [M.Local 1] [(TInt, Nothing), (TInt, Nothing)
 boxedCaptureLoop :: M.Operand -> M.Program
 boxedCaptureLoop operand = p
     { M.progFunctions = Map.insert "thunk" ((boxedCaptureThunk "thunk"){M.fnTypeParams = ["T"]}) (M.progFunctions p)
-    , M.progBounded = Map.insert "thunk" (M.BoundedFn [] [] [] []) (M.progBounded p)
+    , M.progBounded = Map.insert "thunk" (M.BoundedFn [] [] [] [] []) (M.progBounded p)
     , M.progInstances = Map.fromList
         [ ("fixtureAtInts", ("fixture", [ArgType TInt, ArgType TInt]))
         , ("thunkAlias", ("thunk", [ArgType TInt])), ("thunkLast", ("thunk", [ArgType TInt]))

@@ -5,17 +5,17 @@ import data::reader::reader { parseAstLines, readAstRecords, readRecord, readRec
 import elaborate::builtins { loadBuiltins };
 import elaborate::check { checkStatements, fnSigOf, functionValue, localScopes, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
-import elaborate::libraries { Catalog, Hide, Lib, Probe, declaredNames, localName, shapedLibraries, definedFunctions, entryOf, implsEq, libIndex, librariesFor, needsDropTrait, ownEq, probeModule, readCatalog, sameEq, seenLibraries, topTypeNames, viewOf };
+import elaborate::libraries { Catalog, Hide, Lib, Probe, catalogPackage, declaredNames, hideKey, localName, definedFunctions, entryOf, libIndex, librariesFor, needsDropTrait, probeModule, readCatalog, seenLibraries, topTypeNames, viewOf };
 import elaborate::decls { fileDeclarations };
 import elaborate::resolve { Decl, Imp, Line, Maps, PFile, Pkg, countAt, finishPackage, mapsFor, moduleKey, noPackage, readLine, startsWithByte, wordIs };
-import elaborate::rewrite { Prepared, prepareModule };
+import elaborate::rewrite { Prepared, declaredTypeNames, prepareModule, storageBound };
 import elaborate::out { emit, emitStatements, emitTypes, hexText, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { CtorInfo, FnSig, Generic, ImplArgs, St, TE, Template, indexIn, intText, noBoundedParts, notModelled, oneScope , protocolName };
+import elaborate::state { Way, CtorInfo, FnSig, Generic, ImplArgs, St, TE, Template, indexIn, intText, noBoundedParts, notModelled, oneScope , protocolName };
 import data::codec::codec { wireRoles };
 import data::reader::reader { before };
-import elaborate::wire { wireBindDeclarations, wireComplete, wireEntries, wireLoad, wireOwnerBindings, wireStorageDeclarations, wireValidateBindings, wireWrapInterface };
+import elaborate::wire { wireComplete, wireOwnBindings, wireEntries, wireLoad, wireOwnerBindings, wireValidateBindings, wireWrapInterface };
 import elaborate::traits { argListOf, boundsOf, checkDefinitions, emitInstances, isClosureValue };
 import elaborate::units { answerLoad };
 import elaborate::lowerout { MirOut, lowerUnit, noMir };
@@ -26,7 +26,7 @@ import elaborate::lowerout { MirOut, lowerUnit, noMir };
 fn newState() -> St ~ {
     return St {
         nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0, localNames: HashMap::new(), rewrittenNodes: [], trialRound: false,
-        wireVersion: false, wireProtocols: HashMap::new(), wireOwnership: HashMap::new(), unitKey: "",
+        wireVersion: false, wireProtocols: HashMap::new(), wireOwnership: HashMap::new(), unitKey: "", templateFacts: [], ordinaryFrames: [], ownTypes: HashSet::new(), genericCalls: [], genericBodies: HashMap::new(), genericNested: [], way: Way { functions: [], params: [], given: [] },
         types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(),
         traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), traitSelf: [], inTrait: false, assoc: HashMap::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), ownerViews: [], logging: false, implDefined: [], ghostCache: HashMap::new(), refCache: HashMap::new(), storeCache: HashMap::new(), boundedParts: noBoundedParts(), big: [], undo: [], sizeUndo: [], templates: HashMap::new(), references: HashMap::new(), referenceList: [], boundStubs: HashMap::new(), boundStubSigs: [], builtinStubs: HashSet::new(), genericOut: [], genericTypes: [], fns: HashMap::new(), scopes: oneScope(),
         ret: 0 - 1, programReturn: 0 - 1, sizeScope: [], typeScope: [], readOnly: [], mutParams: [], writes: [], aliasNames: [], aliasPlaces: [], originNames: [], originRoots: [], refResultNames: [], refResultParams: [], refResultFroms: [], resultFrom: [], params: [], current: "", inGhost: false,
@@ -111,7 +111,7 @@ fn loadInterface(st: St, iface: &AstProgram, base: Int, collectBindings: Bool) -
     // (the library's Sequence and Growable, by the module that declares them, not by their names)
     moduNode = nodeIn(nodes, v.modu);
     preludeModule = false;
-    if (nameText(nodes, v.pkg) = "std" || nameText(nodes, v.pkg) = "tersuslib") && moduNode is AstNode::OptName && (moduNode as AstNode::OptName).value is AstOptName::SomeName {
+    if nameText(nodes, v.pkg) = "std" && moduNode is AstNode::OptName && (moduNode as AstNode::OptName).value is AstOptName::SomeName {
         preludeModule = nameText(nodes, ((moduNode as AstNode::OptName).value as AstOptName::SomeName).n) = "prelude";
     };
     for e in listItems(nodes, v.types) {
@@ -480,30 +480,22 @@ fn statementsOf(program: &Program) -> List<Int> ~ {
 // status 1: the request does not give a library whole
 struct Given { st: St, bases: HashMap<String, Int>, status: Int };
 
-fn giveLibraries(st: St, catalog: &Catalog, selected: &List<String>, stmts: &List<Int>, seen: &HashMap<String, AstProgram>, inPackage: Bool, key: &String, spelled: Bool) -> Given ~ {
+fn giveLibraries(st: St, catalog: &Catalog, selected: &List<String>, stmts: &List<Int>, seen: &HashMap<String, AstProgram>, inPackage: Bool, key: &String, boundRoles: &List<String>) -> Given ~ {
     if st.status != 0 { return Given { st: st, bases: noBases(), status: 0 }; };
-    replaced = ownEq(&st.nodes, stmts) >= 0;
-    names = [];
-    for w in seenLibraries(&catalog.libs, selected) { if !replaced || w != "eq" { names = push(names, clone(w)); }; };
+    names = seenLibraries(&catalog.libs, selected);
     views = [];
     for w in &names {
         lib = libraryProgram(&catalog.libs, w, seen);
         if !lib.ok { return Given { st: st, bases: noBases(), status: 1 }; };
         views = push(views, lib.value);
     };
-    if replaced && !eqKept(&st.nodes, stmts, &views, &catalog.libs, seen) {
-        message = "Type error: a replacement Eq used with cached library implementations must have exactly the library Eq's parameters, method signatures and contracts";
-        if inPackage { message = catStrings(catStrings(catStrings("in module ", key), ": "), message); };
-        return Given { st: unresolvedState(st, message), bases: noBases(), status: 0 };
-    };
-    hide = ownDeclarations(&st.nodes, stmts, inPackage, spelled);
+    hide = ownDeclarations(&st.nodes, stmts, inPackage, boundRoles);
     loaded = loadViews(st, &views, &names, &catalog.libs, &hide);
-    dropLib = "prelude";
-    if libIndex(&catalog.libs, "core") >= 0 { dropLib = "core"; };
+    dropLib = "core";
     if !inPackage || !needsDropTrait(&loaded.st.nodes, stmts) || indexIn(selected, &dropLib) >= 0 || libIndex(&catalog.libs, &dropLib) < 0 { return loaded; };
     prelude = libraryProgram(&catalog.libs, &dropLib, seen);
     if !prelude.ok { return Given { status: 1, ..loaded }; };
-    dropHide = Hide { declared: HashSet::new(), own: [], dropOnly: true, spelled: false };
+    dropHide = Hide { declared: HashSet::new(), own: [], dropOnly: true, providers: HashSet::new(), boundRoles: [] };
     dropOnly = viewOf(&prelude.value, &dropHide);
     st = appendInterface(loaded.st, &dropOnly.program);
     base = st.n;
@@ -511,21 +503,13 @@ fn giveLibraries(st: St, catalog: &Catalog, selected: &List<String>, stmts: &Lis
     return Given { st: st, bases: loaded.bases, status: 0 };
 };
 
-fn eqKept(nodes: &List<AstNode>, stmts: &List<Int>, views: &List<AstProgram>, libs: &List<Lib>, seen: &HashMap<String, AstProgram>) -> Bool ~ {
-    retains = false;
-    for v in views { retains = retains || implsEq(v); };
-    if !retains { return true; };
-    eq = libraryProgram(libs, "eq", seen);
-    return eq.ok && sameEq(nodes, ownEq(nodes, stmts), &eq.value);
-};
-
-fn ownDeclarations(nodes: &List<AstNode>, stmts: &List<Int>, inPackage: Bool, spelled: Bool) -> Hide ~ {
+fn ownDeclarations(nodes: &List<AstNode>, stmts: &List<Int>, inPackage: Bool, boundRoles: &List<String>) -> Hide ~ {
     own = [];
     if inPackage { own = topTypeNames(nodes, stmts); } else { own = declaredNames(nodes, stmts); };
     for d in definedFunctions(nodes, stmts) { own = push(own, clone(d)); };
     ownSet = HashSet::new();
-    for o in &own { if spelled { ownSet = ownSet.insert(localName(o)); } else { ownSet = ownSet.insert(clone(o)); }; };
-    return Hide { declared: ownSet, own: own, dropOnly: false, spelled: spelled };
+    for o in &own { ownSet = ownSet.insert(hideKey(o)); };
+    return Hide { declared: ownSet, own: own, dropOnly: false, providers: HashSet::new(), boundRoles: clone(boundRoles) };
 };
 
 // (a library interface the module sees whole is read where a defining context that carries it again reads it; one it
@@ -537,6 +521,13 @@ fn loadViews(st: St, views: &List<AstProgram>, names: &List<String>, libs: &List
         lib = get(views, k);
         view = viewOf(&lib, hide);
         if view.changed {
+            // (a name the module declares itself hides the library's declaration of it, not the library's providers: a
+            // module's own List is not the list the language's syntax makes)
+            if st.wireVersion {
+                libRoot = nodeIn(&lib.nodes, lib.root);
+                st = wireLoad(st, &lib, &libRoot, true);
+                if st.status != 0 { return Given { st: st, bases: bases, status: 0 }; };
+            };
             st = appendInterface(st, &view.program);
             base = st.n;
             st = loadInterface(st, &view.program, base, true);
@@ -567,7 +558,10 @@ struct Unit {
     pkgName: String, modu: String, hasModule: Bool, predeclaring: Bool, viewing: Bool, extracting: Bool, libExtract: Bool,
     ifaces: List<AstProgram>, ifaceKeys: List<String>, definitions: List<List<AstProgram>>, definitionKeys: List<List<String>>,
     hasCatalog: Bool, catalog: Catalog, pkg: Pkg, stdPkg: Pkg, program: Program,
-    wireVersion: Bool, wireProtocols: HashMap<String, List<String>>
+    wireVersion: Bool, wireProtocols: HashMap<String, List<String>>,
+    // (ownRoles/ownProviders: the roles the package marker binds to this module's declarations, the only roles it
+    // provides; boundMsg: why a binding of the module names none of them; packageRoles: the roles the marker binds at all)
+    ownRoles: List<String>, ownProviders: List<String>, boundMsg: String, packageRoles: List<String>
 };
 
 // What a request of version 2 says it is: its explicit protocol providers (AST_DATA.md, "Ownership transport")
@@ -608,17 +602,17 @@ fn readProtocols() -> Protocols ~ {
 // status: St.status, or -1 when the request does not give a library it names
 // lowered: 0 when the module was not lowered, 1 when mir holds its MIR, 2 when the lowering refused it (mir.msg)
 // (storage: the checked List, Box and Copy providers, which the lowering gives the list and Box syntax and Copy bounds of declarations)
-struct Answer { status: Int, msg: String, out: AstProgram, iface: AstProgram, facts: AstProgram, extracting: Bool, selected: List<String>, storage: List<String>, unitKey: String, lowered: Int, mir: MirOut };
+struct Answer { status: Int, msg: String, out: AstProgram, iface: AstProgram, facts: AstProgram, extracting: Bool, selected: List<String>, storage: List<String>, templateFacts: List<String>, ordinaryFrames: List<String>, unitKey: String, lowered: Int, mir: MirOut };
 
 fn unitAnswer(st: &St, out: AstProgram, iface: AstProgram, facts: AstProgram, extracting: Bool, selected: List<String>) -> Answer ~ {
     storage = push(push(push([], protocolName(st, "List")), protocolName(st, "Box")), protocolName(st, "Copy"));
-    return Answer { status: st.status, msg: clone(st.msg), out: out, iface: iface, facts: facts, extracting: extracting, selected: selected, storage: storage, unitKey: clone(st.unitKey), lowered: 0, mir: noMir("") };
+    return Answer { status: st.status, msg: clone(st.msg), out: out, iface: iface, facts: facts, extracting: extracting, selected: selected, storage: storage, templateFacts: clone(st.templateFacts), ordinaryFrames: clone(st.ordinaryFrames), unitKey: clone(st.unitKey), lowered: 0, mir: noMir("") };
 };
 
 fn noProgram(stage: String) -> AstProgram ~ { return AstProgram { stage: stage, nodes: [], root: 0 }; };
 
 fn malformedAnswer() -> Answer ~ {
-    return Answer { status: 0 - 1, msg: "", out: noProgram("elaborated"), iface: noProgram("interface"), facts: noProgram("ownership"), extracting: false, selected: [], storage: [], unitKey: "", lowered: 0, mir: noMir("") };
+    return Answer { status: 0 - 1, msg: "", out: noProgram("elaborated"), iface: noProgram("interface"), facts: noProgram("ownership"), extracting: false, selected: [], storage: [], templateFacts: [], ordinaryFrames: [], unitKey: "", lowered: 0, mir: noMir("") };
 };
 
 fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, AstProgram>) -> Answer ~ {
@@ -637,13 +631,19 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     chosen = [];
     available = catalogNames(&catalog);
     if unit.hasCatalog {
-        for w in seenLibraries(&catalog.libs, shapedLibraries(&available, librariesFor(&probe))) { if ownEq(&program.nodes, &raw) < 0 || w != "eq" { chosen = push(chosen, clone(w)); }; };
+        // (a package whose marker binds Eq has that Eq, and std's would be another provider)
+        for w in seenLibraries(&catalog.libs, librariesFor(&probe)) { if w != "eq" || indexIn(&unit.packageRoles, "Eq") < 0 { chosen = push(chosen, clone(w)); }; };
     };
     preparing = withLibraryImports(&pkg, &unit.stdPkg, &chosen, &modKey, &unit.pkgName, &program.nodes, &raw);
-    prepared = preparedProgram(program, raw, &preparing, &modKey);
+    prepared = preparedProgram(program, clone(raw), &preparing, &modKey);
+    // (a program keeps the order it is written in, as without the std imports it is given: only a package's modules are ordered
+    // declarations first)
+    if !pkg.present && preparing.present && prepared.ok { prepared = Prepared { stmts: clone(raw), ..prepared }; };
     stmts = prepared.stmts;
-    st = St { nodes: prepared.nodes, unitKey: hexText(&modKey), wireVersion: unit.wireVersion, wireProtocols: clone(unit.wireProtocols), storageCopies: unit.libExtract && (unit.pkgName = "std" || unit.pkgName = "tersuslib") && unit.hasModule && (unit.modu = "lists" || unit.modu = "box"), ..st };
-    if unit.libExtract && unit.hasModule && (unit.pkgName = "std" || unit.pkgName = "tersuslib") && unit.modu = "prelude" {
+    own = HashSet::new();
+    for n in declaredTypeNames(&prepared.nodes, &stmts) { own = own.insert(clone(n)); };
+    st = St { ownTypes: own, nodes: prepared.nodes, unitKey: hexText(&modKey), wireVersion: unit.wireVersion, wireProtocols: clone(unit.wireProtocols), storageCopies: unit.libExtract && unit.pkgName = "std" && unit.hasModule && (unit.modu = "lists" || unit.modu = "box"), ..st };
+    if unit.libExtract && unit.hasModule && unit.pkgName = "std" && unit.modu = "prelude" {
         for s in &stmts {
             stmt = stmtOf(&st, s);
             if stmt is AstStatement::TraitDef {
@@ -653,13 +653,15 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
         };
     };
     if !prepared.ok { st = unresolvedState(st, prepared.msg); };
+    if prepared.ok && size(unit.boundMsg.bytes) > 0 { st = unresolvedState(st, clone(unit.boundMsg)); };
     st = localScopes(st, &stmts);
     scopedStmts = listItems(&st.nodes, st.nid);
     st = St { localNames: HashMap::new(), ..st };
     st = loadBuiltins(st, table);
     selected = [];
-    if unit.hasCatalog && st.status = 0 { selected = shapedLibraries(&available, librariesFor(&probe)); };
-    given = giveLibraries(st, &catalog, &selected, &stmts, seenBlocks, pkg.present, &modKey, unit.stdPkg.present);
+    // (selected among the libraries the module is given)
+    if unit.hasCatalog && st.status = 0 { for n in librariesFor(&probe) { if indexIn(&available, &n) >= 0 && (n != "eq" || indexIn(&unit.packageRoles, "Eq") < 0) { selected = push(selected, clone(n)); }; }; };
+    given = giveLibraries(st, &catalog, &selected, &stmts, seenBlocks, pkg.present, &modKey, &unit.packageRoles);
     if given.status = 1 { return malformedAnswer(); };
     bases = clone(given.bases);
     st = givenState(given);
@@ -695,8 +697,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     };
     if st.status = 0 {
         if st.wireVersion {
-            st = wireBindDeclarations(st, &stmts);
-            st = wireStorageDeclarations(st, &stmts);
+            st = wireOwnBindings(st, &unit.ownRoles, &unit.ownProviders);
             st = wireValidateBindings(st);
         };
         st = gatherSignatures(st, &stmts);
@@ -714,7 +715,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
         types = clone(st.te.types);
         st = checkDefinitions(st);
         // (the checked ownership facts select their callees through templateReference, so emitInstances names them too)
-        if st.status = 0 && st.wireVersion { st = wireBindDeclarations(st, &stmts); st = wireComplete(st); };
+        if st.status = 0 && st.wireVersion { st = wireOwnBindings(st, &unit.ownRoles, &unit.ownProviders); st = wireComplete(st); };
         // (the program is the Instance records of the copies it names and the functions bounds give, its statements, and
         // the checked bodies of its functions with bounds, whose expression types follow its own)
         st = emitInstances(st);
@@ -751,10 +752,32 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
                 st = extractInterface(st, unit.libExtract, clone(unit.pkgName), clone(unit.modu), unit.hasModule, &stmts, &elaborated);
                 if st.status = 0 && st.wireVersion { st = wireWrapInterface(st, st.nid); };
                 if st.status = 0 { iface = reorderArena(&st.nodes, st.nid, "interface"); };
+                if st.status = 0 && st.wireVersion {
+                    bound = interfaceStorage(&st, iface);
+                    if !bound.ok { st = notModelled(st, "an interface type that is not written whole with its checked List and Box providers"); };
+                    iface = bound.value;
+                };
             };
         };
     };
     return unitAnswer(&st, out, iface, facts, unit.extracting, selected);
+};
+
+// The interface with the language's list and Box written as the module's checked providers (rewrite.storageBound), so
+// that what reads it names the declarations they are
+fn interfaceStorage(st: &St, iface: AstProgram) -> Parsed<AstProgram> ~ {
+    list = protocolName(st, "List");
+    box = protocolName(st, "Box");
+    nodes = [];
+    for node in &iface.nodes {
+        if node is AstNode::Type {
+            t = clone((node as AstNode::Type).value);
+            b = storageBound(&t, &list, &box);
+            if !b.ok { return Parsed<AstProgram> { value: noProgram("interface"), pos: 0, ok: false }; };
+            nodes = push(nodes, AstNode::Type { value: b.value });
+        } else { nodes = push(nodes, clone(node)); };
+    };
+    return Parsed<AstProgram> { value: AstProgram { stage: clone(iface.stage), nodes: nodes, root: iface.root }, pos: 0, ok: true };
 };
 
 fn printAnswer(a: &Answer) -> Int ~ {
@@ -800,7 +823,7 @@ fn withMir(a: Answer, ifaces: &List<AstProgram>, table: &AstProgram) -> Answer ~
         root = nodeIn(&iface.nodes, iface.root);
         if root is AstNode::OwnershipInterface { plain = push(plain, reorderArena(&iface.nodes, (root as AstNode::OwnershipInterface).base, "interface")); } else { plain = push(plain, clone(iface)); };
     };
-    m = lowerUnit(&a.out, &plain, table, &a.storage, &a.unitKey);
+    m = lowerUnit(&a.out, &plain, table, &a.storage, &a.unitKey, &a.templateFacts, &a.ordinaryFrames);
     lowered = 2;
     if m.ok { lowered = 1; };
     return Answer { lowered: lowered, mir: m, ..a };
@@ -874,12 +897,31 @@ fn answerModule(moduleLine: &Line, version2: Bool) -> Int ~ {
     extracting = !wordIs(&extract, 1, "none");
     if (!predeclaring && !wordIs(&predeclare, 1, "false")) || (!viewing && !wordIs(&library, 1, "false")) || (extracting && !wordIs(&extract, 1, "module") && !wordIs(&extract, 1, "lib")) { return malformed(); };
     loweringIfaces = clone(ifaces);
+    given = sections.given;
+    givenLibs = clone(sections.catalog.libs);
+    stdPkg = noPackage();
+    if sections.given {
+        stdPkg = catalogPackage(&sections.catalog);
+        if !stdPkg.ok { return malformed(); };
+    };
     unit = Unit { pkgName: pkgName, modu: modu, hasModule: hasModule, predeclaring: predeclaring, viewing: viewing, extracting: extracting, libExtract: wordIs(&extract, 1, "lib"),
         ifaces: ifaces, ifaceKeys: ifaceKeys, definitions: definitions, definitionKeys: definitionKeys,
-        hasCatalog: sections.given, catalog: sections.catalog, pkg: sections.pkg, stdPkg: noPackage(), program: sections.program,
-        wireVersion: wire.version, wireProtocols: wire.protocols };
+        hasCatalog: sections.given, catalog: sections.catalog, pkg: sections.pkg, stdPkg: stdPkg, program: sections.program,
+        wireVersion: wire.version, wireProtocols: wire.protocols, ownRoles: [], ownProviders: [], boundMsg: "", packageRoles: [] };
     answer = elaborateUnit(&table.value, unit, &seenBlocks);
     if answer.status < 0 { return malformed(); };
+    // (lowered with the interfaces of the libraries it selected, as a program is: units)
+    if given && answer.status = 0 {
+        for n in seenLibraries(&givenLibs, &answer.selected) {
+            i = libIndex(&givenLibs, &n);
+            if i >= 0 && i < size(givenLibs) {
+                lib = get(&givenLibs, i);
+                parsed = parseAstLines(&lib.lines);
+                if !parsed.ok { return malformed(); };
+                loweringIfaces = push(loweringIfaces, parsed.value);
+            };
+        };
+    };
     answer = withMir(answer, &loweringIfaces, &table.value);
     printAnswer(&answer);
     return 0;

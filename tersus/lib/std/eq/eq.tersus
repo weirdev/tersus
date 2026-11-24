@@ -1,4 +1,4 @@
-import tersuslib::types;
+import std::core::types { List, Box };
 
 // What makes `=` and `!=` work on a type: a program that compares two values has this library in front of it (Pipeline.libraries), unless it declares
 // a trait `Eq` itself. `a = b` in code is `Eq::eq(a, b)`, and `a != b` is `!Eq::eq(a, b)`, for every type but Int, Byte, Bool, the fixed-width
