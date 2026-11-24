@@ -563,9 +563,9 @@ testMirStructure =
         , -- A write through a reborrow of a reference goes through the reborrow, and one through the reference through the reference
           withSourceMir "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; q = w.r; p = &mut *q; *p = 2; *q = 1; return x; }; return f(1);" $ \p ->
             testAssertEq (map (`isInfixOf` M.renderProgram p) ["_6 = &mut _5;", "_6 := const 2;", "_5 := const 1;"]) [True, True, True]
-        , -- A write through a borrow of an owner is a write of the owner
+        , -- A write through a borrow of an owner goes through the borrow, not to the owner
           withSourceMir "fn f(c: Int) -> Int { x = 1; q = &mut x; *q = 2; return x; }; return f(1);" $ \p ->
-            testAssertTrue ("_2 := const 2;" `isInfixOf` M.renderProgram p)
+            testAssertEq (map (`isInfixOf` M.renderProgram p) ["_3 = &mut _2;", "_3 := const 2;", "_2 := const 2;"]) [True, True, False]
         , -- A reborrow of a reference held in a field is made of the reference read out of it, not of the field
           withSourceMir "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; p = &mut *w.r; *p = 5; return x; }; return f(1);" $ \p ->
             testAssertEq (map (`isInfixOf` M.renderProgram p) ["_5 = (_4 as W).r;", "_6 = &mut _5;", "_6 := const 5;", "_4.r"]) [True, True, True, False]

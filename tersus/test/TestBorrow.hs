@@ -41,6 +41,16 @@ testBorrow =
             "testBorrow"
             [ loanTableCases
             , permissionCases
+            , rootedWriteCases
+            , TestList
+                "writes through a reference local, validated"
+                [ testCase "a write through a reference is a write of what it is to" (checks "x = 0; q = &mut x; *q = 5; affirm x = 5; return x;" 5)
+                , testCase "and so is one through the reference it was given on to" (checks "x = 0; q = &mut x; p = q; *p = 5; affirm x = 5; return x;" 5)
+                , testCase "and one in each branch" (checks "fn f(c: Int) -> Int { x = 0; q = &mut x; if c > 0 { *q = 1; } else { *q = 2; }; affirm x >= 1; return x; }; return f(1) * 10 + f(0);" 12)
+                , testCase "and one to a field in a loop" (checks "struct P { a: Int, b: Int }; p = P { a: 0, b: 7 }; q = &mut p; i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { (*q).a = (*q).a + 1; i = i + 1; }; return p.a * 10 + p.b;" 37)
+                , testCase "a Box's payload is written through a reborrow of it" (checks "b = Box::new(1); p = &mut *b; *p = 5; return Box::unbox(b);" 5)
+                , testCase "a place written through a held reference is borrowed again once the holder is dead" (checks "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 0; w = W { r: &mut x }; *w.r = 1; q = &mut x; *q = *q + 2; return x; }; return f(1);" 3)
+                ]
             , TestList
                 "lending"
                 [ testCase "a list is lent" (runs (total ++ "l = push(push([], 3), 4); return total(l);") (VInt 7))
@@ -529,6 +539,34 @@ undeclaredHolder = case parseStatementBlock source of
   where
     source = "struct HB { n: Int }; fn put<T>(h: &mut HB, r: &mut Int, t: T) -> Int { return 0; }; fn f(c: Int) -> Int { x = 1; h = HB { n: 0 }; k = put(&mut h, &mut x, 0); v = x; return v + h.n; }; return f(1);"
     withoutDeclaration lowered = lowered{M.lowProgram = (M.lowProgram lowered){M.progTypes = Map.delete "HB" (M.progTypes (M.lowProgram lowered))}}
+
+-- A write through a reference local is rooted at that local (MIR.md, Writes through references), so the move check sees
+-- which reference it goes through and lets no other borrower of the place off
+rootedWriteCases :: Test
+rootedWriteCases = TestList "writes rooted at the reference written through"
+    [ testCase "lowering roots a write to a field through a reference at the reference" (rootOfWrite "struct P { a: Int, b: Int }; p = P { a: 1, b: 2 }; q = &mut p; (*q).a = 5; return p.a;" "q")
+    , testCase "a write through a moved reference is a use of it" (requireError "q was moved" (check (borrowX ++ [set 4 (M.Use (M.Move (l 3))), M.AssignRef (l 3) [] five, set 6 (M.Deref (cp 4))])))
+    , testCase "a write through the reference it was moved to is not" (testAssertEq [] (check (borrowX ++ [set 4 (M.Use (M.Move (l 3))), M.AssignRef (l 4) [] five, set 6 (M.Deref (cp 4))])))
+    , testCase "a write to the owner while an update borrow of it is live is refused" (requireError "x is borrowed by q, so it cannot be changed through another reference while that borrow is live" (check (borrowX ++ [M.AssignRef (l 1) [] five, set 6 (M.Deref (cp 3))])))
+    , testCase "a write to the owner after the borrow's last use is not" (testAssertEq [] (check (borrowX ++ [M.AssignRef (l 3) [] five, M.AssignRef (l 1) [] five])))
+    , testCase "nor does a later write to the owner keep the borrow live" (testAssertEq [] (check (borrowX ++ [M.AssignRef (l 3) [] five, set 6 (M.Use (cp 1)), M.AssignRef (l 1) [] five])))
+    ]
+  where
+    l = M.Local
+    cp = M.Copy . l
+    set n = M.Assign (l n)
+    five = M.Use (M.Const (M.CInt 5))
+    borrowX = [set 1 (M.Use (M.Const (M.CInt 0))), set 3 (M.Borrow (l 1) [] True)]
+    decls = Map.fromList [(l n, M.LocalDecl ty (Just name)) | (n, ty, name) <- [(1, TInt, "x"), (3, TMutRef TInt, "q"), (4, TMutRef TInt, "p"), (6, TInt, "v")]]
+    check ss = checkMoves Set.empty Set.empty Set.empty (M.Program Map.empty Map.empty (M.Function "writes" [] Nothing decls (Map.fromList [(M.BlockId 0, M.BasicBlock ss M.Unreachable)]) [] [] [] [] [] M.emptySpec) Map.empty Map.empty Map.empty Map.empty)
+    requireError msg es = if any (isInfixOf msg) es then Nothing else Just ("Expected " ++ show msg ++ "; got " ++ show es)
+    rootOfWrite source name = case parseStatementBlock source of
+        Left err -> Just ("Parse error: " ++ err)
+        Right stmts -> case elaborateStatements stmts of
+            Error e -> Just e
+            Ok lowered ->
+                let main = M.progMain (M.lowProgram lowered)
+                 in testAssertEq [Just name] [Map.lookup root (M.fnLocals main) >>= M.localName | M.BasicBlock ss _ <- Map.elems (M.fnBlocks main), M.AssignRef root _ _ <- ss]
 
 loanTableCases :: Test
 loanTableCases = TestList "MIR loan rules"

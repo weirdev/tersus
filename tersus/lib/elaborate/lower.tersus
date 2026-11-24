@@ -4,7 +4,7 @@ import elaborate::loweriface { stubFunction };
 import elaborate::records { codecSizeAt, codecTypeAt, listItems, nameText, nativeFn, nodeIn, signatureOf };
 import elaborate::state { intText };
 import elaborate::lowerstate { PackLoopRec, simpleType, lwMalformed, Swapped, swapBuilder, Binding, GenericRec, LBlock, LDecl, LFn, LoopRec, LowSt, BoundedRec, Rv, Stmt, TDecl, Term, argOf, claim, defaultTy, forNameOf, fromCodecTy, functionType, hasInt, hasText, intAt, isMutRefTy, isRefTy, lfail, lwCat, lwCat3, lwInstanceText, lwKind, lwBaseName, lwSort, lwTextAt, newBuilder, quote, renderTy, lwSizeTokens, lwSp, tyOf, tyText, typeNameOf, unrefTy, Sig };
-import elaborate::lowerbuild { binaryRv, copyOp, listRv, opText, packReadMark, tempLocal, validationReadsPack, assignStmt, bindName, bodyOf, borrowRv, constOp, definedFunction, emitAssign, emitStmt, emptyBlockPayload, enterScope, exprAt, fnConst, ghostHere, ghostStmt, gotoTerm, isFunct, isVarExpr, leaveScope, localBinding, lookupBinding, namesOf, newBlock, newLocal, openBlock, positionStmt, returnTerm, rvText, setDecl, setGlobal, stepsText, stmtAt, terminate, terminationPayload, textRv, uniqueName, unreachableTerm, useRv, valOf, validationsPayload, varNameOf, visibleEnv, forgetRecorded, forgetRefTarget };
+import elaborate::lowerbuild { binaryRv, copyOp, listRv, opText, packReadMark, tempLocal, validationReadsPack, assignStmt, bindName, bodyOf, borrowRv, constOp, definedFunction, emitAssign, emitStmt, emptyBlockPayload, enterScope, exprAt, fnConst, ghostHere, ghostStmt, gotoTerm, isFunct, isVarExpr, leaveScope, localBinding, lookupBinding, namesOf, newBlock, newLocal, openBlock, positionStmt, returnTerm, rvText, setDecl, setGlobal, stepsText, stmtAt, terminate, terminationPayload, textRv, uniqueName, unreachableTerm, useRv, valOf, validationsPayload, varNameOf, visibleEnv };
 import elaborate::lowerexpr { finishInto, lentNames, lowerCondition, lowerLast, lowerOperand, materializeFunction, rvPend };
 import elaborate::lowerplace { lowerDerefPlace };
 
@@ -339,35 +339,24 @@ fn lowerIf(ls: LowSt, src: &List<AstNode>, cond: Int, yes: List<Int>, no: List<I
     ls = newBlock(ls);
     joinB = ls.id;
     ls = lowerCondition(ls, src, cond, thenB, elseB);
-    targetsBefore = clone(ls.bRefTargets);
     ls = openBlock(ls, thenB);
     ls = enterScope(ls);
     ls = lowerStatements(ls, src, &yes);
     ls = leaveScope(ls);
     thenOpen = ls.bHasOpen;
     if thenOpen { ls = terminate(ls, gotoTerm(joinB)); };
-    afterThen = clone(ls.bRefTargets);
-    ls = LowSt { bRefTargets: clone(targetsBefore), ..ls };
     ls = openBlock(ls, elseB);
     ls = enterScope(ls);
     ls = lowerStatements(ls, src, &no);
     ls = leaveScope(ls);
     elseOpen = ls.bHasOpen;
     if elseOpen { ls = terminate(ls, gotoTerm(joinB)); };
-    // (a borrow made in one branch is not what the local holds where the branches meet)
-    afterElse = clone(ls.bRefTargets);
-    joined = size(targetsBefore);
-    ls = LowSt { bRefTargets: targetsBefore, ..ls };
-    ls = forgetRecorded(ls, &afterThen, joined);
-    ls = forgetRecorded(ls, &afterElse, joined);
     // (when both branches returned nothing reaches the join)
     if thenOpen || elseOpen { ls = openBlock(ls, joinB); };
     return ls;
 };
 
 fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: List<Int>) -> LowSt ~ {
-    ls = forgetAssigned(ls, src, cond, &body);
-    entry = clone(ls.bRefTargets);
     ls = newBlock(ls);
     header = ls.id;
     ls = newBlock(ls);
@@ -390,26 +379,7 @@ fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: 
     ls = lowerStatements(ls, src, &body);
     ls = leaveScope(ls);
     if ls.bHasOpen { ls = terminate(ls, gotoTerm(header)); };
-    ls = LowSt { bRefTargets: entry, ..ls };
     return openBlock(ls, exit);
-};
-
-// (a local the body or the condition of a loop assigns, a statement's or an expression's, may hold something else at
-// the loop's head and after it)
-fn forgetAssigned(ls: LowSt, src: &List<AstNode>, cond: Int, body: &List<Int>) -> LowSt ~ {
-    bindings = HashMap::new();
-    i = 0;
-    while i < size(ls.bScopeNames) && i < size(ls.bScopeBinds) [{ affirm i >= 0; }] shrinks size(ls.bScopeNames) - i {
-        b = get(ls.bScopeBinds, i);
-        name = get(ls.bScopeNames, i);
-        if b.isLocal { bindings = bindings.insert(clone(name), b.local); } else { bindings = bindings.remove(name); };
-        i = i + 1;
-    };
-    scan = AssignmentScan { writes: HashSet::new(), definitions: HashMap::new(), functions: false };
-    scan = scanExpression(src, cond, &bindings, scan);
-    scan = scanStatements(src, body, 0 - 1, bindings, scan);
-    for local in scan.writes.elements() { ls = forgetRefTarget(ls, local); };
-    return ls;
 };
 
 // A loop over the pack of a variadic function, which no copy keeps: each unrolls it (MirPacks). It is
@@ -450,8 +420,6 @@ fn lowerPackLoop(ls: LowSt, src: &List<AstNode>, indexName: String, elementName:
         takeRv = useRv(copyOp(packLocal));
         ls = emitAssign(ls, taken, &takeRv);
     };
-    ls = forgetAssigned(ls, src, 0 - 1, &body);
-    entry = clone(ls.bRefTargets);
     ls = newBlock(ls);
     header = ls.id;
     ls = newBlock(ls);
@@ -516,7 +484,7 @@ fn lowerPackLoop(ls: LowSt, src: &List<AstNode>, indexName: String, elementName:
     elementType = "";
     if lwKind(&ls, elementTy) = 12 { elementType = clone(tyOf(&ls, elementTy).name); };
     loop = PackLoopRec { header: header, body: bodyB, exit: exit, blocks: blocks, locals: locals, index: indexLocal, element: elementLocal, elementType: elementType, lo: loLocal, hi: hiLocal, taken: taken };
-    ls = LowSt { bPackLoops: push(ls.bPackLoops, loop), bRefTargets: entry, ..ls };
+    ls = LowSt { bPackLoops: push(ls.bPackLoops, loop), ..ls };
     return openBlock(ls, exit);
 };
 
