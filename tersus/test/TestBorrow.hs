@@ -742,7 +742,7 @@ loanTableCases = TestList "MIR loan rules"
                 Nothing -> (b0, M.BasicBlock (start ++ reach) (M.Goto b4)) : atSite
                 Just alt -> [(b0, M.BasicBlock start (M.SwitchBool (cp 9) b2 b3)), (b2, M.BasicBlock reach (M.Goto b4)), (b3, M.BasicBlock alt (M.Goto b4))] ++ atSite
             main = M.Function "loans" (map l (params ++ [9, 23])) Nothing decls (Map.fromList blocks) [] [] (map l borrowed) (map l borrowed) [] M.emptySpec
-         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations boundaryCallees main generics Map.empty Map.empty Map.empty)
+         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations boundaryCallees main generics Map.empty Map.empty Map.empty stdProtocols Nothing)
     expectBoundary callers (refusedForCallers, tiesOwn) es
         | callers && refusedForCallers = if any (\e -> "which is the caller's: return the value that holds it instead" `isInfixOf` e) es then Nothing else Just ("Expected a refusal of a store into the caller's storage; got " ++ show es)
         | not callers && tiesOwn = requireError "owner cannot be assigned while it is borrowed by" es
