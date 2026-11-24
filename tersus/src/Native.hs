@@ -80,7 +80,7 @@ buildWith opt flags output ir = do
         case runtime of
             Error e -> return (Error e)
             Ok object -> do
-                (code, out, err) <- runCommandWithInputFull "clang" ([opt, "-Wno-override-module"] ++ flags ++ ["-o", output, irFile, object]) ""
+                (code, out, err) <- runCommandWithInputFull "clang" ([opt, "-Wno-override-module", "-pthread"] ++ flags ++ ["-o", output, irFile, object]) ""
                 return $ case code of
                     ExitSuccess -> Ok ()
                     ExitFailure _ -> Error ("clang failed:\n" ++ out ++ err))
@@ -106,7 +106,7 @@ runtimeObject flags = do
                     (partial, handle) <- openTempFileCloexec dir "tersus_rt.tmp"
                     hClose handle
                     removeFile partial
-                    (code, out, err) <- runCommandWithInputFull "clang" (["-O2", "-Wno-override-module"] ++ flags ++ ["-c", "-o", partial, runtimeFile]) "" `finally` removeFile runtimeFile
+                    (code, out, err) <- runCommandWithInputFull "clang" (["-O2", "-Wno-override-module", "-pthread"] ++ flags ++ ["-c", "-o", partial, runtimeFile]) "" `finally` removeFile runtimeFile
                     case code of
                         ExitSuccess -> renameFile partial object >> return (Ok object)
                         ExitFailure _ -> removeIfExists partial >> return (Error ("clang failed:\n" ++ out ++ err))

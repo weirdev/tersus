@@ -63,9 +63,11 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   - `set.tersus`: the struct `HashSet`, made of a map, imported for a program
     that mentions `HashSet`. It imports `map`, `prelude`, `eq` and `clone`.
     Embedded by `PreludeSource`.
-  - `thread.tersus`: the linear struct `Thread`, a closure started by
-    `Thread::spawn` and joined for its result, imported for a program that
-    mentions `Thread`. It imports nothing. Embedded by `PreludeSource`.
+  - `thread.tersus`: the linear structs `Thread`, a closure started by
+    `Thread::spawn` and joined for its result, and `ScopedThread`, the same
+    for a closure it is lent, imported for a program that mentions either.
+    It imports nothing. Embedded by `PreludeSource`; native code runs each
+    thread on a thread of its own (`src/MirThreads.hs`).
   - `lists.tersus` and `box.tersus`: native-only List/Box helper modules of
     the same synthetic `tersuslib` package. They import the types and traits
     they use; `types.tersus` alone owns the structs and layout invariants.

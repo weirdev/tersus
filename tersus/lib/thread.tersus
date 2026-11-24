@@ -1,11 +1,15 @@
-// The library a program has when it mentions `Thread` and does not declare it itself: a closure started on a thread of its
-// own and joined for its result.
+// The library a program has when it mentions `Thread` or `ScopedThread` and declares neither itself: a closure started on
+// a thread of its own and joined for its result.
 //
-// A thread shares nothing with the program that starts it: the closure owns what it captured (a closure or a result that
-// holds a reference is refused where the copy of spawn is made, MirMoves.checkSpawns), so running it where it is started
-// gives the values that running it on another thread gives, and that is how the validator and `tersus eval` read it. A
-// caller knows of the result what the closure's bound says, which is nothing: a fact it needs comes through the result's
-// type, a struct with an invariant. A Thread is linear, so every thread is joined, once.
+// A Thread shares nothing with the program that starts it: the closure owns what it captured (a closure or a result that
+// holds a reference is refused where the copy of spawn is made, MirMoves.checkSpawns). A ScopedThread is lent its
+// closure, which may borrow, and only reads through it: the handle holds the loan of the closure (`from g`), so what the
+// closure borrows is not written until the handle is joined, and a closure that can update through a reference, or a
+// result that holds one, is refused the same way. Either way running the closure where it is started gives the values
+// that running it on another thread gives, and that is how the validator and `tersus eval` read it; native code runs it
+// on a thread of its own (MirThreads). A caller knows of the result what the closure's bound says, which is nothing: a
+// fact it needs comes through the result's type, a struct with an invariant. Both handles are linear, so every thread is
+// joined, once.
 
 linear struct Thread<T> {
     value: T,
@@ -17,6 +21,21 @@ impl<T> Thread<T> {
     };
 
     fn join(self: Self) -> T [{ }] [{ affirm return = self.value; }] {
+        return self.value;
+    };
+};
+
+linear struct ScopedThread<T, F> {
+    value: T,
+    f: &F,
+};
+
+impl<T, F: Fn() -> T> ScopedThread<T, F> {
+    fn spawn(g: &F) -> Self from g [{ }] [{ }] {
+        return Self { value: g(), f: &g };
+    };
+
+    fn join(self: Self) -> T [{ }] [{ }] {
         return self.value;
     };
 };

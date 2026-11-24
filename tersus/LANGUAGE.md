@@ -2081,7 +2081,7 @@ A `HashSet<K>` is a set of keys, in `lib/set.tersus`: a program that mentions `H
 
 ## Threads
 
-A `Thread<T>` runs a closure and gives its result when it is joined, in `lib/thread.tersus`: a program that mentions `Thread` has it imported for it, and a program that declares a `Thread` of its own does not get it.
+A `Thread<T>` runs a closure and gives its result when it is joined, and a `ScopedThread<T, F>` does the same with a closure that it borrows. Both are in `lib/thread.tersus`: a program that mentions either has it imported for it, and a program that declares a `Thread` or a `ScopedThread` of its own does not get it.
 
 ```tersus
 fn sumRange(lo: Int, hi: Int) -> Int [{ }] [{ }] {
@@ -2097,8 +2097,27 @@ return a.join() + b;    // 499500
 - **`Thread::spawn(f)`** takes the closure through an `FnOnce() -> T` bound and gives a `Thread<T>`; **`t.join()`** gives the closure's result. A named function with no parameters is given as one too (`Thread::spawn(work)`).
 - **A thread shares nothing with the program that starts it.** The closure and its result cannot hold a reference, so a closure that borrows a capture is refused (`Thread::spawn is given a closure that borrows xs: a thread cannot hold a reference (capture by value with move fn)`); write `move fn`, which moves what it captures into the closure. So running a closure on a thread gives the values that running it where it is started gives, which is how the validator and `tersus eval` read it: `eval` runs the closure at the spawn. A type argument cannot be linear or hold a permission, so neither can be given to a thread or come back from one yet.
 - **What a caller can prove** is what the bound says, which is nothing: `t = Thread::spawn(fn() -> Int => 42); r = t.join(); affirm r = 42;` is refused, as `map` promises only the size. A fact about the result comes through its type, a struct with an invariant. A fact the closure needs about what it captured is a clause of its input contract that names only captures, proved where the closure is made (`move fn() -> Int [{ affirm k >= 0; }] [{ }] => work(k)`, see Closures); its calls are checked as any body's are.
-- **A Thread is linear**: it is joined exactly once, by the program or by a function it is given to, so a program cannot end with a thread running. A `Thread` cannot be in a list (a linear value is in no list), so a number of threads not known in advance is started by recursion: a closure that calls the function that starts it is written `~` (`Thread::spawn(move fn() -> Int ~ => sumRange(lo, mid, depth - 1))`), in a function that is `~` too.
-- **Native code runs the closures one after another for now**, where they are started, as `eval` does; running them at the same time is next. What a thread writes then comes in no fixed order with what the rest of the program writes.
+- **A Thread is linear**: it is joined exactly once, by the program or by a function it is given to. Native code refuses to return a live handle as part of the program's final result. A `Thread` cannot be in a list (a linear value is in no list), so a number of threads not known in advance is started by recursion: a closure that calls the function that starts it is written `~` (`Thread::spawn(move fn() -> Int ~ => sumRange(lo, mid, depth - 1))`), in a function that is `~` too.
+- **Native code runs each closure on a thread of its own**, at the same time as the rest of the program, and `join` waits for it. A thread has the stack the program has (the limit of `ulimit -s`, or 8 MiB when there is none). What a thread writes comes in no fixed order with what the rest of the program writes, and its input as well. Each thread builds the path of a file and a file to store on its own, so a thread does not see a path that the code that started it has half built, as it does in `eval`. A thread that fails (an `Int` that overflows) ends the program with the message and the exit status that `eval` gives, at once, with what was written before it flushed.
+
+A **`ScopedThread`** is lent its closure instead of given it, so the closure may borrow what it reads:
+
+```tersus
+fn part(xs: &List<Int>, lo: Int, hi: Int) -> Int [{ affirm lo >= 0; }] [{ }] {
+    s = 0; i = lo;
+    while i < hi [{ affirm i >= 0; }] shrinks hi - i { if i < size(xs) { s = s + get(xs, i); }; i = i + 1; };
+    return s;
+};
+xs = [1, 2, 3, 4];
+f = fn() -> Int => part(&xs, 0, 2);
+h = ScopedThread::spawn(&f);
+b = part(&xs, 2, 4);
+return h.join() + b;    // 10
+```
+
+- **`ScopedThread::spawn(&f)`** takes the closure through an `Fn() -> T` bound, which calls it through a shared reference, and gives a handle that holds the loan of `f` (`from g`): what the closure borrows cannot be written or moved until the handle is joined (`xs cannot be assigned while it is borrowed by h: the borrow ends at the last use of h`), and the handle cannot outlive the closure. So the thread reads what nothing writes while it runs.
+- **What crosses:** the closure may hold shared references, but not one that updates (`ScopedThread::spawn is lent a closure that borrows r for updating: a scoped thread only reads what it borrows`), and the result holds no reference. The validator and `eval` run the closure at the spawn, as for a `Thread`, and native code on a thread of its own.
+- **A ScopedThread is linear** too. Its type names the closure's type, which a program cannot write, so a handle is joined in the function that starts it.
 
 ## Bytes
 
