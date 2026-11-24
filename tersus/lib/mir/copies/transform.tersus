@@ -440,7 +440,7 @@ fn assignRow(dest: Int, rv: &List<Token>) -> List<Token> ~ {
 fn gotoRow(next: Int) -> List<Token> ~ { return push(push([], word("goto")), intToken(next)); };
 fn transformTerminator(program: &FullProgram, cx: &CopyRowCx, row: &List<Token>, before: List<List<Token>>, st: &mut CopyWalk) -> List<List<Token>> ~ {
     if !wordIs(row, 0, "call") { return push(before, rewriteSites(program, cx, clone(row), &mut *st)); };
-    materialized = materializeBoundClone(classes, program, cx, parseCopyCall(row), before, &mut *st);
+    materialized = materializeBoundClone(cx.classes, program, cx, parseCopyCall(row), before, &mut *st);
     call = materialized.call; before = materialized.before;
     if wordIs(&call.callee, 0, "const") && wordIs(&call.callee, 1, "fn") {
         n = textAt(&call.callee, 2);
