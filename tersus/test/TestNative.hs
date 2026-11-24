@@ -259,6 +259,8 @@ arithmeticPrograms =
 dataPrograms :: [(String, String)]
 dataPrograms =
     [ ("struct", "struct P { x: Int, y: Bool }; return P { x: 1, y: true };")
+    , ("an empty tuple returned by a function", "fn empty() -> () { return (); }; return empty();")
+    , ("an owned one-part tuple returned and taken apart", "fn single<T>(x: T) -> (T,) { return (x,); }; (a,) = single([1, 2, 3]); return a;")
     , ("struct field", "struct P { x: Int, y: Bool }; p = P { x: 7, y: false }; return p.x;")
     , ("struct with a list", "struct P { x: Int, y: List<Int> }; p = P { x: 1, y: [2, 3] }; return p;")
     , ("struct update", "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; q = P { y: 5, ..p }; return q;")
