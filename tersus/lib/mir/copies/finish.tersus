@@ -1,4 +1,5 @@
 import data::codec::codec { Token };
+import mir::copies::keys { copyStorageName };
 import data::ast::ast { AstNode };
 import mir::full::read { noFunction };
 import mir::full::full { FullProgram, FullFunction, FullBlock, FullRecord };
@@ -355,7 +356,7 @@ fn genericBodies(classes: &InstanceNameClasses, program: &FullProgram, ix: &Fini
         if i >= 0 && i < size(program.functions) && j >= 0 && j < size(program.bounded) {
             body = get(&program.functions, i); bounded = get(&program.bounded, j);
             variadic = variadic || isVariadic(body);
-            packed = packGeneric(renameFunction(classes, clone(body), program, named), arena, bounded, &program.functions, &ix.functions);
+            packed = packGeneric(copyStorageName(program, "List"), renameFunction(classes, clone(body), program, named), arena, bounded, &program.functions, &ix.functions);
             arena = packed.arena;
             funs = push(funs, markFunction(packed.fun, "$generic"));
             if size(packed.contract.header) > 0 { funs = push(funs, markFunction(packed.contract, "$generic")); };
@@ -410,7 +411,8 @@ fn finishCopies(classes: &InstanceNameClasses, program: FullProgram, named: &Lis
 };
 fn finishWithGenerics(program: FullProgram, ix: &FinishIndex, kept: &HashSet<String>, roots: List<FullFunction>, entry: FullFunction, made: &List<CopyMade>, generic: HashMap<String,FullFunction>, arena: List<AstNode>, variadic: Bool, dispatch: HashMap<String, HashSet<String>>) -> FullProgram ~ {
     if variadic {
-        slice = packSlice(arena); cons = packCons(slice.arena); arena = cons.arena;
+        list = copyStorageName(&program, "List");
+        slice = packSlice(&list, arena); cons = packCons(&list, slice.arena); arena = cons.arena;
         generic = generic.insert(functionName(&slice.fun), slice.fun);
         generic = generic.insert(functionName(&cons.fun), cons.fun);
     };
@@ -457,5 +459,5 @@ fn finishWithGenerics(program: FullProgram, ix: &FinishIndex, kept: &HashSet<Str
     newEntry = completeEnvs(addMarkerRows(entry, ix, &markers, &markerEnv), &ctx, false, false);
     generics = HashSet::new(); for g in &program.generics { generics = generics.insert(clone(g.name)); };
     types = []; for t in &program.types { if !isDerived(&generics, &t.name) { types = push(types, clone(t)); }; };
-    return FullProgram { types: types, arena: arena, functions: out, entry: newEntry, bounded: [], instances: [], shared: shared, ..program };
+    return FullProgram { types: types, arena: arena, functions: out, entry: newEntry, bounded: [], boundedFacts: [], instances: [], shared: shared, ..program };
 };

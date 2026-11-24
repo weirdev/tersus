@@ -29,8 +29,14 @@ import Pretty (renderType)
 import StdLib (builtinFunct)
 import Syntax (Expression (..), FunctBody (..), Proof (..), RwRule (..), Termination (..), ValidationStatement (..), Value (..), VariableProof, exprToProof, parseImplCheckName)
 import qualified Types as T
-import Types (Arg (..), BuiltinFunct, Name, Rel (..), Size (..), Type (..), Variable, instanceName, pattern TBox, pattern TList, renderTypeForName, substitute, tupleGeneric, baseNameOf)
+import Types (Arg (..), BuiltinFunct, Name, Rel (..), Size (..), Storage (..), Type (..), Variable, boxContent, instanceName, listElement, listOf, renderTypeForName, substitute, tupleGeneric, baseNameOf)
 import Utils (Result (..))
+
+-- The raw unchecked oracle fixtures predate the checked storage roles.
+oracleStorage :: Program -> Storage
+oracleStorage program
+    | Nothing <- progOwnership program, Map.null (progProtocols program) = Storage "List" "Box"
+    | otherwise = progStorage program
 
 -- The copy step (MIR.md, "Copies of functions with bounds"). A function with bounds is checked once against its bounds,
 -- lowered once with its type parameters, and checked for moves once; the program names each copy it calls (`f[Int]`,
@@ -103,7 +109,7 @@ makeCopiesWith library program
     dispatchOf rootsDone mainDone made = Map.unionsWith Set.union (map snd (mainDone : rootsDone ++ concat [copy : liftedCopies | (_, copy, liftedCopies) <- made]))
     copyOf (name, copy, liftedCopies) = (name, fst copy, map fst liftedCopies)
     sizedBoxed t = case t of
-        TBox (TArrayOf _ size) -> size /= SizeAny
+        _ | Just (TArrayOf _ size) <- boxContent (oracleStorage program) t -> size /= SizeAny
         TRef inner -> sizedBoxed inner
         TMutRef inner -> sizedBoxed inner
         _ -> False
@@ -221,8 +227,6 @@ concreteKey _ f args =
 mentionsParam :: Type -> Bool
 mentionsParam ty = case ty of
     TParam _ -> True
-    TList t -> mentionsParam t
-    TBox t -> mentionsParam t
     TAddr t -> mentionsParam t
     TBlock t -> mentionsParam t
     TUninit t -> mentionsParam t
@@ -273,7 +277,7 @@ frameRefusal program f name generic copy =
 -- a struct (a list and a Box are structs) the words of its fields, and an enum its tag and its widest variant
 typeWords :: Program -> Type -> Integer
 typeWords program ty = case ty of
-    TNamed "Box" [ArgType (TArrayOf _ SizeAny)] -> 2
+    _ | Just (TArrayOf _ SizeAny) <- boxContent (oracleStorage program) ty -> 2
     TArrayOf t (SizeConst n) -> n * typeWords program t
     TNamed base args -> declared (instanceName base args)
     TVariant v | Just owner <- ownerOf program v -> declared owner
@@ -348,7 +352,7 @@ transformFunction cx0 fn = do
             TParam p -> types (TParam p) /= TParam p
             TRef inner -> filled inner
             TMutRef inner -> filled inner
-            TBox inner -> filled inner
+            _ | Just inner <- boxContent (oracleStorage (cxProgram cx)) ty -> filled inner
             _ -> False
         opaque = if null (cxCopy cx) then [] else [l | (l, d) <- Map.toList (fnLocals fn), filled (localType d)]
         spec'' = (fnSpec fn'){specEnv = Map.union (Map.fromList [(opaqueKey l, Copy l) | l <- opaque]) (specEnv (fnSpec fn'))}
@@ -469,10 +473,10 @@ resolveBound :: Cx -> Map Local Integer -> Function -> Bool -> Name -> Name -> T
 resolveBound cx constants fn library trait function t args dest
     | trait == "Clone", function == "clone" = traitClone cx constants fn t args dest
     | trait == "Eq", function == "eq", word t = return (Inline InlineEq)
-    | trait == "Eq", function == "eq", Just e <- unsizedBoxed t, Map.member "eqBoxedArrays" (progBounded (cxProgram cx)) = (\n -> Named n []) <$> withBoundsCopy cx "eqBoxedArrays" [e]
+    | trait == "Eq", function == "eq", Just e <- unsizedBoxed (oracleStorage (cxProgram cx)) t, Map.member "eqBoxedArrays" (progBounded (cxProgram cx)) = (\n -> Named n []) <$> withBoundsCopy cx "eqBoxedArrays" [e]
     | library, Just builtin <- sequenceBuiltin, sizedBoxedArray t = return builtin
     | Just owner <- ownerOfType (cxProgram cx) t, let callee = implName owner, Map.member callee (progFunctions (cxProgram cx)) = checkOrSize callee >>= \check -> calling cx constants fn (Just t) check args dest
-    | Just builtin <- sequenceBuiltin, trait `elem` ["Sequence", "Growable"] = return builtin
+    | Just builtin <- sequenceBuiltin, trait `elem` ["Sequence", "Growable"], Nothing <- progOwnership (cxProgram cx), Map.null (progProtocols (cxProgram cx)) = return builtin
     | otherwise = failC ("internal compiler error: " ++ trait ++ "::" ++ function ++ " is called on a " ++ renderType t ++ " in " ++ cxCopy cx ++ ", which has no impl of it")
   where
     implName owner = "<" ++ owner ++ " as " ++ trait ++ ">::" ++ function
@@ -480,14 +484,14 @@ resolveBound cx constants fn library trait function t args dest
     -- trait's contracts of those impls are written with the builtin size and get, so a copy relates what it knows of a call
     -- of set or push through the trait to what it knows of size and get)
     checkOrSize callee
-        | library, function `elem` ["size", "get"], sequenceType t = return callee
+        | library, function `elem` ["size", "get"], sequenceType (oracleStorage (cxProgram cx)) t = return callee
         | otherwise = checkOf cx callee
     -- (the prelude's impl for a Box of an array is for one of no size: a Box of an array of a size has no impl, and its
     -- sequence functions are the builtins, which give a copy more than the trait promises)
-    sizedBoxedArray ty = case unref ty of
-        TBox (TArrayOf _ size) -> size /= SizeAny
+    sizedBoxedArray ty = case boxContent (oracleStorage (cxProgram cx)) (unref ty) of
+        Just (TArrayOf _ size) -> size /= SizeAny
         _ -> False
-    sequenceBuiltin = case (methodBuiltinByName function, sequenceType t) of
+    sequenceBuiltin = case (methodBuiltinByName function, sequenceType (oracleStorage (cxProgram cx)) t) of
         (Just b, True) | Just op <- listOpOf b -> Just (Inline (InlineBuiltin b op))
         _ -> Nothing
     word ty = case unref ty of
@@ -510,7 +514,7 @@ cloneTarget cx constants fn t args dest
 -- program has it, a tuple is copied as it is, and any other type by its impl of Clone when it has one
 traitClone :: Cx -> Map Local Integer -> Function -> Type -> [Operand] -> Maybe Local -> C Target
 traitClone cx constants fn t args dest = case unref t of
-    ty | Just e <- unsizedBoxed ty, Map.member "cloneBoxedArray" (progBounded (cxProgram cx)) -> (\n -> Named n []) <$> withBoundsCopy cx "cloneBoxedArray" [e]
+    ty | Just e <- unsizedBoxed (oracleStorage (cxProgram cx)) ty, Map.member "cloneBoxedArray" (progBounded (cxProgram cx)) -> (\n -> Named n []) <$> withBoundsCopy cx "cloneBoxedArray" [e]
     TNamed base _ | Just _ <- tupleGeneric base -> return (Inline InlineCopy)
     ty -> case ownerOfType (cxProgram cx) ty of
         Just owner | let callee = "<" ++ owner ++ " as Clone>::clone", Map.member callee (progFunctions (cxProgram cx)) -> checkOf cx callee >>= \check -> calling cx constants fn (Just t) check args dest
@@ -524,11 +528,11 @@ checkOf cx callee = case companionOf callee of
     Just check | Map.member check (progFunctions (cxProgram cx)) -> return check
     _ -> failC ("internal compiler error: " ++ callee ++ " has no check function, which a call through a bound in " ++ cxCopy cx ++ " calls")
 
-sequenceType :: Type -> Bool
-sequenceType ty = case unref ty of
-    TList _ -> True
+sequenceType :: Storage -> Type -> Bool
+sequenceType storage ty = case unref ty of
     TArrayOf _ _ -> True
-    TBox (TArrayOf _ _) -> True
+    t | Just _ <- listElement storage t -> True
+    t | Just TArrayOf{} <- boxContent storage t -> True
     _ -> False
 
 ownCopy :: Type -> Bool
@@ -588,8 +592,6 @@ withBoundsCopy cx f tys
 ownerOfType :: Program -> Type -> Maybe Name
 ownerOfType program ty = case unref ty of
     TArrayOf _ _ -> Just "Array"
-    TBox _ -> Just "Box"
-    TList _ -> Just "List"
     TNamed base _ -> Just base
     TVariant v -> ownerOf program v
     TInt -> Just "Int"
@@ -603,9 +605,9 @@ unref ty = case ty of
     TMutRef t -> t
     _ -> ty
 
-unsizedBoxed :: Type -> Maybe Type
-unsizedBoxed ty = case unref ty of
-    TBox (TArrayOf e SizeAny) -> Just e
+unsizedBoxed :: Storage -> Type -> Maybe Type
+unsizedBoxed storage ty = case boxContent storage (unref ty) of
+    Just (TArrayOf e SizeAny) -> Just e
     _ -> Nothing
 
 listOpOf :: BuiltinFunct -> Maybe ListOp
@@ -694,11 +696,11 @@ transformBlock cx constants fn here (BasicBlock stmts term) = go here [] stmts [
     borrows r s = case s of
         Assign d (Borrow _ _ _) -> d == r
         _ -> False
-    boxedValue ty = case ty of
-        TNamed "Box" [ArgType (TArrayOf _ _)] -> True
+    boxedValue ty = case boxContent (oracleStorage (cxProgram cx)) ty of
+        Just TArrayOf{} -> True
         _ -> False
     byValue t = case unref t of
-        ty | Just _ <- unsizedBoxed ty -> False
+        ty | Just _ <- unsizedBoxed (oracleStorage (cxProgram cx)) ty -> False
         TNamed base _ | Just _ <- tupleGeneric base -> True
         ty -> case ownerOfType (cxProgram cx) ty of
             Just owner -> Map.notMember ("<" ++ owner ++ " as Clone>::clone") (progFunctions (cxProgram cx))
@@ -707,7 +709,7 @@ transformBlock cx constants fn here (BasicBlock stmts term) = go here [] stmts [
     placeRead root rootTy steps = case (rootTy, steps) of
         (TRef _, _) -> return Nothing
         (TMutRef _, _) -> return Nothing
-        (TNamed "Box" [ArgType payload], []) -> do
+        (ty, []) | Just payload <- boxContent (oracleStorage (cxProgram cx)) ty -> do
             tmp <- newTemp payload
             return (Just ([Assign tmp (Unbox (Copy root))], Copy tmp))
         (_, []) -> return (Just ([], Copy root))
@@ -722,9 +724,9 @@ transformBlock cx constants fn here (BasicBlock stmts term) = go here [] stmts [
             walk (Copy tmp) ft rest (acc' ++ [Assign tmp (ReadField cur owner f)])
         _ -> return Nothing
     elementOf ty = case ty of
-        TList e -> Just e
         TArrayOf e _ -> Just e
-        TNamed "Box" [ArgType (TArrayOf e _)] -> Just e
+        _ | Just e <- listElement (oracleStorage (cxProgram cx)) ty -> Just e
+        _ | Just (TArrayOf e _) <- boxContent (oracleStorage (cxProgram cx)) ty -> Just e
         _ -> Nothing
     fieldOf owner f = case Map.lookup owner (progTypes (cxProgram cx)) of
         Just (StructDecl fields) -> lookup f fields
@@ -963,7 +965,7 @@ proofName cx n
     , function `elem` ["size", "get"]
     , Map.lookup n (progInstances (cxProgram cx)) == Just (libraryBuiltin, [])
     , Just t <- lookup p (cxTypes cx)
-    , sequenceType t
+    , sequenceType (oracleStorage (cxProgram cx)) t
     , Just b <- methodBuiltinByName function = return (Right b)
     | Map.member n (progInstances (cxProgram cx)) || Map.member n (cxLifted cx) || isBound = do
         t <- target cx Map.empty noFunction n [] Nothing
@@ -1080,9 +1082,10 @@ finish program named used dispatch roots main' made =
     stubsUsed = grow (Set.fromList [n | g <- bodies, n <- usedNames g, Map.member n stubFns])
       where
         grow s = let s' = Set.union s (Set.fromList [n | f <- Set.toList s, Just fn <- [Map.lookup f stubFns], n <- usedNames fn, Map.member n stubFns]) in if s' == s then s else grow s'
-    generic = Map.fromList ([(fnName g, g) | g <- bodies] ++ [(f, fn) | (f, fn) <- Map.toList stubFns, Set.member f stubsUsed] ++ [(n, stub) | any variadic (Set.toList kept), (n, stub) <- [(packSliceName, packSlice), (packConsName, packCons)]])
+    generic = Map.fromList ([(fnName g, g) | g <- bodies] ++ [(f, fn) | (f, fn) <- Map.toList stubFns, Set.member f stubsUsed] ++ [(n, stub) | any variadic (Set.toList kept), (n, stub) <- [(packSliceName, packSlice storage), (packConsName, packCons storage)]])
+    storage = oracleStorage program
     genericOf f = case bodyAndLifted f of
-        body : liftedFns -> let generic0 = marked (maybe id (variadicBody (progFunctions program)) (Map.lookup f bounded) (renameFunction rename body)) in generic0 : map marked (maybe [] pure (packContracts generic0)) ++ [marked (renameFunction rename l){fnTypeParams = nubOrd (fnTypeParams body ++ fnTypeParams l)} | l <- liftedFns]
+        body : liftedFns -> let generic0 = marked (maybe id (variadicBody storage (progFunctions program)) (Map.lookup f bounded) (renameFunction rename body)) in generic0 : map marked (maybe [] pure (packContracts storage generic0)) ++ [marked (renameFunction rename l){fnTypeParams = nubOrd (fnTypeParams body ++ fnTypeParams l)} | l <- liftedFns]
         [] -> []
     marked fn = fn{fnSpec = (fnSpec fn){specEnv = Map.insert genericKey (Const (CInt 0)) (specEnv (fnSpec fn))}}
     keptCopies = Set.fromList [n | (f, copy, liftedCopies) <- made, Set.member f kept, n <- map fnName (copy : liftedCopies)]
@@ -1166,14 +1169,14 @@ usedNames fn = Set.toList (Set.fromList (codeNames ++ proofTargets))
 -- invariant the program wrote, if any) and whose measure is what is left of them, a forward the call of the generic callee
 -- with the slice `slice(args, lo, hi)` gives, and a function that calls itself through a slice is measured by `size(args)`
 -- when it says nothing. A read of the pack in a validation statement is checked in range, as one in code is.
-variadicBody :: Map Name Function -> BoundedFn -> Function -> Function
-variadicBody functions bounded fn = case [l | l <- fnParams fn, Just d <- [Map.lookup l (fnLocals fn)], TParam q <- [localType d], isPackName q] of
+variadicBody :: Storage -> Map Name Function -> BoundedFn -> Function -> Function
+variadicBody storage functions bounded fn = case [l | l <- fnParams fn, Just d <- [Map.lookup l (fnLocals fn)], TParam q <- [localType d], isPackName q] of
     [p] -> withPack p
     _ -> fn
   where
     withPack p =
         let listTy = case localType (fnLocals fn Map.! p) of
-                TParam q -> TList (TParam q)
+                TParam q -> proofPackType storage q
                 t -> t
             name = maybe "args" id (localName (fnLocals fn Map.! p))
             isPack o = case o of
@@ -1302,8 +1305,18 @@ rangeObligations name pr = case pr of
 -- A generic variadic body's contracts read the pack in range: a function the validator checks (`f$contract`) with the body's
 -- parameters and its result as one more, which proves each read of an input contract under the input contract before it,
 -- and each read of an output contract under the input contract and the output contract before it
-packContracts :: Function -> Maybe Function
-packContracts fn = case [n | l <- fnParams fn, Just d <- [Map.lookup l (fnLocals fn)], TList (TParam q) <- [localType d], isPackName q, Just n <- [localName d]] of
+proofPackType :: Storage -> Variable -> Type
+proofPackType storage pack
+    | null (storageList storage) = TArrayOf (TParam pack) SizeAny
+    | otherwise = listOf storage (TParam pack)
+
+proofPackElement :: Storage -> Type -> Maybe Type
+proofPackElement storage ty = case ty of
+    TArrayOf t@(TParam pack) SizeAny | null (storageList storage), isPackName pack -> Just t
+    _ -> listElement storage ty
+
+packContracts :: Storage -> Function -> Maybe Function
+packContracts storage fn = case [n | l <- fnParams fn, Just d <- [Map.lookup l (fnLocals fn)], Just (TParam q) <- [proofPackElement storage (localType d)], isPackName q, Just n <- [localName d]] of
     [name] | any (not . null . validationObligations name) (specRequires spec ++ specEnsures spec) ->
         let result = Local (1 + maximum (0 : [i | Local i <- Map.keys (fnLocals fn)]))
             resultTy = maybe TInt id (fnReturns fn)
@@ -1335,10 +1348,10 @@ sizeTerm x = FApp (CTerm (builtinFunct T.Size)) [x]
 packConsName :: Name
 packConsName = "<$packcons>"
 
-packCons :: Function
-packCons = Function packConsName [Local 1, Local 2] (Just listTy) (Map.fromList [(Local 0, LocalDecl listTy Nothing), (Local 1, LocalDecl (TParam "..A") (Just "x")), (Local 2, LocalDecl listTy (Just "xs"))]) (Map.singleton (BlockId 0) (BasicBlock [] Unreachable)) [] ["..A", "..S"] [Local 1, Local 2] [] [] spec
+packCons :: Storage -> Function
+packCons storage = Function packConsName [Local 1, Local 2] (Just listTy) (Map.fromList [(Local 0, LocalDecl listTy Nothing), (Local 1, LocalDecl (TParam "..A") (Just "x")), (Local 2, LocalDecl listTy (Just "xs"))]) (Map.singleton (BlockId 0) (BasicBlock [] Unreachable)) [] ["..A", "..S"] [Local 1, Local 2] [] [] spec
   where
-    listTy = TList (TParam "..S")
+    listTy = proofPackType storage "..S"
     getOf x i = FApp (CTerm (builtinFunct T.Get)) [x, i]
     spec = emptySpec
         { specEnsures =
@@ -1354,10 +1367,10 @@ packCons = Function packConsName [Local 1, Local 2] (Just listTy) (Map.fromList 
 packSliceName :: Name
 packSliceName = "<$packslice>"
 
-packSlice :: Function
-packSlice = Function packSliceName [Local 1, Local 2, Local 3] (Just listTy) (Map.fromList [(Local 0, LocalDecl listTy Nothing), (Local 1, LocalDecl listTy (Just "xs")), (Local 2, LocalDecl TInt (Just "lo")), (Local 3, LocalDecl TInt (Just "hi"))]) (Map.singleton (BlockId 0) (BasicBlock [] Unreachable)) [] ["..S"] [Local 1] [] [] spec
+packSlice :: Storage -> Function
+packSlice storage = Function packSliceName [Local 1, Local 2, Local 3] (Just listTy) (Map.fromList [(Local 0, LocalDecl listTy Nothing), (Local 1, LocalDecl listTy (Just "xs")), (Local 2, LocalDecl TInt (Just "lo")), (Local 3, LocalDecl TInt (Just "hi"))]) (Map.singleton (BlockId 0) (BasicBlock [] Unreachable)) [] ["..S"] [Local 1] [] [] spec
   where
-    listTy = TList (TParam "..S")
+    listTy = proofPackType storage "..S"
     getOf x i = FApp (CTerm (builtinFunct T.Get)) [x, i]
     spec = emptySpec
         { specRequires = [relation LtEq (CTerm (VInt 0)) (ATerm "lo"), relation LtEq (ATerm "lo") (ATerm "hi"), relation LtEq (ATerm "hi") (sizeTerm (ATerm "xs"))]

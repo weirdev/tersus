@@ -6,7 +6,7 @@ import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitStatement
 import elaborate::refs { copyExpressionOrigins };
 import elaborate::traits { boxedNamedThunk, implFunctionName, isFnTraitName };
 import elaborate::records { codecSize, codecTypeAt, exprOf, fromCodec, functionTypeFrom, listItems, nameText, namesText, nodeIn, sigData };
-import elaborate::state { Scopes, St, TE, Ty, addTy, argAt, expect, fail, fnTy, freshSize, freshVar, intText, kindOf, listTy, maxInt, minInt, namedTy, notModelled, nth, render, resolve, sameTy, simpleTy, tyAt, typeError, unify, withTy, wordName, zonk };
+import elaborate::state { GenericCall, Scopes, St, TE, Ty, addTy, argAt, expect, fail, fnTy, freshSize, freshVar, intText, kindOf, listTy, maxInt, minInt, namedTy, notModelled, nth, render, resolve, sameTy, simpleTy, tyAt, typeError, unify, withTy, wordName, zonk };
 
 // Variables: the scopes innermost first, then the functions every body sees, then the standard library (lookupVar)
 fn scopeLookup(st: &St, name: &String) -> Int ~ {
@@ -19,6 +19,13 @@ fn scopeLookup(st: &St, name: &String) -> Int ~ {
 };
 
 fn inScope(st: &St, name: &String) -> Bool ~ { return scopeLookup(st, name) >= 0; };
+
+// Whether a name is of a function in a body, as the scope binds it, and not of the unit's function at its top that the
+// scope binds to the same type
+fn bodyFunction(st: &St, name: &String) -> Bool ~ {
+    t = scopeLookup(st, name);
+    return t >= 0 && t != HashMap::lookup(&st.fns, name, 0 - 1);
+};
 
 fn lookupVar(st: St, name: &String) -> St ~ {
     if st.status != 0 { return st; };
@@ -113,6 +120,7 @@ fn builtinType(st: St, b: Int) -> St ~ {
             st = namedTy(st, baseNameOf(&name), clone(st.te.types));
             ty0 = st.ty;
             if !hasColons(&name) { st = ensureInstance(st, ty0); };
+            if !hasColons(&name) && size(listItems(&st.nodes, args)) > 0 { name = instanceName(&st, ty0); };
             st = ctorInfo(st, &name);
             if st.status != 0 { return st; };
             declared = clone(st.ctor);
@@ -265,6 +273,7 @@ fn checkCall(st: St, name: &String, ft: Int, ats: &List<Int>) -> St ~ {
     x = tyAt(st, f);
     if x.kind = 13 {
         st = instantiateGenerics(st, &x.sizes, &x.types, nth(&x.args, 0));
+        if !bodyFunction(&st, name) { st = St { genericCalls: push(st.genericCalls, GenericCall { caller: clone(st.current), callee: clone(name), sizeNames: clone(x.sizes), typeNames: clone(x.types), vars: clone(st.te.types) }), ..st }; };
         return checkCall(st, name, st.ty, ats);
     };
     if x.kind = 14 {

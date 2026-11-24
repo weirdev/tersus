@@ -1,15 +1,16 @@
 import data::ast::ast { AstArg, AstArgs, AstBody, AstBound, AstBounds, AstBuiltin, AstExpression, AstField, AstFields, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstTraitFn, AstTypes, AstValidation, AstValue, AstValueField, AstValueFields, AstValues };
 import data::codec::codec { Size, catStrings, wireOwnershipRole };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, builtinValueOf, substitute };
-import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, emitIntValue, head, instantiateGenerics, lookupVar, scopeLookup, sizeArgument, teHead };
+import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, emitIntValue, head, instantiateGenerics, lookupVar, scopeLookup, sizeArgument, teHead, bodyFunction };
 import elaborate::check { checkFunction, checkFunctionDef, checkFunctionWith, checkItem, checkStatement, checkValidations, fnSigOf, fnTypeOf, functionValue, isTraitStub, mentionsParameter, refResultFrom, stmtOf };
 import elaborate::core { baseNameOf, checkType, concatFront, concatInts, ctorInfo, hasFunction, holdsGhost, isBoxTy, isListTy, typeCtors, unrefOf };
 import elaborate::exports { pairParts };
-import elaborate::expr { coerceArguments, emitCtorValue, emitFieldValue, genericCall, implementsMarker, inferAll, inferExpr, nodesOf, packArgument, packSize, primitiveEq, typed, typesHeads };
+import elaborate::expr { coerceArguments, emitCtorValue, emitFieldValue, genericCall, implementsMarker, inferAll, inferExpr, nodesOf, packArgument, packSize, primitiveEq, typed, typesHeads, providerHelper };
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
 import elaborate::records { NativeFn, childRefs, codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
 import elaborate::refs { fromsOf, putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, wrapTy, zonk, stubTraitParameter };
+import elaborate::wire { wireTemplateFacts };
+import elaborate::state { indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, wrapTy, zonk, stubTraitParameter, GenericCall };
 
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
@@ -1782,14 +1783,16 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
         if canClone {
             for c in caps { st = implementsMarker(st, "Clone", c.field, 0); if !st.ok { canClone = false; }; };
         };
-        if canClone && HashSet::contains(&st.traits, "Clone") {
+        cloneRole = protocolName(&st, "Clone");
+        copyRole = protocolName(&st, "Copy");
+        if canClone && HashSet::contains(&st.traits, &cloneRole) {
             st = makeClosureCloneImpl(st, &structName, structTy, &caps);
             if st.status != 0 { return st; };
             if st.ok {
                 canCopy = true;
                 for c in caps { st = implementsMarker(st, "Copy", c.field, 0); if !st.ok { canCopy = false; }; };
-                if canCopy && HashSet::contains(&st.traits, "Copy") {
-                    st = emitName(st, "Copy");
+                if canCopy && HashSet::contains(&st.traits, &copyRole) {
+                    st = emitName(st, clone(copyRole));
                     copyNameNode = st.nid;
                     st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: copyNameNode } });
                     copyTraitNode = st.nid;
@@ -1990,6 +1993,7 @@ fn templateCall(st: St, name: String, tm0: Template, inferred: &List<TE>) -> St 
     st = instantiateGenerics(st, &tm.sizes, &tm.types, st.ty);
     instantiated = st.ty;
     vars = clone(st.te.types);
+    if !bodyFunction(&st, &name) { st = St { genericCalls: push(st.genericCalls, GenericCall { caller: clone(st.current), callee: clone(name), sizeNames: clone(tm.sizes), typeNames: clone(tm.types), vars: clone(vars) }), ..st }; };
     sizeVars = [];
     typeVars = [];
     i = 0;
@@ -2668,6 +2672,28 @@ fn traitArguments(st: St, tname: String, t: Int) -> St ~ {
     return traitArgumentsOf(st, tname, t);
 };
 
+fn unsizedBoxedArray(st: &St, t: Int) -> Bool ~ {
+    x = tyAt(st, t);
+    // (an array size no use decided is lowered as any size: defaultNamed)
+    if !(isBoxTy(st, t) && kindOf(st, nth(&x.args, 0)) = 6) { return false; };
+    k = kindOf(st, argAt(st, nth(&x.args, 0), 1));
+    return k = 21 || k = 23;
+};
+
+fn hasCloneHelper(st: &St) -> Bool ~ {
+    helper = providerHelper(st, "Clone", "cloneBoxedArray");
+    return helper != "cloneBoxedArray" && (st.templates.contains(&helper) || st.fns.contains(&helper));
+};
+
+// Whether the impl of the trait for the base is written for a Box of an array, not for any type it holds
+fn implForBoxedArray(st: &St, tname: &String, base: &String) -> Bool ~ {
+    key = pairKey(tname, base);
+    if !HashMap::contains(&st.implArgs, &key) { return false; };
+    ia = HashMap::lookup(&st.implArgs, &key, ImplArgs { ty: 0, args: [], tyNode: 0 - 1, argsNode: 0 - 1 });
+    sx = tyAt(st, ia.ty);
+    return sx.kind = 4 && size(sx.args) = 1 && kindOf(st, nth(&sx.args, 0)) = 6;
+};
+
 fn gives(st: St, ok: Bool, ts: List<Int>) -> St ~ { return St { ok: ok, te: TE { node: 0 - 1, types: ts }, ..st }; };
 
 fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
@@ -2675,51 +2701,42 @@ fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
     if (protocolIs(&st, "Eq", &tname) || protocolIs(&st, "Clone", &tname)) && primitiveEqRaw(&x) { return gives(st, true, []); };
     if protocolIs(&st, "Clone", &tname) && x.kind = 12 { return gives(st, parametersClone(&st, t), []); };
     if protocolIs(&st, "Clone", &tname) && (x.kind = 3 || x.kind = 14 || x.kind = 7 || x.kind = 15) { return gives(st, true, []); };
-    if protocolIs(&st, "Clone", &tname) && (isListTy(st, t) || x.kind = 6 || isBoxTy(st, t)) {
-        st = traitArguments(st, "Clone", nth(&x.args, 0));
-        return gives(st, st.ok, []);
-    };
     if protocolIs(&st, "Eq", &tname) && isBoxTy(st, t) && kindOf(st, nth(&x.args, 0)) = 6 {
         st = traitArguments(st, "Eq", argAt(st, nth(&x.args, 0), 0));
         return gives(st, st.ok, []);
     };
+    // (a Box of an array of no size is cloned by the Clone provider's cloneBoxedArray, as the Box's own impl is for a
+    // value with a size)
+    if protocolIs(&st, "Clone", &tname) && unsizedBoxedArray(&st, t) && hasCloneHelper(&st) {
+        st = traitArguments(st, clone(tname), argAt(st, nth(&x.args, 0), 0));
+        return gives(st, st.ok, []);
+    };
     if x.kind = 12 && st.defChecking && !stubTraitParameter(&st, &x.name) { return parameterTraitArguments(st, &tname, &x.name); };
-    arity = size(HashMap::lookup(&st.traitParams, &tname, []));
     base = "";
     args = [];
-    fallback = 0 - 1;
-    fallbackTraits = [];
-    if isListTy(st, t) { base = clone(x.name); args = push([], nth(&x.args, 0)); fallback = nth(&x.args, 0); fallbackTraits = push(push([], "Sequence"), "Growable"); } else {
-        if x.kind = 6 { base = "Array"; args = clone(x.args); fallback = nth(&x.args, 0); fallbackTraits = push([], "Sequence"); } else {
-            if isBoxTy(st, t) && kindOf(st, nth(&x.args, 0)) = 6 {
-                elem = argAt(st, nth(&x.args, 0), 0);
-                st = simpleTy(st, 21);
-                st = arrayTy(st, elem, st.ty);
-                base = clone(x.name);
-                args = push([], st.ty);
-                fallback = elem;
-                fallbackTraits = push([], "Sequence");
-            } else {
-                if isBoxTy(st, t) { base = clone(x.name); args = clone(x.args); } else {
-                    if x.kind = 4 { base = clone(x.name); args = clone(x.args); } else {
-                        if x.kind = 5 {
-                            st = ctorInfo(st, &x.name);
-                            if st.status != 0 { return st; };
-                            base = clone(st.ctor.owner);
-                        } else {
-                            if x.kind = 0 { base = "Int"; } else { if x.kind = 1 { base = "Byte"; } else { if x.kind = 2 { base = "Bool"; } else { return gives(st, false, []); }; }; };
-                        };
-                    };
+    if x.kind = 6 { base = "Array"; args = clone(x.args); } else {
+        if isBoxTy(st, t) && kindOf(st, nth(&x.args, 0)) = 6 && implForBoxedArray(&st, &tname, &x.name) {
+            // (the impls written for a Box of an array are for one of no size)
+            elem = argAt(st, nth(&x.args, 0), 0);
+            st = simpleTy(st, 21);
+            st = arrayTy(st, elem, st.ty);
+            base = clone(x.name);
+            args = push([], st.ty);
+        } else {
+            if x.kind = 4 { base = clone(x.name); args = clone(x.args); } else {
+                if x.kind = 5 {
+                    st = ctorInfo(st, &x.name);
+                    if st.status != 0 { return st; };
+                    base = clone(st.ctor.owner);
+                } else {
+                    if x.kind = 0 { base = "Int"; } else { if x.kind = 1 { base = "Byte"; } else { if x.kind = 2 { base = "Bool"; } else { return gives(st, false, []); }; }; };
                 };
             };
         };
     };
     st = ownImpl(st, &tname, &base, &args);
     if st.status != 0 { return st; };
-    if !st.ok {
-        if fallback >= 0 && indexIn(&fallbackTraits, &tname) >= 0 && arity = 1 { return gives(st, true, push([], fallback)); };
-        return gives(st, false, []);
-    };
+    if !st.ok { return gives(st, false, []); };
     found = clone(st.te.types);
     boundNames = clone(st.names);
     boundTypes = clone(st.tes);
@@ -3487,6 +3504,8 @@ fn checkDefinition(st: St, name: &String) -> St ~ {
     parts = clone(st.outs);
     bodyTypes = clone(st.te.types);
     from = clone(st.names);
+    st = wireTemplateFacts(st, name, &bodyTypes);
+    if st.status != 0 { return st; };
     st = emitName(st, clone(name));
     nameNode = st.nid;
     st = emitNames(st, &fs.params);
@@ -3587,18 +3606,4 @@ fn parameterTraitArguments(st: St, tname: &String, p: &String) -> St ~ {
     out = [];
     for g in &ia.args { if !isSize(&st, g) { out = push(out, g); }; };
     return gives(st, true, out);
-};
-
-
-
-// Whether Trait::f(x) on a list, an array or a Box of an array is the builtin f: for a Sequence or Growable that is not the
-// library's (whose impls for them are written), when the type has no impl of it, as it implements it by being one
-fn builtinSequenceCall(st: &St, tname: &String, function: &String, t: Int) -> Bool ~ {
-    if !(tname = "Sequence" || tname = "Growable") || HashSet::contains(&st.sequenceTraits, tname) || !HashMap::contains(&st.methods, function) { return false; };
-    u = resolve(st, unrefOf(st, resolve(st, t)));
-    base = "";
-    if isListTy(st, u) { base = clone(tyAt(st, u).name); } else {
-        if kindOf(st, u) = 6 { base = "Array"; } else { if isBoxTy(st, u) && kindOf(st, argAt(st, u, 0)) = 6 { base = clone(tyAt(st, u).name); }; };
-    };
-    return size(base.bytes) > 0 && !HashSet::contains(&st.impls, pairKey(tname, &base));
 };

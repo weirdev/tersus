@@ -7,8 +7,9 @@ import qualified FieldPaths
 import qualified Types as T
 import AstData (readParsed, writeParsed)
 import MirData (readLowered, writeLowered)
-import Compile (elaborateStatements, lowerSource)
-import Pipeline (parseSource, validateStatements, assumptionsOf, loadFromEntry, compileModules, assumptionsOfPackage)
+import Compile (elaborateParts, lowerSource, parseSourceParts)
+import Mir (Lowered (..), Program (..))
+import Pipeline (validateParts, assumptionsOf, loadFromEntry, compileModules, assumptionsOfPackage)
 import qualified Modules
 import TestHarness
 import TestParserFragments (parseExpression)
@@ -157,9 +158,9 @@ expect wanted got
     | otherwise = Just ("Expected " ++ show wanted ++ ", got " ++ show got)
 
 ergonomicsRejected :: String -> String -> TestResult
-ergonomicsRejected source expected = case parseSource source of
+ergonomicsRejected source expected = case parseSourceParts True source of
     Error err -> check err
-    Ok statements -> case validateStatements statements of
+    Ok parts -> case validateParts parts of
         Ok _ -> Just ("Expected rejection containing: " ++ expected)
         Error err -> check err
   where
@@ -182,8 +183,8 @@ referenceChain = "enum E { End, Link { next: &E } }; fn step(e: &E) -> &E from e
 testErgonomics :: Test
 testErgonomics = TestList "testErgonomics"
     [ testCaseNamedSeq "field path authority"
-        [ ("function types may unify through reference qualifiers", expect (Just [[]]) (FieldPaths.fieldPaths False Map.empty (T.TFn [T.TRef T.TInt] T.TInt) (T.TFn [T.TMutRef T.TInt] T.TInt)))
-        , ("a reference to a function that may be the target is not complete", expect Nothing (FieldPaths.fieldPaths True Map.empty (T.TFn [T.TRef T.TInt] T.TInt) (T.TRef (T.TFn [T.TMutRef T.TInt] T.TInt))))
+        [ ("function types may unify through reference qualifiers", expect (Just [[]]) (FieldPaths.fieldPaths T.noStorage False Map.empty (T.TFn [T.TRef T.TInt] T.TInt) (T.TFn [T.TMutRef T.TInt] T.TInt)))
+        , ("a reference to a function that may be the target is not complete", expect Nothing (FieldPaths.fieldPaths T.noStorage True Map.empty (T.TFn [T.TRef T.TInt] T.TInt) (T.TRef (T.TFn [T.TMutRef T.TInt] T.TInt))))
         ]
     , testCaseNamedSeq "source reference bounds (without native proof credit)"
         [(name, sourceAccepted source) | (name, source) <-
@@ -342,19 +343,20 @@ testErgonomics = TestList "testErgonomics"
         Left err -> Just err
         Right IfExpr{} -> Nothing
         Right expr -> Just ("expected IfExpr, got " ++ show expr)
-    , testCase "AST parsed and elaborated control-flow round trip" $ case parseSource "let x: Int = if true { let y = 1; y } else { 2 }; return x;" of
+    , testCase "AST parsed and elaborated control-flow round trip" $ case parseSourceParts True "let x: Int = if true { let y = 1; y } else { 2 }; return x;" of
         Error err -> Just err
-        Ok stmts -> case writeParsed stmts of
+        Ok (names, library, stmts) -> case writeParsed stmts of
             Error err -> Just err
             Ok wire -> case readParsed wire of
                 Error err -> Just err
-                Ok parsed -> testAssertEq parsed stmts <> case elaborateStatements parsed of
+                Ok parsed -> testAssertEq parsed stmts <> case elaborateParts (names, library, parsed) of
                     Error err -> Just err
                     Ok unit -> case writeLowered unit of
                         Error err -> Just err
                         Ok text -> case readLowered text of
                             Error err -> Just err
-                            Ok back -> testAssertEq back unit
+                            -- (the checked protocols and ownership facts come with the unit's answer, beside its lowered data)
+                            Ok back -> testAssertEq back unit{lowProgram = (lowProgram unit){progProtocols = Map.empty, progOwnership = Nothing}}
     ]
 
 packageAssumptions :: String -> TestResult

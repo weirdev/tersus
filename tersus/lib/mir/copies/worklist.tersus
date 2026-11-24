@@ -1,11 +1,11 @@
 import data::ast::ast { AstNode, AstTermination, AstOptTermination, AstStatement, AstStatements, AstValidations, AstValue, AstExpression };
 import data::codec::codec { Token, utf8Point };
-import mir::full::full { FullBlock, FullFunction, FullProgram, FullRecord };
+import mir::full::full { FullBlock, FullFunction, FullProgram, FullRecord, fnIndex, rowIndex };
 import mir::full::environments { baseIndex, functionEntry, resolveEnv };
 import mir::full::records { envEntries, envTokens, keyOrder, nodeAt, replaceEnv, statementAt };
-import mir::full::tokens { appendTokens, integerAt, intToken, intsEnd, name, namesEnd, textAt, typeEnd, word, wordIs };
+import mir::full::tokens { appendTokens, integerAt, intToken, intsEnd, name, namesEnd, sliceTokens, textAt, typeEnd, word, wordIs };
 import mir::instances::complete { completeInstancesWith };
-import mir::instances::names { InstanceNameClasses };
+import mir::instances::names { InstanceNameClasses, instanceNameAt };
 import mir::pack::body { movesClosureCaptures };
 import mir::pack::expand { expandPack };
 import mir::pack::numbers { decimalFits };
@@ -14,15 +14,19 @@ import mir::copies::keys { CopiesResult, CopyAncestor, CopyCx, CopyMade, CopyNee
 import mir::copies::transform { transformFunction };
 import mir::copies::finish { finishCopies, isStubName, usedNames };
 import mir::copies::frame { boxedArraySizeAt, frameRefusal };
+import mir::copies::keys { copyGround, copyMentionsPack, copyStorageName, sameCopyType };
+import mir::copies::types { substituteArg, substituteType };
+import mir::reachability::prune { ReachIndex, buildReachIndex, liveRootsWith, typePositions, reachableFunctionTypesWith, functionImagesWith, constantRootsWith };
+import mir::mono::functions { MonoKey, monoGeneric, monoSection, monoInstantiate, monoRedirectCall, monoKeyCompare, monoReturn };
 
 struct CopySources { functions: HashMap<String, Int>, bounded: HashMap<String, Int>, order: List<String> };
-struct CopyBuild { made: List<CopyMade>, dispatch: List<DispatchEdge>, arena: List<AstNode>, error: String };
+struct CopyBuild { facts: List<FullRecord>, made: List<CopyMade>, dispatch: List<DispatchEdge>, arena: List<AstNode>, error: String };
 struct CopyBody {
     fun: FullFunction, arena: List<AstNode>, types: List<CopyBinding>,
     blocks: HashMap<Int, List<CopyBinding>>, locals: HashMap<Int, List<CopyBinding>>,
     spreads: List<FullRecord>, error: String
 };
-struct CopyStep { made: CopyMade, needs: List<CopyNeed>, dispatch: List<DispatchEdge>, arena: List<AstNode>, error: String };
+struct CopyStep { facts: List<FullRecord>, made: CopyMade, needs: List<CopyNeed>, dispatch: List<DispatchEdge>, arena: List<AstNode>, error: String };
 
 fn sortedCopyNames(names: &List<String>) -> List<String> ~ {
     out = [];
@@ -185,24 +189,26 @@ fn genericCopyNeeds(program: &FullProgram, sources: &CopySources, used: &HashSet
 fn copyReferenceAt(row: &List<Token>, at: Int) -> Bool ~ {
     return wordIs(row, at, "ref") || wordIs(row, at, "mutref");
 };
-fn sizedBoxedCopyUsed(made: &List<CopyMade>) -> Bool ~ {
+fn sizedBoxedCopyUsed(box: &String, made: &List<CopyMade>) -> Bool ~ {
     for c in made {
         for local in &c.fun.locals {
             at = 3; if wordIs(&local.tokens, 2, "some") { at = 4; };
             row = &local.tokens;
             while copyReferenceAt(row, at) ~ { at = at + 1; };
-            bound = boxedArraySizeAt(row, at);
+            bound = boxedArraySizeAt(box, row, at);
             if bound >= 0 && !wordIs(row, bound, "any") { return true; };
         };
     };
     return false;
 };
-fn copyUsedAfter(made: &List<CopyMade>, sources: &CopySources, always: &HashSet<String>) -> HashSet<String> ~ {
+fn copyUsedAfter(program: &FullProgram, library: &HashSet<String>, made: &List<CopyMade>, sources: &CopySources, always: &HashSet<String>) -> HashSet<String> ~ {
     used = clone(always);
     for c in made { used = HashSet::insert(used, clone(c.generic)); };
-    if sizedBoxedCopyUsed(made) {
+    if sizedBoxedCopyUsed(copyStorageName(program, "Box"), made) {
         for n in push(push(push([], "sizedBoxedSize"), "sizedBoxedGet"), "sizedBoxedSet") {
-            if HashMap::contains(&sources.bounded, &n) { used = HashSet::insert(used, clone(n)); };
+            if !program.checked && size(program.protocols) = 0 && HashMap::contains(&sources.bounded, &n) { used = HashSet::insert(used, clone(n)); };
+            canonical = "std$prelude$prelude$".concat(&n);
+            if HashSet::contains(library, &canonical) && HashMap::contains(&sources.bounded, &canonical) { used = HashSet::insert(used, canonical); };
         };
     };
     return used;
@@ -303,7 +309,7 @@ fn liftedSuffix(generic: &String, lifted: &String) -> String ~ {
     return lifted.slice(liftedAt, end);
 };
 fn failedCopyStep(program: &FullProgram, error: String) -> CopyStep ~ {
-    return CopyStep { made: CopyMade { generic: "", fun: clone(program.entry), lifted: [] }, needs: [], dispatch: [], arena: [], error: error };
+    return CopyStep { facts: [], made: CopyMade { generic: "", fun: clone(program.entry), lifted: [] }, needs: [], dispatch: [], arena: [], error: error };
 };
 fn copyOne(classes: &InstanceNameClasses, program: &FullProgram, sources: &CopySources, named: &List<NamedCopy>, need: &CopyNeed, arena: List<AstNode>) -> CopyStep ~ {
     key = clone(need.key); f = &key.function; copy = nameOf(classes, named, &key);
@@ -386,24 +392,193 @@ fn transformCopyFamily(classes: &InstanceNameClasses, program: &FullProgram, exp
             needs = push(needs, CopyNeed { key: CopyKey { function: n, ..clone(*key) }, chain: clone((*cx).chain) });
         };
     };
-    return CopyStep { made: CopyMade { generic: clone(key.function), fun: result.fun, lifted: liftedDone.funs }, needs: needs, dispatch: appendDispatch(result.dispatch, &liftedDone.dispatch), arena: liftedDone.arena, error: "" };
+    facts = copyBodyFacts(classes, program, sources, cx, key, lifted, needs);
+    if facts.error != "" { return failedCopyStep(program, facts.error); };
+    return CopyStep { facts: facts.rows, made: CopyMade { generic: clone(key.function), fun: result.fun, lifted: liftedDone.funs }, needs: facts.needs, dispatch: appendDispatch(result.dispatch, &liftedDone.dispatch), arena: liftedDone.arena, error: "" };
+};
+struct CopiedFacts { rows: List<FullRecord>, needs: List<CopyNeed>, error: String };
+fn factTypeOccurs(fun: &FullFunction, ty: &List<Token>) -> Bool ~ {
+    candidates = push([], monoReturn(fun));
+    for local in &fun.locals {
+        at = 3; if wordIs(&local.tokens, 2, "some") { at = 4; };
+        candidates = push(candidates, sliceTokens(&local.tokens, at, size(local.tokens)));
+    };
+    for tokens in &candidates {
+        for at in typePositions(tokens, 0) {
+            if sameCopyType(ty, sliceTokens(tokens, at, typeEnd(tokens, at))) { return true; };
+        };
+    };
+    return false;
+};
+fn appendCopyNames(names: List<String>, more: &List<String>) -> List<String> ~ {
+    for n in more { names = push(names, clone(n)); };
+    return names;
+};
+fn copyBodyFacts(classes: &InstanceNameClasses, program: &FullProgram, sources: &CopySources, cx: &CopyCx, key: &CopyKey, lifted: &List<String>, needs: List<CopyNeed>) -> CopiedFacts ~ {
+    rows = [];
+    for fact in &program.boundedFacts {
+        if fact.name = key.function {
+            ts = &fact.tokens; end = typeEnd(ts, 2); shape = sliceTokens(ts, 2, end);
+            if !copyMentionsPack(&shape) {
+                held = false;
+                for n in appendCopyNames(push([], clone(key.function)), lifted) {
+                    i = HashMap::lookup(&sources.functions, &n, 0 - 1);
+                    if i >= 0 && i < size(program.functions) && factTypeOccurs(get(program.functions, i), &shape) { held = true; };
+                };
+                if !held { return CopiedFacts { rows: [], needs: [], error: "internal compiler error: the checked facts of ".concat(&key.function).concat(" name a type its body does not have") }; };
+                ty = substituteType(&shape, &cx.sizes, &cx.types);
+                if wordIs(&ty, 0, "named") && copyGround(&ty) {
+                    owner = instanceNameAt(classes, &ty, 0);
+                    owned = appendTokens(push(push([], word("owned")), name(clone(owner))), sliceTokens(ts, end, size(*ts)));
+                    for role in 0..3 {
+                        at = 4 + 2 * role; callee = textAt(&owned, at);
+                        if callee != "" {
+                            record = instanceAt(program, &callee);
+                            if record.found {
+                                args = []; for arg in &record.value.args { args = push(args, substituteArg(arg, &cx.sizes, &cx.types)); };
+                                instance = CopyInstance { function: record.value.function, args: args };
+                                target = concreteKey(&instance);
+                                if !target.found { return CopiedFacts { rows: [], needs: [], error: "internal compiler error: a copy of ".concat(&key.function).concat(" makes ").concat(&callee).concat(" for types that are not all known") }; };
+                                if at < size(owned) { owned = set(owned, at, name(nameOf(classes, &cx.named, &target.value))); };
+                                needs = push(needs, CopyNeed { key: target.value, chain: clone(cx.chain) });
+                            } else {
+                                if !HashMap::contains(&sources.functions, &callee) { return CopiedFacts { rows: [], needs: [], error: "internal compiler error: the checked facts of ".concat(&key.function).concat(" name ").concat(&callee).concat(", which the program does not have") }; };
+                            };
+                        };
+                    };
+                    rows = push(rows, FullRecord { name: owner, tokens: owned });
+                };
+            };
+        };
+    };
+    return CopiedFacts { rows: rows, needs: needs, error: "" };
+};
+fn recordedNeeds(program: &FullProgram, sources: &CopySources, owners: &HashSet<String>) -> List<CopyNeed> ~ {
+    out = [];
+    for row in &program.ownership {
+        if HashSet::contains(owners, &row.name) {
+            for role in 0..3 {
+                callee = textAt(&row.tokens, 4 + 2 * role);
+                if callee != "" && !HashMap::contains(&sources.functions, &callee) {
+                    record = instanceAt(program, &callee);
+                    if record.found && HashMap::contains(&sources.bounded, &record.value.function) && HashMap::contains(&sources.functions, &record.value.function) {
+                        key = concreteKey(&record.value);
+                        if key.found {
+                            ground = true; for ty in &key.value.types { if !copyGround(ty) { ground = false; }; };
+                            if ground { out = push(out, CopyNeed { key: key.value, chain: [] }); };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return out;
+};
+struct FrameSplit { frames: List<MonoKey>, instances: List<FullRecord>, error: String };
+fn splitFrames(program: &FullProgram) -> FrameSplit ~ {
+    frames = []; instances = [];
+    for row in &program.instances {
+        r = instanceAt(program, &row.name);
+        if !r.found { return FrameSplit { frames: [], instances: [], error: "link error: an unreadable instance" }; };
+        g = &r.value.function;
+        // Bound dispatch markers (including pack specializations) are not ordinary generic frames.
+        if rowIndex(&program.bounded, g) >= 0 || (*g = "$builtin" && size(r.value.args) = 0) || boundCallParts(&row.name).found {
+            instances = push(instances, clone(row));
+        } else {
+            n = fnIndex(&program.functions, g); k = concreteKey(&r.value);
+            valid = k.found; for t in &k.value.types { if !copyGround(t) { valid = false; }; };
+            if n < 0 || n >= size(program.functions) || !valid { return badFrame(g); };
+            f = get(program.functions, n);
+            if size(k.value.types) != size(monoSection(&f.header, "typeparams")) || size(k.value.sizes) != size(monoSection(&f.header, "sizeparams")) { return badFrame(g); };
+            frames = push(frames, MonoKey { name: clone(*g), types: k.value.types, sizes: k.value.sizes });
+        };
+    };
+    return FrameSplit { frames: frames, instances: instances, error: "" };
+};
+fn badFrame(g: &String) -> FrameSplit ~ {
+    return FrameSplit { frames: [], instances: [], error: "link error: an instance of ".concat(g).concat(" that is no copy of a function with bounds nor a frame of the function") };
+};
+fn containsFrame(frames: &List<MonoKey>, key: &MonoKey) -> Bool ~ {
+    for f in frames { if monoKeyCompare(f, key) = 0 { return true; }; };
+    return false;
+};
+fn emptyFactIndex() -> HashMap<String, Int> ~ { return HashMap::new(); };
+fn genericCallNeeds(program: &FullProgram, genericIdx: &HashMap<String, Int>, f: &FullFunction) -> List<MonoKey> ~ {
+    out = [];
+    for b in &f.blocks {
+        for row in &b.lines {
+            if wordIs(row, 0, "call") && wordIs(row, 1, "const") && wordIs(row, 2, "fn") {
+                gidx = HashMap::lookup(genericIdx, textAt(row, 3), 0 - 1);
+                if gidx >= 0 && gidx < size(program.functions) {
+                    one = push([], clone(get(&program.functions, gidx)));
+                    for k in monoRedirectCall(f, &one, row).needs { out = push(out, clone(k)); };
+                };
+            };
+        };
+    };
+    return out;
+};
+fn reachedFrameOwners(program: &FullProgram, idx: &ReachIndex, supplied: &List<MonoKey>, live: &HashSet<String>, owners: HashSet<String>) -> HashSet<String> ~ {
+    if size(*supplied) = 0 { return owners; };
+    genericIdx = emptyFactIndex();
+    gi = 0;
+    for f in &program.functions {
+        if monoGeneric(f) { genericIdx = HashMap::insert(genericIdx, textAt(&f.header, 1), gi); };
+        gi = gi + 1;
+    };
+    pending = genericCallNeeds(program, &genericIdx, &program.entry);
+    for f in &program.functions {
+        if HashSet::contains(live, textAt(&f.header, 1)) && !monoGeneric(f) {
+            for k in genericCallNeeds(program, &genericIdx, f) { pending = push(pending, clone(k)); };
+        };
+    };
+    seen = []; at = 0;
+    while at < size(pending) [{ affirm at >= 0; }] ~ {
+        k = get(&pending, at); at = at + 1;
+        if containsFrame(supplied, k) && !containsFrame(&seen, k) {
+            seen = push(seen, clone(k)); n = HashMap::lookup(&idx.fns, &k.name, 0 - 1);
+            if n >= 0 && n < size(program.functions) {
+                frame = monoInstantiate(clone(get(program.functions, n)), k);
+                for owner in reachableFunctionTypesWith(idx, &frame) { owners = owners.insert(clone(owner)); };
+                for owner in functionImagesWith(idx, &frame) { owners = owners.insert(clone(owner)); };
+                for owner in constantRootsWith(program, idx, &frame) { owners = owners.insert(clone(owner)); };
+                for next in genericCallNeeds(program, &genericIdx, &frame) { pending = push(pending, clone(next)); };
+            };
+        };
+    };
+    return owners;
 };
 fn emptyCopyDone() -> HashMap<String, List<CopyKey>> ~ { return HashMap::new(); };
 fn buildCopies(classes: &InstanceNameClasses, program: &FullProgram, sources: &CopySources, named: &List<NamedCopy>, queue: List<CopyNeed>, arena: List<AstNode>) -> CopyBuild ~ {
-    done = emptyCopyDone(); made = []; dispatch = []; i = 0;
+    done = emptyCopyDone(); made = []; dispatch = []; facts = clone(program.ownership);
+    factIdx = emptyFactIndex(); fi = 0;
+    for r in &facts { if !HashMap::contains(&factIdx, &r.name) { factIdx = HashMap::insert(factIdx, clone(r.name), fi); }; fi = fi + 1; };
+    i = 0;
     while i < size(queue) ~ {
         need = clone(get(&queue, i)); i = i + 1;
         prior = HashMap::lookup(&done, &need.key.function, []); seen = false;
         for k in &prior { if sameKey(k, &need.key) { seen = true; }; };
         if !seen {
             result = copyOne(classes, program, sources, named, &need, arena);
-            if result.error != "" { return CopyBuild { made: [], dispatch: [], arena: [], error: result.error }; };
+            if result.error != "" { return CopyBuild { facts: [], made: [], dispatch: [], arena: [], error: result.error }; };
+            for row in &result.facts {
+                at = HashMap::lookup(&factIdx, &row.name, 0 - 1);
+                if at >= 0 && at < size(facts) {
+                    if get(&facts, at).tokens != row.tokens {
+                        message = "Type error: ".concat(textAt(&result.made.fun.header, 1)).concat(" has a ").concat(&row.name).concat(" whose facts under its bounds disagree with its checked facts");
+                        return CopyBuild { facts: [], made: [], dispatch: [], arena: [], error: message };
+                    };
+                } else {
+                    factIdx = HashMap::insert(factIdx, clone(row.name), size(facts));
+                    facts = push(facts, clone(row));
+                };
+            };
             done = HashMap::insert(done, clone(need.key.function), push(prior, need.key));
             arena = result.arena; made = push(made, result.made); queue = appendCopyNeeds(queue, &result.needs);
             dispatch = appendDispatch(dispatch, &result.dispatch);
         };
     };
-    return CopyBuild { made: made, dispatch: dispatch, arena: arena, error: "" };
+    return CopyBuild { facts: facts, made: made, dispatch: dispatch, arena: arena, error: "" };
 };
 fn hasMayDiverge(fun: &FullFunction, arena: &List<AstNode>) -> Bool ~ {
     id = integerAt(&fun.spec, 6);
@@ -472,12 +647,22 @@ fn divergingCopies(program: FullProgram) -> FullProgram ~ {
     return FullProgram { functions: functions, arena: arena, ..program };
 };
 fn makeCopiesWith(classes: &InstanceNameClasses, program: FullProgram, library: &HashSet<String>) -> CopiesResult ~ {
+    return makeCopiesWithPolicy(classes, program, library, false);
+};
+fn makeCopiesWithPolicy(classes: &InstanceNameClasses, program: FullProgram, library: &HashSet<String>, recording: Bool) -> CopiesResult ~ {
     problem = "a boxed closure must move a capture local";
     if !movesClosureCaptures(&program.entry) { return CopiesResult { value: program, error: problem }; };
     for f in &program.functions {
         if !movesClosureCaptures(f) { return CopiesResult { value: program, error: problem }; };
     };
     if size(program.bounded) = 0 && size(program.instances) = 0 { return CopiesResult { value: program, error: "" }; };
+    frames = [];
+    if program.checked {
+        split = splitFrames(&program);
+        if split.error != "" { return CopiesResult { value: program, error: split.error }; };
+        frames = split.frames;
+        program = FullProgram { instances: split.instances, ..program };
+    };
     sources = copySources(&program); named = originalCopyNames(&program);
     lifted = HashSet::new(); always = HashSet::new();
     for row in &program.bounded {
@@ -503,14 +688,22 @@ fn makeCopiesWith(classes: &InstanceNameClasses, program: FullProgram, library: 
     entry = transformFunction(classes, &program, &rootCx, clone(program.entry), arena);
     if entry.error != "" { return CopiesResult { value: program, error: entry.error }; };
     needs = appendCopyNeeds(needs, &entry.needs); dispatch = appendDispatch(dispatch, &entry.dispatch); used = genericClosure(&program, &sources, clone(always));
+    owners = HashSet::new();
     while true ~ {
-        queue = genericCopyNeeds(&program, &sources, &used, clone(needs));
+        queue = genericCopyNeeds(&program, &sources, &used, appendCopyNeeds(clone(needs), recordedNeeds(&program, &sources, &owners)));
         built = buildCopies(classes, &program, &sources, &named, queue, clone(entry.arena));
         if built.error != "" { return CopiesResult { value: program, error: built.error }; };
-        next = genericClosure(&program, &sources, copyUsedAfter(&built.made, &sources, &always));
+        next = genericClosure(&program, &sources, copyUsedAfter(&program, library, &built.made, &sources, &always));
         if copySetEqual(&used, &next) {
-            out = finishCopies(classes, FullProgram { arena: built.arena, ..program }, &named, &used, roots, entry.fun, &built.made, appendDispatch(dispatch, &built.dispatch));
-            return CopiesResult { value: divergingCopies(completeInstancesWith(out, classes)), error: "" };
+            out = finishCopies(classes, FullProgram { arena: built.arena, ownership: built.facts, ..clone(program) }, &named, &used, clone(roots), clone(entry.fun), &built.made, appendDispatch(clone(dispatch), &built.dispatch));
+            out = divergingCopies(completeInstancesWith(out, classes));
+            if !recording || !program.checked { return CopiesResult { value: out, error: "" }; };
+            idx = buildReachIndex(&out);
+            live = liveRootsWith(&out, &idx);
+            more = reachedFrameOwners(&out, &idx, &frames, &live.functions, live.types);
+            count = size(owners);
+            for n in more.elements() { owners = owners.insert(clone(n)); };
+            if count = size(owners) { return CopiesResult { value: out, error: "" }; };
         };
         used = next;
     };

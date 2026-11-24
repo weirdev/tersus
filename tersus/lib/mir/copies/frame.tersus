@@ -5,10 +5,10 @@ import mir::full::tokens { normalizeType, numberAt, sliceTokens, textAt, typeEnd
 import mir::instances::complete { completeInstancesWith };
 import mir::instances::names { InstanceNameClasses, instanceNameAt };
 import mir::pack::numbers { decimalAdd, decimalCmp, decimalInvariantError, decimalMul };
-import mir::copies::keys { renderCopyType, sameCopyType };
+import mir::copies::keys { renderCopyType, sameCopyType, copyStorageName };
 
 struct FrameTypes {
-    records: List<FullRecord>, byName: HashMap<String, Int>, variantOwner: HashMap<String, Int>
+    records: List<FullRecord>, box: String, byName: HashMap<String, Int>, variantOwner: HashMap<String, Int>
 };
 struct FrameFields { end: Int, words: String };
 
@@ -16,9 +16,9 @@ fn arraySizeAt(row: &List<Token>, at: Int) -> Int ~ {
     if wordIs(row, at, "array") { return typeEnd(row, at + 1); };
     return -1;
 };
-fn boxedArraySizeAt(row: &List<Token>, at: Int) -> Int ~ {
+fn boxedArraySizeAt(box: &String, row: &List<Token>, at: Int) -> Int ~ {
     if wordIs(row, at, "box") { return arraySizeAt(row, at + 1); };
-    if wordIs(row, at, "named") && textAt(row, at + 1) = "Box" && numberAt(row, at + 2) = 1 && wordIs(row, at + 3, "type") {
+    if wordIs(row, at, "named") && *box != "" && textAt(row, at + 1) = *box && numberAt(row, at + 2) = 1 && wordIs(row, at + 3, "type") {
         return arraySizeAt(row, at + 4);
     };
     return -1;
@@ -30,7 +30,7 @@ fn frameFieldsEnd(row: &List<Token>, at: Int) -> Int ~ {
     return p;
 };
 fn emptyFrameIndex() -> HashMap<String, Int> ~ { return HashMap::new(); };
-fn frameTypes(records: List<FullRecord>) -> FrameTypes ~ {
+fn frameTypes(records: List<FullRecord>, box: String) -> FrameTypes ~ {
     names = []; byName = emptyFrameIndex(); owners = emptyFrameIndex();
     for r in &records { names = push(names, clone(r.name)); };
     for i in keyOrder(&names, false) {
@@ -49,7 +49,7 @@ fn frameTypes(records: List<FullRecord>) -> FrameTypes ~ {
             };
         };
     };
-    return FrameTypes { records: records, byName: byName, variantOwner: owners };
+    return FrameTypes { records: records, box: box, byName: byName, variantOwner: owners };
 };
 fn frameFields(classes: &InstanceNameClasses, types: &FrameTypes, row: &List<Token>, at: Int) -> FrameFields ~ {
     p = at + 1; total = "0"; count = numberAt(row, at);
@@ -80,7 +80,7 @@ fn declaredFrameWords(classes: &InstanceNameClasses, types: &FrameTypes, id: Int
     return decimalAdd("1", &widest);
 };
 fn frameTypeWords(classes: &InstanceNameClasses, types: &FrameTypes, row: &List<Token>, at: Int) -> String ~ {
-    boxed = boxedArraySizeAt(row, at);
+    boxed = boxedArraySizeAt(&types.box, row, at);
     if boxed >= 0 && wordIs(row, boxed, "any") { return "2"; };
     array = arraySizeAt(row, at);
     if array >= 0 && wordIs(row, array, "c") {
@@ -128,7 +128,7 @@ fn frameRefusal(classes: &InstanceNameClasses, program: &FullProgram, genericNam
     candidates = frameCandidates(generic, copy);
     if size(candidates) = 0 { return ""; };
     completed = completeInstancesWith(FullProgram { functions: push([], clone(copy)), ..clone(program) }, classes);
-    types = frameTypes(completed.types);
+    types = frameTypes(completed.types, copyStorageName(program, "Box"));
     for ty in &candidates {
         words = frameTypeWords(classes, &types, ty, 0);
         if words = "" { return decimalInvariantError(); };

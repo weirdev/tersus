@@ -81,7 +81,8 @@ fn ensureInstance(st: St, t: Int) -> St ~ {
     x = tyAt(st, t);
     if x.kind != 4 { return st; };
     name = rawInstanceName(st, t);
-    if HashMap::contains(&st.ctors, &name) || size(x.args) = 0 { return st; };
+    // (a library's interface gives the constructor of its own body's instance, List<'T>, as a physical view without its type)
+    if (HashMap::contains(&st.ctors, &name) && HashMap::contains(&st.types, &name)) || size(x.args) = 0 { return st; };
     tuple = isTuple(&x.name);
     st = genericOf(st, &x.name);
     if !st.ok { return st; };

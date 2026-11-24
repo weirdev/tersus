@@ -61,6 +61,15 @@ testClosures =
             , testCase "mutable boxed calls give fresh results even with identical arguments" (rejects "n = 0;\nlet f: ClosureMut<fn() -> Int> = move fn() -> Int {\n    n = n + 1;\n    return n;\n};\na = f();\nb = f();\naffirm a = b;\nreturn b;\n" "Could not prove: a = b")
             , testCase "boxing refuses a potentially diverging callable" (rejects "fn spin() -> Int [{ }] [{ }] ~ { return spin(); };\nlet f: Closure<fn() -> Int> = spin;\nreturn 0;\n" "a boxed closure cannot use a potentially diverging callable")
             , testCase "a boxed element view cannot survive replacement of its owner" (rejects "fn make(n: Int) -> Closure<fn() -> Int> { return move fn() -> Int => n; };\nlet xs: List<Closure<fn() -> Int>> = [make(42)];\npart = get(xs, 0);\nxs = set(xs, 0, make(7));\nreturn part();\n" "still looks at xs[0]")
+            , TestCase "an Fn bound in a module of its own" $ do
+                program <-
+                    programFromFiles
+                        "app/main.tersus"
+                        [ ("app/package.tersus", "")
+                        , ("app/main.tersus", "import app::lib { apply }; struct Adder { n: Int }; impl Fn(x: Int) -> Int for Adder { fn call(self: &Self, x: Int) -> Int { return x + self.n; }; }; a = Adder { n: 10 }; return apply(&a, 5);")
+                        , ("app/lib/lib.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
+                        ]
+                pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
             , TestList
                 "closures"
                 [ testCase "a closure reads a Copy capture, copied at creation" (runs "n = 10; f = fn(x: Int) -> Int => x + n; return f(5);" 15)
