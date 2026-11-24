@@ -61,6 +61,24 @@ testMirVerify =
             ( TestCase "raw lists and Boxes library" (rawInterpreted True rawLibrary)
                 : [TestCase name (rawInterpreted expected (Ok text)) | (name, text, expected) <- blockCases]
             )
+        , TestList "boxed capture provenance"
+            [ TestCase "raw storage metadata cannot authorize a permission capture" (withVerifier fakeStorageRefused)
+            , testCase "host refuses an ordinary permission capture" (captureRefused "block int" [])
+            , testCase "host refuses lookalike List storage with an ordinary permission" (captureRefused "named \"List\" 1 type int" fakeList)
+            , testCase "host refuses a reference nested behind a named capture" (captureRefused "named \"Outer\" 0" nestedReference)
+            ]
+        , TestList "boxed thunk ABI"
+            [ TestCase "boxed thunk receiver must be explicitly lent" $ withVerifier $ \exe ->
+                boxedAbiRefused exe (captureMirWith [] [] "int" "ref int" "0" "fn 0 int") "must explicitly lend"
+            , TestCase "boxed signature cannot erase Uninit in its result" $ withVerifier $ \exe ->
+                boxedAbiRefused exe (captureMirWith [] [] "int" "int" "1 1" "fn 0 uninit int") "needs a function signature"
+            , TestCase "boxed capture slot rejects a bare Byte" (withVerifier (narrowCaptureRefused "byte"))
+            , TestCase "boxed capture slot rejects a bare I16" (withVerifier (narrowCaptureRefused "i16"))
+            , TestCase "boxed capture slot accepts a Bool" (withVerifier (captureAccepted [] "bool"))
+            , TestCase "boxed capture slot accepts an Int" (withVerifier (captureAccepted [] "int"))
+            , TestCase "boxed capture slot accepts narrow fields in an aggregate" $ withVerifier $
+                captureAccepted ["struct \"Env\" 2 \"b\" byte \"n\" i16"] "named \"Env\" 0"
+            ]
         , TestCase "Uninit function type round trips through MIR data" uninitRoundTrip
         , TestList "function-list identity, interpreted"
             [TestCase name (rawInterpreted expected input) | (name, input, expected) <- functionCases]
@@ -599,6 +617,48 @@ onEveryFunction change program =
         { progMain = change (progMain program)
         , progFunctions = Map.map change (progFunctions program)
         }
+
+captureMir :: [String] -> [String] -> String -> String
+captureMir types metadata capture = captureMirWith types metadata capture capture "1 1" "fn 0 int"
+
+captureMirWith :: [String] -> [String] -> String -> String -> String -> String -> String
+captureMirWith types metadata capture receiver borrowed signature = unlines $
+    ["tersus-mir 1"] ++ types ++ metadata ++
+    [ "function \"thunk\" params 1 1 returns some int sizeparams 0 typeparams 0 borrowed " ++ borrowed
+    , "local 0 none int", "local 1 none " ++ receiver, "block 0", "assign 0 use const int 42", "return", "end"
+    , "function \"make\" params 1 1 returns none sizeparams 0 typeparams 0 borrowed 0"
+    , "local 1 none " ++ capture, "local 2 none closure " ++ signature, "block 0"
+    , "assign 2 packclosure move 1 const fn \"thunk\"", "return", "end"
+    , "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0", "block 0", "return", "end"
+    ]
+
+narrowCaptureRefused :: String -> FilePath -> IO TestResult
+narrowCaptureRefused ty exe = boxedAbiRefused exe (captureMir [] [] ty) "boxed closure capture cannot be a bare Byte or fixed-width integer"
+
+captureAccepted :: [String] -> String -> FilePath -> IO TestResult
+captureAccepted types ty exe = do
+    actual <- runExecutableBytes exe [] (captureMir types [] ty)
+    pure (testAssertEq actual (ExitSuccess, "OK\n", ""))
+
+boxedAbiRefused :: FilePath -> String -> String -> IO TestResult
+boxedAbiRefused exe raw expected = do
+    (exit, out, err) <- runExecutableBytes exe [] raw
+    pure (testAssertEq (exit, out) (ExitSuccess, "1\n") <> testAssertEq (expected `isInfixOf` err, err) (True, err))
+
+fakeList :: [String]
+fakeList = ["struct \"List<Int>\" 4 \"addr\" addr int \"len\" int \"cap\" int \"blk\" block int"]
+
+nestedReference :: [String]
+nestedReference = ["struct \"Inner\" 1 \"r\" ref int", "struct \"Outer\" 1 \"items\" array named \"Inner\" 0 c 1"]
+
+captureRefused :: String -> [String] -> TestResult
+captureRefused capture types = testAssertErrorContains "a boxed closure capture cannot contain references or permissions"
+    (readProgram (captureMir types [] capture) `bindResult` verifyProgram)
+
+fakeStorageRefused :: FilePath -> IO TestResult
+fakeStorageRefused exe = do
+    actual <- runExecutableBytes exe [] (captureMir fakeList ["storage \"List\" \"Box\""] "named \"List\" 1 type int")
+    pure (testAssertEq actual (ExitSuccess, "2\n", "boxed capture effects require source provenance\n"))
 
 {-# NOINLINE verifierExecutable #-}
 verifierExecutable :: MVar (Maybe FilePath)

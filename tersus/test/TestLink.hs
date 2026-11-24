@@ -27,6 +27,7 @@ import MirData (readLowered, writeLowered)
 import qualified MirData
 import MirEval (RunEnv (..), Outcome (..), MirValue (..), runProgramEnv)
 import MirPass (programData)
+import MirMono (monomorphizeForValidation)
 import ElaboratorTool (bootstrapLoader)
 import LibPackage (libPackage)
 import PackageCompile (compileModulesUsing, lowerCompiledPackage, packageLinkInputs)
@@ -35,7 +36,7 @@ import PreludeSource (toolPackageFiles)
 import Hash (fingerprint)
 import TestMirData (everyRecord, malformedLowered)
 import qualified Syntax as S
-import Types (Type (..), Arg (..), Size (..), BuiltinFunct (..), FnContract (..), FnClause (..), FnClauseToken (..), pattern TList, pattern TBox)
+import Types (Type (..), Arg (..), Size (..), BuiltinFunct (..), FnContract (..), FnClause (..), FnClauseToken (..), instanceName, boxedTypeKey, pattern TList, pattern TBox)
 import TestHarness
 import Utils
 
@@ -212,9 +213,11 @@ testLinkNative = TestList "testLinkNative"
     ++ [ TestCase "production Link validates only used compiler-library bounded templates" libraryBoundedRetention
        , testCase "pinned Link preserves nested contract types and their exact clause tokens" contractTypesThroughLink
        , testCase "pinned Link preserves boxed closures, nested signatures and opaque clauses" (contractTypesThroughLinkWith boxedCallback)
-       , TestCase "pinned Mono refuses boxed closure types before specialization" boxedMonoRefusal
-       , testCase "pinned Link prune refuses boxed closure signature dependencies" boxedPruneRefusal
-       , TestCase "pinned Link transports closure allocation records without enabling runtime consumers" closurePackTransport
+       , TestCase "wide opaque contracts survive MIR3 pruning and Mono" wideOpaqueTypes
+       , TestCase "native Mono preserves boxed closure types" boxedMonoTypes
+       , TestCase "native and validation Mono keep distinct boxed contracts in compound arguments" boxedSpecializations
+       , TestCase "native Link prune retains boxed closure signature dependencies" boxedPruneTypes
+       , TestCase "pinned Link transports closure allocation records and rejects malformed records" closurePackTransport
        , TestCase "actual prepared compiler/helper/generic inputs" realInputChecks
        , TestCase "native pruning preserves the entry and reachable program structure on actual owned MIR" $ do
             seed <- cachedSeed
@@ -390,24 +393,28 @@ wideCallback ret = TFnContract [TArrayOf TInt (SizeConst (2 ^ (80 :: Int)))] ret
   where
     contract = FnContract ["xs"] [FnClause [FnWord "closure", FnWord "closuremut", FnWord "0007"]] []
 
-boxedPruneRefusal :: TestResult
-boxedPruneRefusal = firstFailure
-    [ testAssertEq (mapResult mainLocals (ProductionLink.pruneProgram opaque)) (Ok (mainLocals opaque))
-    , testAssertErrorContains "cannot prune MIR3 with boxed closure types" (ProductionLink.pruneProgram boxed)
-    ]
+boxedPruneTypes :: IO TestResult
+boxedPruneTypes = do
+    actual <- nativeFull (case programData program of Ok text -> "pass link\nprune\n" ++ text; Error _ -> "")
+    pure $ inspect actual $ \unit ->
+        testAssertEq (Map.keysSet (M.progTypes (M.lowProgram unit))) (Set.fromList ["Child<Int>", holderName])
   where
-    signature = TFn [] (TNamed "Child" [ArgType TInt])
-    mainLocals = M.fnLocals . M.progMain
-    opaque = program signature
-    boxed = program (boxedCallback signature)
-    program ret = empty
-        { M.progTypes = Map.singleton "Child<Int>" (M.StructDecl [("value", TInt)])
-        , M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl (wideCallback ret) Nothing)}
+    child = TNamed "Child" [ArgType TInt]
+    array = TArrayOf (boxedCallback (TFn [] child)) (SizeConst 2)
+    args = [ArgType array]
+    holderName = instanceName "Holder" args
+    program = empty
+        { M.progTypes = Map.fromList
+            [ ("Child<Int>", M.StructDecl [("value", TInt)])
+            , (holderName, M.StructDecl [("callbacks", array)])
+            , ("Unneeded", M.StructDecl [("value", TInt)])
+            ]
+        , M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl (TNamed "Holder" args) Nothing)}
         }
 
 closurePackTransport :: IO TestResult
-closurePackTransport = case (programData boxed, programData unboxed) of
-    (Ok input, Ok noBox) -> do
+closurePackTransport = case programData boxed of
+    Ok input -> do
         tool <- cachedSeed
         case tool of
             Error e -> pure (Just e)
@@ -423,18 +430,14 @@ closurePackTransport = case (programData boxed, programData unboxed) of
                     , "peek 1 packclosure move 2 const fn \"thunk\""
                     , "assignref 1 0 packclosure move 2 const fn \"thunk\""
                     ]
-                prune <- refuses emitter unreadable ("pass link\nprune\n" ++ pack input)
-                mono <- mapM (\pass -> refuses emitter "the input is not full MIR version 3\n" ("pass " ++ pass ++ "\n" ++ pack noBox)) ["mono", "mono-ownership"]
                 pure $ firstFailure
                     ([ testAssertEq status ExitSuccess, testAssertEq errors ""
                      , testAssertEq status' ExitSuccess, testAssertEq errors' ""
                      , testAssertEq (filter (== packRow) (lines merged)) [packRow]
                      , testAssertEq (filter (== packRow) (lines completed)) [packRow]
                      , testAssertTrue (any (isPrefixOf "function \"thunk\"") (lines merged))
-                     , prune
-                     ] ++ malformed ++ mono)
-    (Error e, _) -> pure (Just e)
-    (_, Error e) -> pure (Just e)
+                     ] ++ malformed)
+    Error e -> pure (Just e)
   where
     unreadable = "the linking request contains unreadable MIR3\n"
     merge text = "pass link\nmerge 1\nunit \"app\" none " ++ show (length (lines text)) ++ "\n" ++ text
@@ -446,37 +449,77 @@ closurePackTransport = case (programData boxed, programData unboxed) of
         (_, out, errors) <- Native.runWithInputFull emitter request
         pure (firstFailure [testAssertEq out "1\n", testAssertEq errors expected])
     boxed = fixture (boxedCallback (TFn [] TInt))
-    unboxed = fixture TInt
     fixture ty = p{M.progMain = (M.progMain p){M.fnLocals = Map.fromList [(M.Local 1, M.LocalDecl ty Nothing), (M.Local 2, M.LocalDecl TInt Nothing)]}}
     p = withMain (program [("thunk", 7)]) [M.Assign (M.Local 1) (M.Use (M.Copy (M.Local 2)))] M.Return
 
-boxedMonoRefusal :: IO TestResult
-boxedMonoRefusal = do
-    seed <- cachedSeed
-    case (seed, MirData.writeLowered (asUnit opaque), MirData.writeLowered (asUnit boxed)) of
-        (Ok emitter, Ok opaqueInput, Ok boxedInput) -> do
-            (opaqueStatus, opaqueOut, opaqueErrors) <- Native.runWithInputFull emitter ("pass mono\n" ++ opaqueInput)
-            (_, opaqueCombined, _) <- Native.runWithInputFull emitter ("pass mono-ownership\n" ++ opaqueInput)
-            (_, out, newErrors) <- Native.runWithInputFull emitter ("pass mono\n" ++ boxedInput)
-            (_, combined, combinedErrors) <- Native.runWithInputFull emitter ("pass mono-ownership\n" ++ boxedInput)
-            pure (firstFailure
-                [ testAssertEq opaqueStatus ExitSuccess
-                , testAssertEq opaqueErrors ""
-                , testAssertEq (mapResult M.lowProgram (readLowered opaqueOut)) (Ok opaque)
-                -- The legacy ownership reader cannot read the wide size; compare only the Full receipt.
-                , testAssertEq (take (length opaqueOut) opaqueCombined) opaqueOut
-                , testAssertEq out "1\n"
-                , testAssertEq combined "1\n"
-                , testAssertEq newErrors "boxed closure types are not supported by the runtime MIR ABI\n"
-                , testAssertEq combinedErrors newErrors
-                ])
-        (Error e, _, _) -> pure (Just e)
-        (_, Error e, _) -> pure (Just e)
-        (_, _, Error e) -> pure (Just e)
+wideOpaqueTypes :: IO TestResult
+wideOpaqueTypes = case programData fixture of
+    Error e -> pure (Just e)
+    Ok text -> do
+        pruned <- nativeFull ("pass link\nprune\n" ++ text)
+        tool <- cachedSeed
+        case tool of
+            Error e -> pure (Just e)
+            Ok emitter -> do
+                (status, out, err) <- Native.runWithInputFull emitter ("pass mono\n" ++ text)
+                pure (firstFailure
+                    [ testAssertEq status ExitSuccess
+                    , testAssertEq err ""
+                    , testAssertEq (mapResult M.lowProgram (readLowered out)) (Ok fixture)
+                    , testAssertEq (mapResult (M.fnLocals . M.progMain . M.lowProgram) pruned) (Ok (M.fnLocals (M.progMain fixture)))
+                    ])
   where
-    wrap ret = empty{M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl (wideCallback ret) Nothing)}}
-    opaque = wrap TInt
-    boxed = wrap (boxedCallback (TFn [] TInt))
+    fixture = empty{M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl (wideCallback TInt) Nothing)}}
+
+boxedMonoTypes :: IO TestResult
+boxedMonoTypes = do
+    tool <- Housekeeping.cachedSourceEmitter
+    case (tool, programData fixture) of
+        (Ok emitter, Ok text) -> do
+            (_, out, errors) <- Native.runWithInputFull emitter ("pass mono\n" ++ text)
+            pure (firstFailure [testAssertEq errors "", testAssertEq (mapResult M.lowProgram (readLowered out)) (Ok fixture)])
+        (Error e, _) -> pure (Just e)
+        (_, Error e) -> pure (Just e)
+  where
+    contract = FnContract [] [FnClause [FnWord "closure", FnWord "0007"]] []
+    ty = boxedCallback (TFnContract [] TInt contract)
+    fixture = empty{M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl ty Nothing)}}
+
+boxedSpecializations :: IO TestResult
+boxedSpecializations = case programData fixture of
+    Error e -> pure (Just e)
+    Ok text -> do
+        tool <- Housekeeping.cachedSourceEmitter
+        case tool of
+            Error e -> pure (Just e)
+            Ok emitter -> do
+                (status, out, err) <- Native.runWithInputFull emitter ("pass mono\n" ++ text)
+                pure (firstFailure
+                    [ testAssertEq status ExitSuccess
+                    , testAssertEq err ""
+                    , inspect (mapResult M.lowProgram (readLowered out)) check
+                    , check (monomorphizeForValidation fixture)
+                    ])
+  where
+    at i = M.Local i
+    ty n = TArrayOf (boxedCallback (TFnContract [] TInt (FnContract [] [] [FnClause [FnWord n]]))) (SizeConst 1)
+    cases = [ty "1", ty "2"]
+    summary t = "identity<" ++ boxedTypeKey t ++ ">"
+    check p = testAssertEq (Map.map M.fnReturns (M.progFunctions p)) (Map.fromList [(summary t, Just t) | t <- cases])
+    param = TParam "T"
+    identity = (function "identity" 0)
+        { M.fnTypeParams = ["T"], M.fnParams = [at 1], M.fnReturns = Just param
+        , M.fnLocals = Map.fromList [(at i, M.LocalDecl param Nothing) | i <- [0, 1]]
+        , M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [M.Assign (at 0) (M.Use (M.Copy (at 1)))] M.Return)
+        }
+    call i = M.BasicBlock [] (M.Call (M.Const (M.CFn "identity")) [M.Copy (at (i + 1))] (at (i + 3)) (M.BlockId (i + 1)))
+    fixture = empty
+        { M.progFunctions = Map.singleton "identity" identity
+        , M.progMain = (M.progMain empty)
+            { M.fnLocals = Map.fromList [(at i, M.LocalDecl t Nothing) | (i, t) <- zip [1..] (cases ++ cases)]
+            , M.fnBlocks = Map.fromList [(M.BlockId 0, call 0), (M.BlockId 1, call 1), (M.BlockId 2, M.BasicBlock [] M.Return)]
+            }
+        }
 
 libraryBoundedRetention :: IO TestResult
 libraryBoundedRetention = do
@@ -536,7 +579,7 @@ firstFailure (Just e : _) = Just e
 firstFailure (Nothing : rest) = firstFailure rest
 
 empty :: M.Program
-empty = M.Program Map.empty Map.empty (function "" 0){M.fnReturns = Nothing, M.fnLocals = Map.empty, M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)} Map.empty Map.empty Map.empty Map.empty
+empty = M.Program Map.empty Map.empty (function "" 0){M.fnReturns = Nothing, M.fnLocals = Map.empty, M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)} Map.empty Map.empty Map.empty Map.empty Map.empty
 
 function :: String -> Integer -> M.Function
 function n value = M.Function n [] (Just TInt) (Map.singleton (M.Local 0) (M.LocalDecl TInt Nothing))

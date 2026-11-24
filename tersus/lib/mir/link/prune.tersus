@@ -1,8 +1,9 @@
-import data::codec::codec { Token, catStrings };
+import data::codec::codec { Token, catStrings, boxedClosureInSpan };
+import mir::instances::names { InstanceNameClasses, instanceNameAt };
+import mir::full::tokens { appendTokens, integerAt, intsEnd, intToken, name, numberAt, operandEnd, namesEnd, runtimeRefs, sliceTokens, textAt, typeEnd, wordIs, word, quotedAt, sizeEnd };
 import data::ast::ast { AstNode, AstProof, AstExpression, AstValue, AstValidation, AstRule, AstStatement };
 import data::reader::reader { nodeKind, nodeRefs, nameValue };
 import mir::full::full { FullProgram, FullFunction, FullRecord, FullBlock };
-import mir::full::tokens { appendTokens, integerAt, intsEnd, intToken, name, numberAt, operandEnd, namesEnd, runtimeRefs, sliceTokens, textAt, typeEnd, wordIs, word, quotedAt };
 import mir::full::records { nodeAt, statementAt, envStart, envEnd, envEntries, envTokens, replaceEnv, EnvEntry };
 import mir::link::merge { rowIndex, fnIndex };
 import mir::full::environments { replaceEnvBase };
@@ -116,8 +117,40 @@ fn functionRefs(p: &FullProgram, f: &FullFunction) -> List<String> ~ {
 };
 fn typeNames(ts: &List<Token>, pos: Int) -> List<String> ~ {
     end = typeEnd(ts, pos); if pos < 0 || end < 0 { return []; };
+    if boxedClosureInSpan(ts, pos, end) { return signatureTypes(ts, pos); };
     out = []; i = pos;
     while i < end [{ affirm i >= 0; }] ~ { if (wordIs(ts, i, "named") || wordIs(ts, i, "variant")) && quotedAt(ts, i + 1) { out = push(out, textAt(ts, i + 1)); }; i = i + 1; };
+    return out;
+};
+fn signatureTypes(ts: &List<Token>, pos: Int) -> List<String> ~ {
+    end = typeEnd(ts, pos);
+    if pos < 0 || end <= pos { return []; };
+    kind = textAt(ts, pos);
+    out = [];
+    if kind = "named" {
+        n = numberAt(ts, pos + 2);
+        if n < 0 { return []; };
+        classes = InstanceNameClasses { ranges: [], pinned: true };
+        out = push(out, instanceNameAt(&classes, ts, pos));
+        at = pos + 3;
+        for i in 0..n {
+            if wordIs(ts, at, "type") {
+                out = addTexts(out, signatureTypes(ts, at + 1));
+                at = typeEnd(ts, at + 1);
+            } else { at = sizeEnd(ts, at + 1); };
+        };
+        return out;
+    };
+    if kind = "variant" { return push([], textAt(ts, pos + 1)); };
+    if kind = "closure" || kind = "closuremut" || kind = "ref" || kind = "mutref" || kind = "addr" || kind = "block" || kind = "uninit" || kind = "array" || kind = "list" || kind = "box" { return signatureTypes(ts, pos + 1); };
+    if kind = "fn" || kind = "fnc" {
+        n = numberAt(ts, pos + 1);
+        if n < 0 { return []; };
+        at = pos + 2;
+        for i in 0..n { out = addTexts(out, signatureTypes(ts, at)); at = typeEnd(ts, at); };
+        return addTexts(out, signatureTypes(ts, at));
+    };
+    if kind = "forall" { return signatureTypes(ts, namesEnd(ts, namesEnd(ts, pos + 1))); };
     return out;
 };
 fn ownerNames(p: &FullProgram, ctor: &String) -> List<String> ~ {
@@ -146,9 +179,19 @@ fn functionTypes(p: &FullProgram, f: &FullFunction) -> List<String> ~ {
     }; };
     return out;
 };
+fn fieldTypeNames(ts: &List<Token>, count: Int) -> List<String> ~ {
+    n = numberAt(ts, count); at = count + 1; out = [];
+    if n >= 0 { for i in 0..n { out = addTexts(out, signatureTypes(ts, at + 1)); at = typeEnd(ts, at + 1); }; };
+    return out;
+};
 fn declarationTypes(r: &FullRecord) -> List<String> ~ {
     out = []; ts = r.tokens;
-    // A declaration contains only names, field types and field counts.
+    if boxedClosureInSpan(&ts, 0, size(ts)) {
+        if wordIs(&ts, 0, "struct") { return fieldTypeNames(&ts, 2); };
+        n = numberAt(&ts, 2); at = 3;
+        if n >= 0 { for i in 0..n { out = addTexts(out, fieldTypeNames(&ts, at + 1)); at = fieldsEnd(&ts, at + 1); }; };
+        return out;
+    };
     i = 2; while i < size(ts) [{ affirm i >= 0; }] ~ { if (wordIs(&ts, i, "named") || wordIs(&ts, i, "variant")) && quotedAt(&ts, i + 1) { out = push(out, textAt(&ts, i + 1)); }; i = i + 1; };
     return out;
 };

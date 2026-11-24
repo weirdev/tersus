@@ -3,7 +3,7 @@ import data::ast::ast { AstNode };
 import mir::full::read { parseFull };
 import mir::full::write { outputFull, emitFull, clearMetadata };
 
-fn fullAt(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ { return parseFull(lines, false); };
+fn fullAt(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ { return parseFull(lines, true); };
 fn fullAtForLink(lines: &List<List<Token>>, transportsClosurePack: Bool) -> Parsed<FullProgram> ~ { return parseFull(lines, transportsClosurePack); };
 fn printFull(program: &FullProgram) -> Int ~ { return emitFull(outputFull(program)); };
 fn clearFunctionMetadata(program: FullProgram) -> FullProgram ~ { return clearMetadata(program); };

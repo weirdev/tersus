@@ -1,6 +1,8 @@
 {-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
 module MirHousekeeping
     ( verifyProgram
+    , verifyCaptureEffects
+    , boxedSignatureStable
     , insertOwnership
     , expandRefWrites
     , monomorphizeWith
@@ -84,7 +86,7 @@ import Modules (ModuleId, Snapshot (..), resolverFromFiles)
 import PackageCompile (compileModulesUsing, lowerCompiledPackage)
 import PreludeSource (emitterSourceFiles, emitterSeedConstruction, frontendSeedSources,
     boxSource, listsSource, toolPackageFiles, validationPackageFiles)
-import Types (Arg (..), Type (..), instanceName)
+import Types (Arg (..), Type (..), instanceFields, instanceName)
 import Utils
 
 -- MIR checking and ghost erasure use the programs written in Tersus. Native
@@ -105,7 +107,44 @@ import Utils
 -- block that is there, that a name of a specification stands for a declared local) is not in the data, and
 -- is the validator's (the validator written in Tersus), which runs after this in the pipeline.
 verifyProgram :: Program -> Result () String
-verifyProgram program = abiView program `bindResult` (unsafePerformIO . verifyIO)
+verifyProgram program = verifyCaptureEffects program `bindResult` \hasPack ->
+    abiView program `bindResult` (unsafePerformIO . verifyIO hasPack)
+
+verifyCaptureEffects :: Program -> Result Bool String
+verifyCaptureEffects program = case [fnName fn | (fn, operand) <- packs, not (safeOperand fn operand)] of
+    name : _ -> Error ("In " ++ name ++ ": a boxed closure capture cannot contain references or permissions")
+    [] -> Ok (not (null packs))
+  where
+    packs = [(fn, operand) | fn <- progMain program : Map.elems (progFunctions program), block <- Map.elems (fnBlocks fn),
+        Assign _ (PackClosure operand _) <- blockStatements block]
+    safeOperand fn (Move local) = maybe False (safe Set.empty . localType) (Map.lookup local (fnLocals fn))
+    safeOperand _ _ = False
+    safe seen ty = case ty of
+        TRef{} -> False
+        TMutRef{} -> False
+        TBlock{} -> False
+        TUninit{} -> False
+        TParam{} -> False
+        TVar{} -> False
+        TForall{} -> False
+        TArrayOf element _ -> safe seen element
+        TAddr element -> safe seen element
+        TNamed name args
+            | Just (params, fields) <- Map.lookup name (progCaptureStorage program)
+            , [ArgType element] <- args
+            , Just instantiated <- instanceFields params args fields
+            , Map.lookup (instanceName name args) (progTypes program) == Just (StructDecl instantiated) -> safe seen element
+            | otherwise -> all (safe seen) [t | ArgType t <- args] && declared seen (instanceName name args)
+        TVariant ctor -> maybe False (declared seen) (ownerOf program ctor)
+        _ -> True
+    declared seen name
+        | Set.member name seen = True
+        | otherwise = case Map.lookup name (progTypes program) of
+            Just (StructDecl fields) -> safeFields fields
+            Just (EnumDecl variants) -> all (safeFields . snd) variants
+            Nothing -> False
+      where
+        safeFields = all (safe (Set.insert name seen) . snd)
 
 -- The checker and runtime passes use thin signatures; the validator consumes the original MIR.
 abiView :: Program -> Result Program String
@@ -127,7 +166,9 @@ abiView program = either Error Ok $ do
     abiType ty = case ty of
         TFn args ret -> signature args ret
         TFnContract args ret _ -> signature args ret
-        TBoxedClosure{} -> Left "boxed closure types are not supported by the runtime MIR ABI"
+        TBoxedClosure _ shape
+            | boxedSignatureStable shape -> pure ty
+            | otherwise -> Left "unsupported boxed closure signature at the runtime ABI"
         TArrayOf inner size -> (`TArrayOf` size) <$> abiType inner
         TForall sizes types inner -> TForall sizes types <$> abiType inner
         TAddr inner -> TAddr <$> abiType inner
@@ -147,6 +188,28 @@ abiView program = either Error Ok $ do
         if erased == args then pure ()
             else Left ("contract function types are not supported in specialization arguments of " ++ name)
     signature args ret = TFn <$> traverse abiType args <*> abiType ret
+
+boxedSignatureStable :: Type -> Bool
+boxedSignatureStable ty = case ty of
+    TFn args ret -> all stable (ret : map referent args)
+    TFnContract args ret _ -> all stable (ret : map referent args)
+    _ -> False
+  where
+    referent (TRef inner) = inner
+    referent other = other
+    stable t = case t of
+        TUninit{} -> False
+        TBlock{} -> False
+        TRef{} -> False
+        TMutRef{} -> False
+        TForall{} -> False
+        TFnContract{} -> False
+        TFn args ret -> all stable (ret : args)
+        TArrayOf inner _ -> stable inner
+        TAddr inner -> stable inner
+        TNamed _ args -> all stable [inner | ArgType inner <- args]
+        TBoxedClosure _ shape -> boxedSignatureStable shape
+        _ -> True
 
 -- The program with its permissions taken out (POINTERS.md): what lib/mir/mir_erase/mir_erase.tersus writes for the
 -- program as data before the erasure (MirData.writeProgramWithGhosts), read back, with the parts the data
@@ -242,27 +305,25 @@ ownedToolWith emitter entry = case toolProgram entry of
     Error e -> pure (Error e)
     Ok program -> ownedWith emitter program
 
-verifyIO :: Program -> IO (Result () String)
-verifyIO program = do
+verifyIO :: Bool -> Program -> IO (Result () String)
+verifyIO hasPack program = do
     tools <- housekeepingTools
     case checkerOf tools of
         ToolFailed e -> pure (Error e)
         ToolNative exe -> do
-            (_, out, errors) <- runWithInputFull exe (writeProgram program)
-            pure
-                ( if trim out == "OK"
-                    then Ok ()
-                    else
-                        if trim out == "1"
-                            then Error (trimEnd errors)
-                            else Error ("the checker written in Tersus answered " ++ show (take 40 out) ++ ", which is not a verdict")
-                )
+            (code, out, errors) <- runWithInputFull exe (writeProgram program)
+            pure $ case code of
+                ExitSuccess -> verdict out errors
+                ExitFailure n -> Error ("the MIR checker exited with " ++ show n ++ ": " ++ trimEnd errors)
         ToolInterpreted checker -> pure $ case runInterpreted checker (writeProgram program) of
             Error e -> Error e
-            Ok (out, errors, value)
-                | value == Just (MInt 1) -> Error (trimEnd errors)
-                | trim out == "OK" -> Ok ()
-                | otherwise -> Error "the checker written in Tersus gave no verdict"
+            Ok (out, errors, _) -> verdict out errors
+  where
+    verdict "OK\n" "" = Ok ()
+    verdict "2\n" "boxed capture effects require source provenance\n" | hasPack = Ok ()
+    verdict "1\n" errors = Error (trimEnd errors)
+    verdict "2\n" errors = Error (trimEnd errors)
+    verdict out _ = Error ("the checker written in Tersus answered " ++ show (take 40 out) ++ ", which is not a verdict")
 
 eraseIO :: Program -> IO (Result Program String)
 eraseIO program = do

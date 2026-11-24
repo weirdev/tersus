@@ -135,7 +135,7 @@ instance Binary S.RwRule
 instance NFData S.RwRule
 
 codecVersion :: String
-codecVersion = "tersus-test-program binary 1\n"
+codecVersion = "tersus-test-program binary 2\n"
 
 header :: BS.ByteString
 header = BC.pack codecVersion

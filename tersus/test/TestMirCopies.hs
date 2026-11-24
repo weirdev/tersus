@@ -76,7 +76,7 @@ mainCalling ghosts calls =
             ++ [BasicBlock [] Return]
 
 program :: [Function] -> Function -> [(String, BoundedFn)] -> [(String, (String, [Arg]))] -> Program
-program fns main' bounded instances = Program Map.empty (Map.fromList [(fnName f, f) | f <- fns]) main' Map.empty Map.empty (Map.fromList bounded) (Map.fromList instances)
+program fns main' bounded instances = Program Map.empty (Map.fromList [(fnName f, f) | f <- fns]) main' Map.empty Map.empty (Map.fromList bounded) (Map.fromList instances) Map.empty
 
 plain :: Program
 plain = program [function "f" [(TInt, "x")] TInt [] (blockOf [Assign (Local 0) (Use (Copy (Local 1)))] Return)] (mainCalling [] [("f", TInt)]) [] []

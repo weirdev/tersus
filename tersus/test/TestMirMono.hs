@@ -256,7 +256,7 @@ metadataProgram = Program
     emptyFunction{fnSpec = metadataSpec, fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Ghost (Map.singleton "value" (Const (CInt 7))) (GhostValidation (S.ProofAssert (S.CTerm (S.VBool True)))), Assign (Local 0) (Use (Const (CInt 1)))] Return)}
     (Map.singleton "Unused" (["T"], [("ghost", TBlock (TParam "T"))]))
     (Map.singleton "Plain" [S.ProofAssert (S.CTerm (S.VBool True))])
-    Map.empty Map.empty
+    Map.empty Map.empty Map.empty
   where
     metadataSpec = emptySpec{specEnv = Map.singleton "builtin" (Const (CFn "plain")), specWrites = ["x"], specMutParams = ["x"], specFrom = ["x"]}
 

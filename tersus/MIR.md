@@ -418,16 +418,22 @@ A local is dropped before an assignment or call overwrites a value it still owns
 
 ## The MIR as data
 
-The MIR2 and MIR3 codecs can round-trip `closure <signature>` and
-`closuremut <signature>`, with signatures encoded as `fn` or `fnc` (see
-[AST_DATA.md](AST_DATA.md)). Native Link reads these tags before contract
-erasure and preserves the opaque `fnc` clause tokens on merge and environment
-completion. Prune refuses these types until it can retain their instantiated
-signature dependencies. This is transport only:
-the runtime ABI, verifier, eraser, native monomorphizer and emitter refuse
-boxed closure types. There is no MIR operation that creates or calls one.
-Generic containers still need a checked ABI mapping that preserves distinct
-pre-erasure instance identities.
+MIR encodes boxed owners as `closure <signature>` and `closuremut <signature>`;
+`fn` and `fnc` retain their thin-pointer encodings. A `packclosure` assignment
+moves a concrete environment into a one-word owner. The destination's contract
+is not the thunk's contract: the validator checks an implication at conversion
+and uses only the destination type when validating an indirect `call`. The
+call's operand must be a loan of the owner (exclusive for `closuremut`).
+
+The heap allocation has one call entry, one drop entry chosen from the concrete
+environment's layout, a reserved null clone entry, and the environment inline.
+Dropping the owner calls the capture destructor, if any, before freeing the
+allocation. There is no clone or copy operation for the boxed owner. The
+complete signature still identifies the owner inside named instances at the
+native boundary; the callable ABI uses the parameter and return shapes. A
+boxed signature whose runtime shape would change during erasure (for example,
+one returning `Uninit<Int>`) is refused. The thunk's borrowed-parameter metadata
+must describe its receiver and shared arguments explicitly.
 
 The MIR package imports `data::codec::codec` for `Token`, `Parsed`, `Size`,
 `Type`, tokenization, escaping, decimal numbers and size/type read/write helpers.
@@ -493,13 +499,14 @@ it with its own lowering yet.
 
 Version 3 keeps the type, operand, constant, rvalue, statement and terminator
 words of the earlier versions. Its records come in this order, each kind by
-name (functions, then `main`), and a function's loops by header block. The pinned
-Link reader also reserves `assign L packclosure O const fn "thunk"` for merge
-and environment completion. The destination will carry the boxed signature;
-`O` will supply the owned concrete environment and the function constant will
-name the typed call thunk. This reader checks the record shape only. No pass
-produces or executes it yet; it is not accepted by prune, Mono or the runtime
-MIR readers.
+name (functions, then `main`), and a function's loops by header block. The
+allocation record is `assign L packclosure move CAPTURE const fn "thunk"`.
+Link checks its syntax. The MIR verifier checks the concrete capture type and
+the thunk's receiver, parameter and result ABI. A bare `Byte` or fixed-width
+integer cannot be a capture: the compact payload is not the thunk's 64-bit
+local slot. These types can still be fields of a capture. The thunk is not an operand
+that can be supplied dynamically, and the operation cannot be used with
+`peek` or as a reference write.
 
 ```
 tersus-mir 3

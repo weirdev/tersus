@@ -2002,6 +2002,22 @@ fn generalCall(st: St, funct: Int, args: &List<Int>) -> St ~ {
     ftz = tyAt(st, st.ty);
     innerTy = unrefOf(st, st.ty);
     innerX = tyAt(st, innerTy);
+    if innerX.kind = 16 {
+        if st.inGhost { return typeError(st, "a boxed closure cannot be called in a proof"); };
+        ft = nth(&innerX.args, 0);
+        if innerX.flag && ftz.kind = 10 { return typeError(st, "a ClosureMut call needs an exclusive receiver"); };
+        if ftz.kind != 10 && ftz.kind != 11 {
+            borrow = "BorrowOf";
+            k = 10;
+            if innerX.flag { borrow = "BorrowMutOf"; k = 11; };
+            st = emitBuiltinCall(st, borrow, push([], functT.node));
+            borrowNode = st.nid;
+            st = wrapTy(st, k, innerTy);
+            st = typed(st, borrowNode, st.ty, push([], functT));
+            functT = clone(st.te);
+        };
+        return ordinary(st, funct, functT, ft, args);
+    };
     if innerX.kind = 4 {
         bodyName = catStrings(clone(innerX.name), "$body");
         recvKind = 0 - 1;

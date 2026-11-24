@@ -71,7 +71,7 @@ testMirData =
             , testCase "erasure scrubs existing declarations as well as new instances" existingPermissionsAreErased
             ]
         , testCase "a contract function type round trips, and a malformed one is refused" contractFnMir
-        , testCase "the validator rejects boxed closures before specializing hand MIR" boxedValidationRefusal
+        , testCase "the validator rejects boxed closure reference results before specializing hand MIR" boxedValidationRefusal
         , TestList
             "reading"
             [ testCase "a text that is not the MIR" (refused "return 1;" "tersus-mir 1")
@@ -107,7 +107,7 @@ testMirData =
                     []
                     []
                     emptySpec
-            program = Program (Map.fromList [("Callback", StructDecl [("f", contractFnType)])]) Map.empty mainFn Map.empty Map.empty Map.empty Map.empty
+            program = Program (Map.fromList [("Callback", StructDecl [("f", contractFnType)])]) Map.empty mainFn Map.empty Map.empty Map.empty Map.empty Map.empty
             boxed = TNamed "Holder" [ArgType (TBoxedClosure True (TFn [TBoxedClosure False contractFnType] TInt))]
             boxedProgram = program{progTypes = Map.insert "Holder" (StructDecl [("callback", boxed)]) (progTypes program)}
             boxedText = writeProgramWithGhosts boxedProgram
@@ -121,7 +121,7 @@ testMirData =
                 (Error e, _) -> Just e
                 (_, Ok _) -> Just "accepted a contract function type whose names do not match its parameters"
     boxedValidationRefusal = foldr (<|>) Nothing
-        [ testAssertErrorContains "validator does not model yet: boxed closure types" (prepareTexts physical fixture)
+        [ testAssertErrorContains "validator does not model yet: a boxed closure has an unsupported signature" (prepareTexts physical fixture)
         | physical <- [False, True]
         , fixture <- [base{progMain = entry{fnLocals = Map.singleton (Local 0) (LocalDecl nested Nothing)}}
                      , base{progTypes = Map.singleton "Unreachable" (StructDecl [("field", nested)])}
@@ -131,7 +131,7 @@ testMirData =
       where
         Lowered base _ _ _ _ _ _ _ = everyRecord
         entry = progMain base
-        nested = TAddr (TNamed "Wrapper" [ArgType (TFn [] (TBoxedClosure False (TFn [] TInt)))])
+        nested = TAddr (TNamed "Wrapper" [ArgType (TFn [] (TBoxedClosure False (TFn [] (TRef TInt))))])
     statements program = concat [stmts | f <- progMain program : Map.elems (progFunctions program), BasicBlock stmts _ <- Map.elems (fnBlocks f)]
     isGhost s = case s of
         Ghost _ _ -> True
@@ -201,6 +201,7 @@ nestedInstanceIsDeclared =
                 , progInvariants = Map.empty
                 , progBounded = Map.empty
                 , progInstances = Map.empty
+                , progCaptureStorage = Map.empty
                 }
         completed = completeInstances program
      in if Map.lookup "Outer<Int>" (progTypes completed) == Just (StructDecl [("inner", TNamed "Inner" [ArgType TInt]), ("tag", TInt)])
@@ -241,6 +242,7 @@ roundTripsNames =
         , progInvariants = Map.empty
         , progBounded = Map.empty
         , progInstances = Map.empty
+        , progCaptureStorage = Map.empty
         }
   where
     oddName = "a \"quoted\" \\ name\nwith caf\233, \955 and \128512"
@@ -569,6 +571,7 @@ everyRecord =
                 , progInvariants = Map.singleton "P" [holds]
                 , progBounded = Map.singleton "f" (BoundedFn ["n"] ["T"] ["f::g"] [PackLoop (BlockId 1) (BlockId 2) (BlockId 3) [BlockId 2, BlockId 4] [Local 7, Local 8] (Local 4) (Local 6) "..T@0" (Local 2) (Local 3) Nothing, PackLoop (BlockId 5) (BlockId 6) (BlockId 7) [BlockId 6] [] (Local 9) (Local 10) "..T@1" (Local 11) (Local 12) (Just (Local 13))])
                 , progInstances = Map.fromList [("f[Int, 3]", ("f", [ArgType TInt, ArgSize (SizeConst 3)])), ("g[T]", ("f", [ArgType (TParam "T")])), ("<$param T as Hash>::hash", ("", []))]
+                , progCaptureStorage = Map.empty
                 }
         , lowCopies = Set.singleton "P"
         , lowLinear = Set.singleton "E"

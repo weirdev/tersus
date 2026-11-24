@@ -24,7 +24,7 @@ assert :: String -> Bool -> IO ()
 assert label ok = unless ok (error label) >> putStrLn ("PASS " ++ label)
 
 richProgram :: M.Program
-richProgram = M.Program types functions mainFn generics invariants bounded instances
+richProgram = M.Program types functions mainFn generics invariants bounded instances Map.empty
   where
     huge :: Integer
     huge = 2 ^ (130 :: Int)

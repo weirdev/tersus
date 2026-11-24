@@ -81,6 +81,7 @@ fn printRvalue(rv: &Rvalue) -> Int ~ {
         },
         Rvalue::MakeList { items: items } => { n = " makelist".print() + printOperands(items); },
         Rvalue::MakeBox { o: o } => { n = " makebox".print() + printOperand(o); },
+        Rvalue::PackClosure { env: env, thunk: thunk } => { n = " packclosure".print() + printOperand(env) + printOperand(Operand::Const { value: Constant::CFn { name: clone(thunk) } }); },
         Rvalue::Unbox { o: o } => { n = " unbox".print() + printOperand(o); },
         Rvalue::Unsize { o: o } => { n = " unsize".print() + printOperand(o); },
         Rvalue::MakeData { name: name, fields: fields, values: values } => {

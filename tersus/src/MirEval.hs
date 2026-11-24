@@ -41,6 +41,7 @@ data MirValue
     | MSequence (Seq MirValue)
     | MData Name [(Variable, MirValue)]
     | MFn Name
+    | MClosure Name MirValue
     | -- What an empty Uninit<T> holds: nothing, which no operation can read
       MEmpty
     | -- A reference to a place in the frame that runs it: the local it starts from, and the fields and indexes from
@@ -54,7 +55,7 @@ pattern MList values <- MSequence (toList -> values)
   where
     MList values = MSequence (Seq.fromList values)
 
-{-# COMPLETE MInt, MBool, MList, MData, MFn, MEmpty, MRef #-}
+{-# COMPLETE MInt, MBool, MList, MData, MFn, MClosure, MEmpty, MRef #-}
 
 instance Show MirValue where
     showsPrec p value = case value of
@@ -63,6 +64,7 @@ instance Show MirValue where
         MSequence values -> constructor "MList" [showsPrec 11 (toList values)]
         MData name fields -> constructor "MData" [showsPrec 11 name, showsPrec 11 fields]
         MFn name -> constructor "MFn" [showsPrec 11 name]
+        MClosure name _ -> constructor "MClosure" [showsPrec 11 name]
         MEmpty -> showString "MEmpty"
         MRef local steps -> constructor "MRef" [showsPrec 11 local, showsPrec 11 steps]
       where
@@ -373,54 +375,77 @@ runBlock program fn block frame =
                         MBool False -> runBlock program fn no frame'
                         _ -> failE "Condition must be a boolean"
                 Call callee args dest next -> do
-                    references <- E (\_ s -> Ok (sReferences s, none, s))
-                    f <- liftE (operandValue frame' callee)
-                    argValues <- liftE (mapResults (operandValue frame') args)
-                    if not references
-                        then do
-                            (result, _) <- callFunction program f argValues Map.empty
-                            runBlock program fn next (Map.insert dest result frame')
-                        else do
-                            -- (a lent parameter is a local of its referent's type, so it is given the value its argument
-                            -- is to; any other parameter, one of a type parameter given a reference included, is given
-                            -- the reference)
-                            let lent = case f of
-                                    MFn name | Just fn' <- Map.lookup name (progFunctions program) -> map (`elem` (fnBorrowed fn' ++ fnMutBorrowed fn')) (fnParams fn') ++ repeat True
-                                    _ -> repeat True
-                            resolved <- liftE (mapResults (\(isLent, v) -> if isLent then resolveRef frame' v else Ok v) (zip lent argValues))
-                            heapValues <- heapReferences
-                            let normArgs = map (normaliseRefs frame') resolved
-                                synthRoots = refRootClosure frame' (normArgs ++ map (normaliseRefs frame') heapValues)
-                                synthMap = Map.fromList (zip synthRoots [Local (1000000 + i) | i <- [0 ..]])
-                                calleeArgs = map (rewriteRefRoots synthMap) normArgs
-                                synthFrame = Map.fromList [(synth, rewriteRefRoots synthMap (normaliseRefs frame' v)) | (root, synth) <- Map.toList synthMap, Just v <- [Map.lookup root frame']]
-                            rewriteHeapReferences (Ok . rewriteRefRoots synthMap . normaliseRefs frame')
-                            (result, calleeFrame) <- callFunction program f calleeArgs synthFrame
-                            -- (a result that is a reference, or holds them in its fields, is to a place of an argument:
-                            -- the same place in this frame. References to the callee's own places cannot be returned,
-                            -- which the checker has already refused.)
-                            -- (every value that goes back to the caller, the result, an update parameter's final value,
-                            -- a given place's final value and a slot of memory, can hold references the callee made to its
-                            -- own parameters or to the places it was given: each is rebased onto the caller's places,
-                            -- against the frame before the call, before anything is written)
-                            let invSynth = Map.fromList [(s, r) | (r, s) <- Map.toList synthMap]
-                                outgoing v = case f of
-                                    MFn name | Just callee <- Map.lookup name (progFunctions program) -> mapResult (rewriteRefRoots invSynth) (rebaseRefs program callee calleeFrame args frame' v)
-                                    _ -> Ok (rewriteRefRoots invSynth v)
-                            result2 <- liftE (outgoing result)
-                            finalParams <- liftE $ case f of
-                                MFn name | Just callee <- Map.lookup name (progFunctions program) -> mapResults (\p -> outgoing (Map.findWithDefault MEmpty p calleeFrame)) (fnParams callee)
-                                _ -> Ok []
-                            synthValues <- liftE (mapResults (\(root, synth) -> mapResult (\v -> (root, v)) (traverseMaybe outgoing (Map.lookup synth calleeFrame))) (Map.toList synthMap))
-                            rewriteHeapReferences outgoing
-                            -- (a given place is written before the update parameters: an argument can hold a reference into
-                            -- the root of a place lent for updating, at a disjoint path, and the copy of that root the callee
-                            -- was given still has the part lent for updating as it was before the call)
-                            frame'' <- liftE (foldl (\acc (root, mv) -> acc `bindResult` \fr -> case mv of Just v -> writePlace fr root [] v; Nothing -> Ok fr) (Ok frame') synthValues)
-                            frame3 <- liftE (writeBack program frame'' f args finalParams)
-                            runBlock program fn next (Map.insert dest result2 frame3)
+                    calleeValue <- liftE (operandValue frame' callee)
+                    case calleeValue of
+                        MRef root steps -> do
+                            value <- liftE (resolveRef frame' calleeValue)
+                            case value of
+                                MClosure name capture -> do
+                                    fn' <- maybe (failE "Unknown boxed closure thunk") pure (Map.lookup name (progFunctions program))
+                                    receiver <- case fnParams fn' of
+                                        p : _ -> pure p
+                                        [] -> failE "A boxed closure thunk has no receiver"
+                                    arguments <- mapM (\op -> liftE (operandValue frame' op `bindResult` resolveRef frame')) args
+                                    (result, returned) <- callFunction program (MFn name) (capture : arguments) Map.empty
+                                    frame'' <- if receiver `elem` fnMutBorrowed fn'
+                                        then do
+                                            final <- maybe (failE "A boxed closure thunk lost its receiver") pure (Map.lookup receiver returned)
+                                            liftE (writePlace frame' root steps (MClosure name final))
+                                        else pure frame'
+                                    runBlock program fn next (Map.insert dest result frame'')
+                                _ -> ordinaryCall frame' callee args dest next
+                        MClosure{} -> failE "A boxed closure call must borrow its receiver"
+                        _ -> ordinaryCall frame' callee args dest next
                 Return -> return (Map.lookup (Local 0) frame', frame')
                 Unreachable -> failE "Function did not return a value"
+  where
+    ordinaryCall frame' callee args dest next = do
+        references <- E (\_ s -> Ok (sReferences s, none, s))
+        f <- liftE (operandValue frame' callee)
+        argValues <- liftE (mapResults (operandValue frame') args)
+        if not references
+            then do
+                (result, _) <- callFunction program f argValues Map.empty
+                runBlock program fn next (Map.insert dest result frame')
+            else do
+                -- (a lent parameter is a local of its referent's type, so it is given the value its argument
+                -- is to; any other parameter, one of a type parameter given a reference included, is given
+                -- the reference)
+                let lent = case f of
+                        MFn name | Just fn' <- Map.lookup name (progFunctions program) -> map (`elem` (fnBorrowed fn' ++ fnMutBorrowed fn')) (fnParams fn') ++ repeat True
+                        _ -> repeat True
+                resolved <- liftE (mapResults (\(isLent, v) -> if isLent then resolveRef frame' v else Ok v) (zip lent argValues))
+                heapValues <- heapReferences
+                let normArgs = map (normaliseRefs frame') resolved
+                    synthRoots = refRootClosure frame' (normArgs ++ map (normaliseRefs frame') heapValues)
+                    synthMap = Map.fromList (zip synthRoots [Local (1000000 + i) | i <- [0 ..]])
+                    calleeArgs = map (rewriteRefRoots synthMap) normArgs
+                    synthFrame = Map.fromList [(synth, rewriteRefRoots synthMap (normaliseRefs frame' v)) | (root, synth) <- Map.toList synthMap, Just v <- [Map.lookup root frame']]
+                rewriteHeapReferences (Ok . rewriteRefRoots synthMap . normaliseRefs frame')
+                (result, calleeFrame) <- callFunction program f calleeArgs synthFrame
+                -- (a result that is a reference, or holds them in its fields, is to a place of an argument:
+                -- the same place in this frame. References to the callee's own places cannot be returned,
+                -- which the checker has already refused.)
+                -- (every value that goes back to the caller, the result, an update parameter's final value,
+                -- a given place's final value and a slot of memory, can hold references the callee made to its
+                -- own parameters or to the places it was given: each is rebased onto the caller's places,
+                -- against the frame before the call, before anything is written)
+                let invSynth = Map.fromList [(s, r) | (r, s) <- Map.toList synthMap]
+                    outgoing v = case f of
+                        MFn name | Just callee <- Map.lookup name (progFunctions program) -> mapResult (rewriteRefRoots invSynth) (rebaseRefs program callee calleeFrame args frame' v)
+                        _ -> Ok (rewriteRefRoots invSynth v)
+                result2 <- liftE (outgoing result)
+                finalParams <- liftE $ case f of
+                    MFn name | Just callee <- Map.lookup name (progFunctions program) -> mapResults (\p -> outgoing (Map.findWithDefault MEmpty p calleeFrame)) (fnParams callee)
+                    _ -> Ok []
+                synthValues <- liftE (mapResults (\(root, synth) -> mapResult (\v -> (root, v)) (traverseMaybe outgoing (Map.lookup synth calleeFrame))) (Map.toList synthMap))
+                rewriteHeapReferences outgoing
+                -- (a given place is written before the update parameters: an argument can hold a reference into
+                -- the root of a place lent for updating, at a disjoint path, and the copy of that root the callee
+                -- was given still has the part lent for updating as it was before the call)
+                frame'' <- liftE (foldl (\acc (root, mv) -> acc `bindResult` \fr -> case mv of Just v -> writePlace fr root [] v; Nothing -> Ok fr) (Ok frame') synthValues)
+                frame3 <- liftE (writeBack program frame'' f args finalParams)
+                runBlock program fn next (Map.insert dest result2 frame3)
 
 callHasReferences :: Program -> Function -> Bool
 callHasReferences program fn = any parameter (fnParams fn) || maybe False (holds Set.empty) (fnReturns fn)
@@ -704,6 +729,7 @@ evalRvalue frame rv =
             listOperand (i, o) = operandValue frame o `bindResult` \v -> if keepsOperand op i then Ok v else resolveRef frame v
         MakeList os -> MList <$$> mapResults (operandValue frame) os
         MakeBox o -> operandValue frame o
+        PackClosure o thunk -> MClosure thunk <$$> operandValue frame o
         Unbox o -> operandValue frame o
         Unsize o -> operandValue frame o
         MakeData name fields -> MData (plain name) <$$> mapResults (\(f, o) -> (,) f <$$> operandValue frame o) fields
@@ -838,6 +864,7 @@ renderMirValue (MList l) = "[" ++ intercalate ", " (map renderMirValue l) ++ "]"
 renderMirValue (MData name []) = name
 renderMirValue (MData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderMirValue v | (f, v) <- fields] ++ " }"
 renderMirValue MFn{} = "<function>"
+renderMirValue MClosure{} = "<boxed closure>"
 renderMirValue MEmpty = "<empty>"
 
 -- The value of the AST that a value of the MIR is, and the other way: a function of the program is VFnRef, and no function
@@ -848,6 +875,7 @@ fromMirValue (MBool b) = VBool b
 fromMirValue (MList vs) = VList (map fromMirValue vs)
 fromMirValue (MData name fields) = VData name [(f, fromMirValue v) | (f, v) <- fields]
 fromMirValue (MFn name) = VFnRef name
+fromMirValue MClosure{} = VData "<boxed closure>" []
 fromMirValue MEmpty = VData "<empty>" []
 
 toMirValue :: Value -> Maybe MirValue

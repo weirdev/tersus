@@ -149,6 +149,7 @@ exampleExpectations =
     [ ("examples/basics.tersus", ((ExpectReturn (VInt 6))))
     , ("examples/functions.tersus", ((ExpectReturn (VInt 21))))
     , ("examples/closures.tersus", ((ExpectReturn (VInt 21130122))))
+    , ("examples/stored_callbacks.tersus", ExpectReturn (VInt 29))
     , ("examples/higher_order.tersus", ((ExpectReturn (VInt 187971457))))
     , ("examples/threads.tersus", ((ExpectReturn (VInt 499500))))
     , ("examples/booleans.tersus", ((ExpectReturn (VBool True))))

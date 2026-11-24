@@ -1898,7 +1898,7 @@ fn namedType(sourceText: &Input, st: St) -> Res<Type> ~ {
     if name = "Byte" { return ok( s2, Type::TByte); };
     if name = "Bool" { return ok( s2, Type::TBool); };
     if isWordTypeName(name) { return ok( s2, wordTypeOf(name)); };
-    if name = "List" || name = "Box" || name = "Addr" || name = "Block" || name = "Uninit" {
+    if name = "List" || name = "Box" || name = "Addr" || name = "Block" || name = "Uninit" || name = "Closure" || name = "ClosureMut" {
         s2 = skipWs(sourceText, s2);
         if byteAt(sourceText, s2, s2.pos) != 60 { return fail( s2, Type::TInt, "expected <"); };
         s2 = St { pos: s2.pos + 1, ..s2 };
@@ -1912,6 +1912,15 @@ fn namedType(sourceText: &Input, st: St) -> Res<Type> ~ {
         if name = "Box" { return ok( s2, Type::TBox { inner: Box::new(resultPartseValue) }); };
         if name = "Addr" { return ok( s2, Type::TAddr { inner: Box::new(resultPartseValue) }); };
         if name = "Block" { return ok( s2, Type::TBlock { inner: Box::new(resultPartseValue) }); };
+        if name = "Closure" || name = "ClosureMut" {
+            if !(resultPartseValue is Type::TFn) && !(resultPartseValue is Type::TFnContract) { return fail(s2, Type::TInt, "expected a boxed closure function signature"); };
+            mutable = name = "ClosureMut";
+            tag = "closure";
+            if mutable { tag = "closuremut"; };
+            tokens = push([], Token { text: tag, quoted: false });
+            for tok in typeTokensOf(clone(resultPartseValue)) { tokens = push(tokens, clone(tok)); };
+            return ok(s2, Type::TBoxedClosure { mutable: mutable, signature: Box::new(resultPartseValue), key: boxedClosureKey(&tokens, 0, size(tokens)) });
+        };
         return ok( s2, Type::TUninit { inner: Box::new(resultPartseValue) });
     };
     if name = "Array" {

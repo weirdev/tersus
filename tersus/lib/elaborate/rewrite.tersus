@@ -174,7 +174,11 @@ fn typeText(m: &Maps, cn: &Canon, params: &HashSet<String>, t: &Type) -> Txt ~ {
             return Txt { text: catStrings(&x.text, &sz), ..x };
         },
         Type::TFn { args: args, ret: r } => { inner = Box::unbox(clone(r)); return fnText(m, cn, params, args, &inner, ""); },
-        Type::TBoxedClosure { mutable: mutable, signature: signature } => { return txtFail("boxed closure types are not supported in elaboration"); },
+        Type::TBoxedClosure { mutable: mutable, signature: signature } => {
+            tag = " closure";
+            if mutable { tag = " closuremut"; };
+            return wrapText(tag, typeText(m, cn, params, Box::unbox(signature)));
+        },
         Type::TFnContract { args: args, ret: r, contract: contract } => {
             inner = Box::unbox(clone(r));
             c = Box::unbox(clone(contract));

@@ -423,6 +423,9 @@ mapRvalue local operand rv = case rv of
     ListOp l os -> ListOp l (map operand os)
     MakeList os -> MakeList (map operand os)
     MakeBox o -> MakeBox (operand o)
+    PackClosure o thunk -> case operand (Const (CFn thunk)) of
+        Const (CFn name) -> PackClosure (operand o) name
+        _ -> PackClosure (operand o) thunk
     Unbox o -> Unbox (operand o)
     Unsize o -> Unsize (operand o)
     MakeData n fields -> MakeData n [(f, operand o) | (f, o) <- fields]
@@ -918,6 +921,7 @@ dropUnused fn = fn{fnLocals = Map.filterWithKey (\l _ -> l == Local 0 || l `elem
         ListOp _ os -> os
         MakeList os -> os
         MakeBox o -> [o]
+        PackClosure o thunk -> [o, Const (CFn thunk)]
         Unbox o -> [o]
         Unsize o -> [o]
         MakeData _ fields -> map snd fields
@@ -977,6 +981,7 @@ usesLocal l fn = any blockUses (Map.elems (fnBlocks fn))
         ListOp _ os -> os
         MakeList os -> os
         MakeBox o -> [o]
+        PackClosure o thunk -> [o, Const (CFn thunk)]
         Unbox o -> [o]
         Unsize o -> [o]
         MakeData _ fields -> map snd fields

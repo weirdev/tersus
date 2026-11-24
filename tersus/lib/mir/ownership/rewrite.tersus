@@ -24,8 +24,18 @@ fn borrowedArguments(p: &Program, cx: &Context, callee: &Operand, count: Int) ->
     l = operandLocal(callee);
     if !found && l >= 0 {
         ty = getLocal(cx.function, l).ty;
-        if ty is Type::TFn {
-            for a in (ty as Type::TFn).args {
+        if ty is Type::TRef {
+            owner = Box::unbox((ty as Type::TRef).inner);
+            if owner is Type::TBoxedClosure { ty = clone(Box::unbox((owner as Type::TBoxedClosure).signature)); };
+        } else if ty is Type::TMutRef {
+            owner = Box::unbox((ty as Type::TMutRef).inner);
+            if owner is Type::TBoxedClosure { ty = clone(Box::unbox((owner as Type::TBoxedClosure).signature)); };
+        };
+        if ty is Type::TFn || ty is Type::TFnContract {
+            signatureArgs = [];
+            if ty is Type::TFn { signatureArgs = clone((ty as Type::TFn).args); }
+            else { signatureArgs = clone((ty as Type::TFnContract).args); };
+            for a in &signatureArgs {
                 lent = a is Type::TRef || a is Type::TMutRef;
                 target = clone(a);
                 if a is Type::TRef { target = clone(Box::unbox((a as Type::TRef).inner)); };
@@ -183,6 +193,7 @@ fn withOperands(rv: &Rvalue, os: &List<Operand>) -> Rvalue ~ {
     if rv is Rvalue::ListOp { return Rvalue::ListOp { op: (rv as Rvalue::ListOp).op, args: clone(os) }; };
     if rv is Rvalue::MakeList { return Rvalue::MakeList { items: clone(os) }; };
     if rv is Rvalue::MakeBox && n = 1 { return Rvalue::MakeBox { o: clone(get(os, 0)) }; };
+    if rv is Rvalue::PackClosure && n = 1 { return Rvalue::PackClosure { env: clone(get(os, 0)), thunk: clone((rv as Rvalue::PackClosure).thunk) }; };
     if rv is Rvalue::Unbox && n = 1 { return Rvalue::Unbox { o: clone(get(os, 0)) }; };
     if rv is Rvalue::Unsize && n = 1 { return Rvalue::Unsize { o: clone(get(os, 0)) }; };
     if rv is Rvalue::MakeData { r = rv as Rvalue::MakeData; return Rvalue::MakeData { name: clone(r.name), fields: clone(r.fields), values: clone(os) }; };
@@ -477,7 +488,7 @@ fn viewErrors(p: &Program, cx: &Context, sources: &List<Alias>) -> List<String> 
                 };
                 if hit.owner < 0 && b.term is Terminator::Call {
                     call = b.term as Terminator::Call;
-                    passed = false;
+                    passed = operandLocal(call.callee) = a.local || reaches(cx.loans, b.id, size(b.stmts), operandLocal(call.callee), a.local, false);
                     for o in call.args { if operandLocal(o) = a.local { passed = true; }; };
                     if keysName(lives.out, a.local) || passed {
                         found = callDisturbance(p, cx, b.term, owners);
@@ -523,11 +534,8 @@ fn ownFunction(p: &Program, names: &List<FieldName>, holders: &List<String>, ori
         if needsDrop(p, d.ty) && d.id != 0 && !intSetHas(r.aliases, d.id) && !intSetHas(f.borrowed, d.id) && !dropped { owned = intSetInsert(owned, d.id); };
     };
     made = elaborateDrops(names, p, f, owned, locals, clone(blocks), r.next, nextBlock(blocks));
-    errors = [];
-    if size(holders) > 0 {
-        errors = viewErrors(p, cx, r.sources);
-        for e in copyErrors(p, holders, made) { errors = push(errors, clone(e)); };
-    };
+    errors = viewErrors(p, cx, r.sources);
+    for e in copyErrors(p, holders, made) { errors = push(errors, clone(e)); };
     return OwnedFunction { function: made, errors: errors };
 };
 fn insertOwnership(p: &Program) -> OwnedProgram ~ {

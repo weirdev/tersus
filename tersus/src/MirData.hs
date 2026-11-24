@@ -69,6 +69,7 @@ forNative program =
         , progMain = plain (progMain program)
         , progGenerics = Map.empty
         , progInvariants = Map.empty
+        , progCaptureStorage = Map.empty
         }
   where
     plain f = f{fnSpec = emptySpec, fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock (filter (not . ghost) stmts) term) (fnBlocks f)}
@@ -177,6 +178,7 @@ rvalueTokens rv = case rv of
     ListOp op os -> ["listop", listOpWord op, show (length os)] ++ concatMap operandTokens os
     MakeList os -> ["makelist", show (length os)] ++ concatMap operandTokens os
     MakeBox o -> "makebox" : operandTokens o
+    PackClosure o thunk -> "packclosure" : operandTokens o ++ operandTokens (Const (CFn thunk))
     Unbox o -> "unbox" : operandTokens o
     Unsize o -> "unsize" : operandTokens o
     MakeData name fields -> ["makedata", quote name, show (length fields)] ++ concat [quote f : operandTokens o | (f, o) <- fields]
@@ -276,6 +278,11 @@ rvalueP = word >>= \w -> case w of
     "listop" -> word >>= \o -> maybe (failP ("not a list operation: " ++ o)) (\op -> ListOp op <$> (itemCount >>= \n -> replicateM n operandP)) (lookup o listOps)
     "makelist" -> MakeList <$> (itemCount >>= \n -> replicateM n operandP)
     "makebox" -> MakeBox <$> operandP
+    "packclosure" -> do
+        env <- operandP
+        expect "const"
+        expect "fn"
+        PackClosure env <$> name
     "unbox" -> Unbox <$> operandP
     "unsize" -> Unsize <$> operandP
     "makedata" -> MakeData <$> name <*> (itemCount >>= \n -> replicateM n ((,) <$> name <*> operandP))
@@ -374,7 +381,7 @@ fileFrom :: [[Token]] -> ([(Name, TypeDecl)], [Function], Maybe Function) -> Res
 fileFrom [] (types, fns, Just mainFn) =
     unique "type" (map fst types) `bindResult` \_ ->
         unique "function" (map fnName fns) `bindResult` \_ ->
-            Ok (Program (Map.fromList (reverse types)) (Map.fromList [(fnName f, f) | f <- reverse fns]) mainFn Map.empty Map.empty Map.empty Map.empty)
+            Ok (Program (Map.fromList (reverse types)) (Map.fromList [(fnName f, f) | f <- reverse fns]) mainFn Map.empty Map.empty Map.empty Map.empty Map.empty)
 fileFrom [] _ = Error "the program has no main"
 fileFrom (record : rest) (types, fns, mainFn) = case record of
     Word "struct" : ts -> parseLine structP ts `bindResult` \d -> fileFrom rest (d : types, fns, mainFn)
@@ -673,7 +680,7 @@ loweredFrom payloads records0 =
                                             payloadUses (map snd invariants ++ fnUses ++ mainUses ++ assumeUses) `bindResult` \_ ->
                                                 Ok
                                                     Lowered
-                                                        { lowProgram = Program (Map.fromList types) (Map.fromList [(fnName f, f) | f <- fns]) mainFn (Map.fromList generics) (Map.fromList (map fst invariants)) (Map.fromList bounded) (Map.fromList instances)
+                                                        { lowProgram = Program (Map.fromList types) (Map.fromList [(fnName f, f) | f <- fns]) mainFn (Map.fromList generics) (Map.fromList (map fst invariants)) (Map.fromList bounded) (Map.fromList instances) Map.empty
                                                         , lowCopies = copies
                                                         , lowLinear = linear
                                                         , lowDrops = drops

@@ -17,6 +17,7 @@ import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
 import Control.Exception (IOException, finally, try)
 import Data.Char (isAscii)
 import Data.List (isInfixOf)
+import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile)
 import GHC.IO.Encoding (char8, getFileSystemEncoding, setFileSystemEncoding)
 import System.Exit (ExitCode (..))
@@ -26,13 +27,15 @@ import CacheLock (openTempFileCloexec)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess)
 
-import Bootstrap (llvmOfOwned, tersusLlvm)
+import Bootstrap (cachedSourceEmitter, emitWith, llvmOfOwned, tersusLlvm)
 import Cli
 import qualified Mir as M
 import MirEval (MirValue (MInt), renderMirValue, runProgram)
 import Compile (lowerStatements)
 import qualified Compile
-import MirHousekeeping (insertOwnership, verifyProgram)
+import MirHousekeeping (insertOwnership, ownedWith, verifyProgram)
+import MirData (writeProgram)
+import Types (Type (..))
 import Native (buildExecutableFast, readProcessOutput, runExecutable, spawnShared, withPipeReader)
 import TestParserFragments (parseStatementBlock)
 import Modules (LoadResult (..))
@@ -74,6 +77,8 @@ testNative =
         , TestParallel "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
         , TestParallel "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
         , TestParallel "function values" [TestCase name (sameAsMir name source) | (name, source) <- functionPrograms]
+        , TestCase "typed MIR moves and drops a nested boxed capture exactly once" boxedClosureMir
+        , TestParallel "boxed closures" [TestCase name (sameAsMir name source) | (name, source) <- boxedStoragePrograms]
         , TestParallel "function values (reference effects)" [TestCase name (sameAsUnvalidated name source) | (name, source) <- ergonomicsFunctionPrograms]
         , TestParallel "references given two places" [TestCase name (sameValueUnvalidated name source value) | (name, source, value) <- twoPlacePrograms]
         , TestParallel "ergonomics" [TestCase name (sameAsMir name source) | (name, source) <- ergonomicsPrograms]
@@ -87,6 +92,66 @@ testNative =
         , TestParallel "layout" [TestCase name (sameAsMir name source) | (name, source) <- layoutPrograms]
         , TestParallel "layout and C" [TestCase name (nativeOnly i name source expected) | (i, (name, source, expected)) <- zip [1 :: Int ..] cPrograms]
         ]
+
+boxedClosureMir :: IO TestResult
+boxedClosureMir = case (verifyProgram fixture, runProgram fixture) of
+    (Error e, _) -> pure (Just e)
+    (_, Error e) -> pure (Just e)
+    (Ok (), Ok value) | value /= Just (MInt 42) -> pure (testAssertEq value (Just (MInt 42)))
+    _ -> do
+        clang <- clangAvailable
+        if not clang then pure Nothing else do
+            tool <- cachedSourceEmitter
+            case tool of
+                Error e -> pure (Just e)
+                Ok emitter -> do
+                    owned <- ownedWith emitter fixture
+                    case owned `bindResult` (\program -> verifyProgram program `bindResult` \_ -> Ok program) of
+                        Error e -> pure (Just e)
+                        Ok program -> do
+                            ir <- emitWith emitter (writeProgram program)
+                            case ir of
+                                Error e -> pure (Just e)
+                                Ok text -> buildAndRunWith True "" [] "boxed_closure_mir" "boxed closure MIR" text (ExitSuccess, "42\n", "")
+  where
+    closure = TBoxedClosure False (TFn [TInt] TInt)
+    capture = TNamed "Capture" []
+    l = M.Local
+    b = M.BlockId
+    copy = M.Copy . l
+    move = M.Move . l
+    int = M.Const . M.CInt
+    fn name tys args borrowed blocks = M.Function name (map l args) (Just TInt)
+        (Map.fromList [(l i, M.LocalDecl ty Nothing) | (i, ty) <- (0, TInt) : tys])
+        (Map.fromList [(b i, M.BasicBlock body end) | (i, body, end) <- blocks]) [] [] (map l borrowed) [] [] M.emptySpec
+    nested = fn "nested" [(1, TInt), (2, TInt)] [1, 2] [1]
+        [(0, [M.Assign (l 0) (M.BinaryOp M.Add (copy 1) (copy 2))], M.Return)]
+    thunk = fn "thunk" [(1, capture), (2, TInt), (3, TInt)] [1, 2] [1]
+        [(0, [M.Assign (l 3) (M.ReadField (copy 1) "Capture" "offset"), M.Assign (l 0) (M.BinaryOp M.Add (copy 2) (copy 3))], M.Return)]
+    entry = fn "main" [(1, TInt), (2, closure), (3, TRef closure), (4, capture), (5, closure), (6, closure)] [] []
+        [(0, [ M.Assign (l 1) (M.Use (int 0))
+             , M.Assign (l 2) (M.PackClosure (move 1) "nested")
+             , M.Assign (l 4) (M.MakeData "Capture" [("nested", move 2), ("offset", int 40)])
+             , M.Assign (l 5) (M.PackClosure (move 4) "thunk")
+             , M.Assign (l 6) (M.Use (move 5))
+             , M.Assign (l 3) (M.Borrow (l 6) [] False)
+             ], M.Call (copy 3) [int 2] (l 0) (b 1))
+        ,(1, [], M.Return)]
+    fixture = M.Program (Map.singleton "Capture" (M.StructDecl [("nested", closure), ("offset", TInt)]))
+        (Map.fromList [("thunk", thunk), ("nested", nested)]) entry Map.empty Map.empty Map.empty Map.empty Map.empty
+
+boxedStoragePrograms :: [(String, String)]
+boxedStoragePrograms =
+    [ ("boxed capture drops owned List and Box across reassignment and discard", "struct Payload { value: Int };\nfn fromList(xs: List<Int>) -> Closure<fn() -> Int> {\n    return move fn() -> Int => size(xs);\n};\nfn fromBox(x: Box<Payload>) -> Closure<fn() -> Int> {\n    return move fn() -> Int => x.value;\n};\nasserted = fromList([1, 2]);\nn = asserted();\nasserted = fromList([3, 4, 5]);\nunused = fromBox(Box::new(Payload { value: 1000 }));\nlast = fromBox(Box::new(Payload { value: 37 }));\nreturn n + asserted() + last();\n")
+    , ("List and Box replacements drop boxed elements", "fn make(n: Int) -> Closure<fn() -> Int> { return move fn() -> Int => n; };\nlet callbacks: List<Closure<fn() -> Int>> = [make(1), make(21)];\ncallbacks = set(callbacks, 0, make(20));\nboxed = Box::new(make(9));\nboxed = Box::new(make(1));\nlast = &*boxed;\na = &get(callbacks, 0);\nb = &get(callbacks, 1);\nreturn a() + b() + last();\n")
+    , ("boxed capture destroys its inline array of boxed owners", "fn make(n: Int) -> Closure<fn() -> Int> { return move fn() -> Int => n; };\nfn closeArray(values: Array<Closure<fn() -> Int>, 2>) -> Closure<fn() -> Int> {\n    return move fn() -> Int => size(values);\n};\nlet arr: Array<Closure<fn() -> Int>, 2> = Array::fromList([make(40), make(2)]);\nouter = closeArray(arr);\nreturn outer() + 40;\n")
+    , ("boxed call lends an owning List on later and last use", "fn amount(xs: &List<Int>) -> Int { return size(xs); };\nlet f: Closure<fn(&List<Int>) -> Int> = amount;\nxs = [1, 2];\na = f(xs);\nb = size(xs);\nc = f(xs);\nreturn 36 + a + b + c;\n")
+    , ("a boxed element view can end before its owner is replaced", "fn make(n: Int) -> Closure<fn() -> Int> { return move fn() -> Int => n; };\nlet xs: List<Closure<fn() -> Int>> = [make(40)];\npart = get(xs, 0);\na = part();\nxs = set(xs, 0, make(2));\npart2 = &get(xs, 0);\nreturn a + part2();\n")
+    , ("boxed calls preserve distinct concrete generic instances", "fn echo<T>(x: T) -> T { return x; };\nstruct Wrapper<T> { item: T };\nfn one() -> Int [{ }] [{ affirm return = 1; }] { return 1; };\nfn two() -> Int [{ }] [{ affirm return = 2; }] { return 2; };\nlet f: Closure<fn() -> Int [{ }] [{ affirm return = 1; }]> = one;\nlet g: Closure<fn() -> Int [{ }] [{ affirm return = 2; }]> = two;\na = echo(Wrapper { item: f });\nb = echo(Wrapper { item: g });\naRef = &a.item;\nbRef = &b.item;\nx = aRef();\ny = bRef();\naffirm x = 1;\naffirm y = 2;\nreturn x * 40 + y;\n")
+    , ("main displays and drops its opaque boxed closure", "fn make() -> Closure<fn() -> Int> {\n    xs = [21, 21];\n    return move fn() -> Int => size(xs);\n};\nreturn make();\n")
+    , ("same-ABI boxed contracts get distinct printers", "struct Callbacks {\n    first: Closure<fn() -> Int [{ }] [{ affirm return = 1; }]>,\n    second: Closure<fn() -> Int [{ }] [{ affirm return = 2; }]>\n};\nfn one() -> Int [{ }] [{ affirm return = 1; }] { return 1; };\nfn two() -> Int [{ }] [{ affirm return = 2; }] { return 2; };\nreturn Callbacks { first: one, second: two };\n")
+    , ("an effectful disjoint argument reborrows a named mutable boxed receiver", "fn tick(x: &mut Int) -> Int writes(x) { *x = *x + 1; return *x; };\nfn twice(f: &mut ClosureMut<fn(Int) -> Int>) -> Int { x = 0; a = f(tick(&mut x)); b = f(tick(&mut x)); return a * 10 + b; };\nn = 0;\nlet cb: ClosureMut<fn(Int) -> Int> = move fn(x: Int) -> Int { n = n + x; return n; };\nreturn twice(&mut cb) + 29;\n")
+    ]
 
 -- Values laid out as C lays them out (Mir.layoutOf): narrow numbers stored and loaded, structs and enums with their fields at aligned offsets, printed and
 -- compared by their descriptors, as the executor of the MIR has them
@@ -133,7 +198,7 @@ nativeExamples =
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "args", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "bytes", "contracts", "early_return", "element_facts"
         , "enums", "language_ergonomics", "files", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "addresses", "drops", "strings", "text", "threads"
+        , "list_methods", "safe_access", "sized_structs", "spec_functions", "stored_callbacks", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "addresses", "drops", "strings", "text", "threads"
         ]
     ]
 -- (the compiler's own programs, the MIR reader and the emitter, are left out: validating them takes
@@ -1194,7 +1259,7 @@ valgrindCases =
     , "recursive function", "data built in a loop", "struct update", "match", "build in a loop", "set a list in a list"
     , "push to an empty list of lists", "in a list", "in a struct", "a parameter", "a builtin on lists"
     , "an element borrowed for updating is written through", "a Box's payload is written through a reborrow of it"
-    ] ++ map fst partialTakePrograms ++ map fst takenApartPrograms ++ map fst lookPrograms ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms] ++ map fst referenceWritePrograms ++ map fst lentPartPrograms
+    ] ++ map fst boxedStoragePrograms ++ map fst partialTakePrograms ++ map fst takenApartPrograms ++ map fst lookPrograms ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms] ++ map fst referenceWritePrograms ++ map fst lentPartPrograms
 
 -- Builds the program with the memory checks of the runtime and runs it, and for some programs builds it again as it is
 -- built for use and runs that under valgrind, which finds the same mistakes without the help of the runtime. It has to

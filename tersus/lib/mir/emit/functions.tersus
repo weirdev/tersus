@@ -6,7 +6,7 @@ import data::codec::codec { Type };
 import mir::reader::reader { Constant, Operand, Terminator, MirBlock, Function };
 
 // A call of a function, given its symbol or the address of it, the types of its parameters and of its result
-fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: &List<Type>, ptrs: &List<Bool>, returnType: &Type, args: &List<Operand>, dest: Int, next: Int) -> Gen ~ {
+fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: &List<Type>, ptrs: &List<Bool>, returnType: &Type, args: &List<Operand>, dest: Int, next: Int, receiver: &String) -> Gen ~ {
     values = noStrings();
     g1 = g;
     i = 0;
@@ -50,6 +50,7 @@ fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: 
         i = i + 1;
     };
     arguments = noStrings();
+    if size(receiver.bytes) > 0 { arguments = push(arguments, "ptr ".then(receiver)); };
     j = 0;
     while j < size(values) && j < size(argTypes) [{ affirm j >= 0; affirm j <= size(values); affirm j <= size(argTypes); }] ~ {
         if j < size(ptrs) && get(ptrs, j) {
@@ -119,12 +120,38 @@ fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -
                 target = get(cx.sigs, i);
                 if !target.paramsOk { return failG(g, "Undeclared local of ".then(name)); };
                 if !target.hasReturn { return failG(g, "Function without a result: ".then(name)); };
-                return call(g, cx, entry, f, functionSymbol(name), target.params, target.ptrs, target.returns, args, dest, next);
+                return call(g, cx, entry, f, functionSymbol(name), target.params, target.ptrs, target.returns, args, dest, next, "");
             };
         };
         // a function value: the address of a function, with the types its type says
         callees = push([], clone(callee));
         ty = sharedType(cx, f, callees);
+        owner = refTargetOf(ty);
+        if (ty is Type::TRef || ty is Type::TMutRef) && owner is Type::TBoxedClosure {
+            shape = Box::unbox((owner as Type::TBoxedClosure).signature);
+            params = noTypes();
+            ret = Type::TInt;
+            if shape is Type::TFn { params = clone((shape as Type::TFn).args); ret = clone(Box::unbox((shape as Type::TFn).ret)); }
+            else if shape is Type::TFnContract { params = clone((shape as Type::TFnContract).args); ret = clone(Box::unbox((shape as Type::TFnContract).ret)); }
+            else { return failG(g, "a boxed closure needs a function signature"); };
+            ptrs = noBools();
+            abi = noTypes();
+            for a in &params {
+                lent = a is Type::TRef || a is Type::TMutRef;
+                ptrs = push(ptrs, lent);
+                if lent { abi = push(abi, refTargetOf(a)); }
+                else { abi = push(abi, clone(a)); };
+            };
+            g1 = operandValue(g, cx, f, ty, callee);
+            address = clone(g1.last);
+            g1 = loadAt(g1, owner, address);
+            env = clone(g1.last);
+            g1 = ins(g1, "invoke", "load ptr, ptr ".then(env));
+            thunk = clone(g1.last);
+            g1 = ins(g1, "capture", "getelementptr ptr, ptr ".then(env).then(", i64 3"));
+            capture = clone(g1.last);
+            return call(g1, cx, entry, f, thunk, abi, ptrs, ret, args, dest, next, capture);
+        };
         if ty is Type::TFn {
             g1 = operandValue(g, cx, f, ty, callee);
             address = clone(g1.last);
@@ -137,7 +164,7 @@ fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -
                 if lent { params = push(params, refTargetOf(a)); }
                 else { params = push(params, clone(a)); };
             };
-            return call(g1, cx, entry, f, address, params, ptrs, Box::unbox(shape.ret), args, dest, next);
+            return call(g1, cx, entry, f, address, params, ptrs, Box::unbox(shape.ret), args, dest, next, "");
         };
         return failG(g, "Call of something that is not a function");
     };

@@ -519,7 +519,7 @@ function n = M.Function n [] (Just TInt) (Map.singleton (M.Local 0) (M.LocalDecl
     (Map.singleton (M.BlockId 0) (block [M.Assign (M.Local 0) (M.Use (int 0))] M.Return)) [] [] [] [] [] M.emptySpec
 
 empty :: M.Program
-empty = M.Program Map.empty Map.empty (function "main") Map.empty Map.empty Map.empty Map.empty
+empty = M.Program Map.empty Map.empty (function "main") Map.empty Map.empty Map.empty Map.empty Map.empty
 
 rootId :: ModuleId
 rootId = ModuleId "app" (Just "main")
