@@ -506,7 +506,7 @@ fn reachedFrameOwners(program: &FullProgram, supplied: &List<MonoKey>, live: &Ha
     pending = monoRedirect(clone(program.entry), &program.functions).needs;
     for f in &program.functions {
         if HashSet::contains(live, textAt(&f.header, 1)) && size(monoSection(&f.header, "typeparams")) = 0 && size(monoSection(&f.header, "sizeparams")) = 0 {
-            for k in monoRedirect(clone(f), &program.functions).needs { pending = push(pending, k); };
+            for k in monoRedirect(clone(f), &program.functions).needs { pending = push(pending, clone(k)); };
         };
     };
     seen = []; at = 0;
@@ -516,10 +516,10 @@ fn reachedFrameOwners(program: &FullProgram, supplied: &List<MonoKey>, live: &Ha
             seen = push(seen, clone(k)); n = fnIndex(&program.functions, &k.name);
             if n >= 0 && n < size(program.functions) {
                 frame = monoInstantiate(clone(get(program.functions, n)), k);
-                for owner in reachableFunctionTypes(program, &frame) { owners = owners.insert(owner); };
-                for owner in functionImages(program, &frame) { owners = owners.insert(owner); };
-                for owner in constantRoots(program, &frame) { owners = owners.insert(owner); };
-                for next in monoRedirect(frame, &program.functions).needs { pending = push(pending, next); };
+                for owner in reachableFunctionTypes(program, &frame) { owners = owners.insert(clone(owner)); };
+                for owner in functionImages(program, &frame) { owners = owners.insert(clone(owner)); };
+                for owner in constantRoots(program, &frame) { owners = owners.insert(clone(owner)); };
+                for next in monoRedirect(frame, &program.functions).needs { pending = push(pending, clone(next)); };
             };
         };
     };
