@@ -10,7 +10,7 @@ import Compile (lowerSource)
 import Mir
 import MirData (readLowered, readProgram, writeProgramWithGhosts, writeLowered)
 import MirOwnershipData (ownershipInput, restoreOwnership)
-import MirHousekeeping (Tool (..), monomorphizeWith, ownershipTool, toolProgram, emitterEntry, eraseGhosts, nativeProgram)
+import MirHousekeeping (Tool (..), monomorphizeWith, ownershipTool, toolProgram, emitterEntry, eraseGhosts, nativeProgram, verifyCaptureEffects)
 import MirMono (monomorphizeForValidation)
 import qualified MirMonoOracle as Oracle
 import Native (runWithInputFull)
@@ -19,6 +19,7 @@ import TestHarness
 import TestNative (nativeExamples, validatedPrograms, unvalidatedPrograms)
 import Types (Arg (..), Size (..), Type (..), Signature (..), BuiltinFunct (..), instanceName)
 import Utils
+import ValidatorNative (validateCompiled)
 
 unitOf :: Program -> Lowered
 unitOf p = Lowered p Set.empty Set.empty Set.empty Set.empty Set.empty Set.empty []
@@ -48,7 +49,7 @@ compareInput original input = do
             (code, out, err) <- runWithInputFull exe ("pass mono\n" ++ input)
             pure $ case (code, err, readLowered out) of
                 (ExitSuccess, "", Ok unit) ->
-                    let expected = Oracle.monomorphize original
+                    let expected = (Oracle.monomorphize original){progCaptureStorage = Map.empty}
                         semantic = monoDifference expected (lowProgram unit)
                         bytes = case writeLowered (unitOf expected) of
                             Error e -> Just e
@@ -69,6 +70,22 @@ sourceMono lower source = case lower True source of
                 Error e -> pure (Just ("pre-monomorphization native stage refused: " ++ e))
                 Ok native -> fmap (fmap ("native-stage MIR: " ++)) (compareWire native)
 
+sourceStorageProvenance :: (Bool -> String -> Result Program String) -> TestResult
+sourceStorageProvenance lower = case lower True source of
+    Error e -> Just e
+    Ok raw ->
+        let mono = monomorphizeForValidation raw
+            decoded = writeLowered (unitOf raw) `bindResult` readLowered
+         in testAssertTrue (Map.member "List" (progCaptureStorage raw))
+            <> testAssertTrue (any ("keep<" `isPrefixOf`) (Map.keys (progFunctions mono)))
+            <> testAssertEq (progCaptureStorage mono) (progCaptureStorage raw)
+            <> testAssertEq (validateCompiled raw) (Ok ())
+            <> testAssertEq (mapResult (progCaptureStorage . lowProgram) decoded) (Ok Map.empty)
+            <> testAssertErrorContains "a boxed closure capture cannot contain references or permissions"
+                (decoded `bindResult` (verifyCaptureEffects . lowProgram))
+  where
+    source = "fn keep<T>(x: T) -> T { return x; }; xs = keep([1, 2]); let f: Closure<fn() -> Int> = move fn() -> Int => size(xs); return f();"
+
 testMirMono :: Test
 testMirMono = testMirMonoUsing lowerSource
 
@@ -81,6 +98,7 @@ testMirMonoUsing lower = TestList "testMirMono"
     , TestList "complete metadata and substitution" [TestCase label (compareWire p) | (label, p) <- monoFixtures]
     , TestList "validation adapter retains contracts and ghosts"
         [ testCase label (monoDifference (Oracle.monomorphizeForValidation p) (monomorphizeForValidation p)) | (label, p) <- monoFixtures ]
+    , TestCase "source storage provenance survives validation Mono but not MIR3" $ pure $ sourceStorageProvenance lower
     , TestCase "the no-generic fast path does not request a native tool" $ do
         actual <- monomorphizeWith (error "the fast path forced the tool") metadataProgram
         pure (testAssertEq actual (Ok metadataProgram))

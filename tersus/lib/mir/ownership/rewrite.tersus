@@ -31,18 +31,20 @@ fn borrowedArguments(p: &Program, cx: &Context, callee: &Operand, count: Int) ->
             owner = Box::unbox((ty as Type::TMutRef).inner);
             if owner is Type::TBoxedClosure { ty = clone(Box::unbox((owner as Type::TBoxedClosure).signature)); };
         };
-        if ty is Type::TFn || ty is Type::TFnContract {
-            signatureArgs = [];
-            if ty is Type::TFn { signatureArgs = clone((ty as Type::TFn).args); }
-            else { signatureArgs = clone((ty as Type::TFnContract).args); };
-            for a in &signatureArgs {
-                lent = a is Type::TRef || a is Type::TMutRef;
-                target = clone(a);
-                if a is Type::TRef { target = clone(Box::unbox((a as Type::TRef).inner)); };
-                if a is Type::TMutRef { target = clone(Box::unbox((a as Type::TMutRef).inner)); };
-                out = push(out, BorrowArg { lent: lent, hasType: true, ty: target });
-            };
+        signatureArgs = [];
+        if ty is Type::TFn {
+            signatureArgs = clone((ty as Type::TFn).args);
             found = true;
+        } else if ty is Type::TFnContract {
+            signatureArgs = clone((ty as Type::TFnContract).args);
+            found = true;
+        };
+        for a in &signatureArgs {
+            lent = a is Type::TRef || a is Type::TMutRef;
+            target = clone(a);
+            if a is Type::TRef { target = clone(Box::unbox((a as Type::TRef).inner)); };
+            if a is Type::TMutRef { target = clone(Box::unbox((a as Type::TMutRef).inner)); };
+            out = push(out, BorrowArg { lent: lent, hasType: true, ty: target });
         };
     };
     if !found && count > 0 { for i in 0..count { out = push(out, BorrowArg { lent: false, hasType: false, ty: Type::TInt }); }; };

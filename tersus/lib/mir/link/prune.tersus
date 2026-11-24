@@ -123,8 +123,9 @@ fn typeNames(ts: &List<Token>, pos: Int) -> List<String> ~ {
     return out;
 };
 fn signatureTypes(ts: &List<Token>, pos: Int) -> List<String> ~ {
+    if pos < 0 || pos >= size(ts) { return []; };
     end = typeEnd(ts, pos);
-    if pos < 0 || end <= pos { return []; };
+    if end <= pos { return []; };
     kind = textAt(ts, pos);
     out = [];
     if kind = "named" {

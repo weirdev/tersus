@@ -537,6 +537,7 @@ fn coerceCore(st: St, wanted: Int, arg: TE) -> St ~ {
             if !HashMap::contains(&st.fns, &name) || (inScope(st, &name) && size(st.current.bytes) > 0) { return typeError(st, "boxing a function value requires a named function"); };
             st = boxedNamedThunk(st, &name, wx.flag);
             if st.status != 0 { return st; };
+            if size(st.names) = 0 { return typeError(st, "boxing a named function did not produce a thunk"); };
             thunk = clone(get(st.names, 0));
             st = simpleTy(st, 0);
             captureTy = st.ty;
