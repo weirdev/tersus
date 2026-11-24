@@ -11,7 +11,7 @@
 -- library it is built with. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (withValidatorOperation, validateCompiled, validateCompiledUncached, validationRefusals, inBatches, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, cachedBootstrapSourceEmitter, validatorKey, certificateKey, prepareTexts, prepareEncodedTexts, prepareValidationWith, raiseStack) where
+module ValidatorNative (withValidatorOperation, validateCompiled, validateCompiledUncached, validationRefusals, inBatches, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, cachedBootstrapSourceEmitter, validatorKey, certificateKey, prepareTexts, prepareEncodedTexts, prepareValidationWith, ValidationNotes (..), validateTexts, raiseStack) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, takeMVar, withMVar)
 import Data.List (foldl', isSuffixOf, sortOn)
@@ -72,7 +72,7 @@ validateWith physical caching program = unsafePerformIO $ do
         Error e -> pure (Error e)
         Ok (producer, view) -> case prepareEncodedTexts (encodePrepared physical view) of
             Error e -> pure (Error e)
-            Ok texts -> validateTexts (verdicts producer caching) (pure (Ok view)) physical texts
+            Ok texts -> validateTexts (verdicts producer caching) (PreparedNotes view) physical texts
 
 type EmitterProducer = (Bool, String, FilePath)
 
@@ -110,8 +110,10 @@ prepareEncodedTexts encoded = case encoded of
 unmodeledFeature :: String -> String
 unmodeledFeature what = "the program uses a feature the Tersus validator does not model yet: " ++ what
 
-validateTexts :: ([String] -> IO (Result [Maybe (Int, Int, Int)] String)) -> IO (Result M.Program String) -> Bool -> [(String, String)] -> IO (Result () String)
-validateTexts check prepared physical texts = do
+data ValidationNotes = PreparedNotes M.Program | ReceiptNotes (IO (Result M.Program String))
+
+validateTexts :: ([String] -> IO (Result [Maybe (Int, Int, Int)] String)) -> ValidationNotes -> Bool -> [(String, String)] -> IO (Result () String)
+validateTexts check notes physical texts = do
     checked <- check (map snd texts)
     case checked of
         Error e -> pure (Error e)
@@ -119,10 +121,16 @@ validateTexts check prepared physical texts = do
             [] -> pure (Ok ())
             (index, verdict@(status, _, _)) : _ -> do
                 let name = fst (texts !! index)
-                view <- if status == 1 then fmap (mapResult Just) prepared else pure (Ok Nothing)
-                pure $ case view of
-                    Error e -> Error e
-                    Ok ready -> Error (refusalMessage physical ready name verdict)
+                view <- if status == 1 then noteView else pure Nothing
+                pure (Error (refusalMessage physical view name verdict))
+  where
+    noteView = case notes of
+        PreparedNotes view -> pure (Just view)
+        ReceiptNotes prepare -> do
+            reconstructed <- prepare
+            pure $ case reconstructed of
+                Ok view | prepareEncodedTexts (encodePrepared physical view) == Ok texts -> Just view
+                _ -> Nothing
 
 refusalMessage :: Bool -> Maybe M.Program -> String -> (Int, Int, Int) -> String
 refusalMessage physical program name (status, block, step) = case status of
@@ -450,7 +458,7 @@ cachedBootstrapSourceEmitter = do
 -- it validates what it is made of: the native storage library its lists and
 -- Boxes are built with, and its own source; only a validator that has done
 -- so is used.
-type CertificateSide = (IO (Result M.Program String), [(String, String)])
+type CertificateSide = (ValidationNotes, [(String, String)])
 type PreparedCertificate = (String, String, FilePath, FilePath, CertificateSide, CertificateSide)
 
 {-# NOINLINE certificateCache #-}
@@ -507,12 +515,12 @@ prepareCertificateFor producer@(_, _, directory) = guardEmitterDirectory produce
                                 Just (libraryTexts, ownTexts) -> do
                                     fresh <- readIORef views
                                     let library = case nativeStorage of Ok (_, value) -> value; Error e -> error e
-                                        viewFor physical raw pick = case fresh of
-                                            Just pair -> pure (Ok (pick pair))
-                                            Nothing -> prepare physical raw
+                                        notesFor physical raw pick = case fresh of
+                                            Just pair -> PreparedNotes (pick pair)
+                                            Nothing -> ReceiptNotes (prepare physical raw)
                                         key = certificateKey unchecked (map snd libraryTexts) (map snd ownTexts)
                                         ready = (key, unchecked, directory, exe,
-                                            (viewFor True library fst, libraryTexts), (viewFor False own snd, ownTexts))
+                                            (notesFor True library fst, libraryTexts), (notesFor False own snd, ownTexts))
                                     _ <- evaluate (length key)
                                     pure (Map.insert (directory, unchecked) ready made, Ok ready)
   where

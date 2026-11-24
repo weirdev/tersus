@@ -3,6 +3,7 @@ module TestMirValidationMono (testMirValidationMono) where
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (isPrefixOf)
+import Data.Maybe (listToMaybe)
 import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 import System.IO.Unsafe (unsafePerformIO)
@@ -20,14 +21,14 @@ import PackageCompile (compileModulesUsing, lowerCompiledPackage)
 import PackageData (Snapshot (..), resolverFromFiles)
 import PreludeSource (toolPackageFiles)
 import Seed (cachedSeed, compilerSnapshotHash)
-import SelfHostedMir (encodePrepared)
+import SelfHostedMir (encodePrepared, obligationNotePrepared)
 import qualified Syntax as S
 import TestHarness
 import TestMirCopiesParity (compareProgram, empty, function, int, template, witnessSource)
 import TestMirMono (monoFixtures)
 import Types (Arg (..), FnClause (..), FnClauseToken (..), FnContract (..), Size (..), Type (..), instanceName)
 import Utils
-import ValidatorNative (prepareEncodedTexts, prepareTexts, prepareValidationWith)
+import ValidatorNative (ValidationNotes (..), prepareEncodedTexts, prepareTexts, prepareValidationWith, validateTexts)
 
 {-# NOINLINE probeCache #-}
 probeCache :: MVar (Maybe (Result FilePath String))
@@ -245,6 +246,25 @@ dropRounds = empty
         , M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)
         }
 
+receiptRefusal :: IO TestResult
+receiptRefusal = case lowerFixture "affirm 1 = 2; return 0;" of
+    Error e -> pure (Just e)
+    Ok view -> case prepareEncodedTexts (encodePrepared False view) of
+        Error e -> pure (Just e)
+        Ok [(name, text)] -> case listToMaybe [(b, s, note) | b <- [-1..4], s <- [0..32], Just note <- [obligationNotePrepared False view name b s]] of
+            Nothing -> pure (Just "receipt fixture did not produce an obligation note")
+            Just (b, s, note) -> do
+                let failed _ = pure (Ok [Just (1, b, s)])
+                    apply reconstructed rows = validateTexts failed (ReceiptNotes (pure reconstructed)) False rows
+                    generic = Error ("Could not prove: an obligation could not be proved by the Tersus validator (in " ++ name ++ ", block " ++ show b ++ ", step " ++ show s ++ ")")
+                    noted = Error ("Could not prove: " ++ note ++ " (in " ++ name ++ ")")
+                unavailable <- apply (Error "failed to reconstruct a view") [(name, text)]
+                mismatched <- apply (Ok view) [(name, text ++ " ")]
+                matched <- apply (Ok view) [(name, text)]
+                passed <- validateTexts (const (pure (Ok [Just (0, -1, -1)]))) (ReceiptNotes (error "successful receipt forced note reconstruction")) False [(name, text)]
+                pure (testAssertEq unavailable generic `orElse` testAssertEq mismatched generic `orElse` testAssertEq matched noted `orElse` testAssertEq passed (Ok ()))
+        Ok _ -> pure (Just "receipt fixture did not produce exactly one request")
+
 testMirValidationMono :: Test
 testMirValidationMono = TestList "testMirValidationMono"
     [ TestList "direct Haskell validation mono parity" [TestCase label (compareMono p (const Nothing)) | (label, p) <- monoFixtures]
@@ -260,6 +280,7 @@ testMirValidationMono = TestList "testMirValidationMono"
             forbidden _ = error "no-work validation invoked the pass" :: IO (Result ((), M.Program) String)
         result <- prepareValidationWith forbidden False plain
         pure (testAssertEq result (Ok (Nothing, plain)))
+    , TestCase "receipt notes require matching bytes and cannot replace a known proof refusal" receiptRefusal
     , TestCase "a native pass refusal is not replaced with Haskell" $ do
         let refusal _ = pure (Error "validation mono sentinel") :: IO (Result ((), M.Program) String)
         result <- prepareValidationWith refusal False callbackAndShortSizes
