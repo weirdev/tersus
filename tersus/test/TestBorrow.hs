@@ -12,7 +12,9 @@ import MirMoves (checkMoves, finishLowered)
 import Syntax
 import TestHarness
 import TestParserFragments (parseStatementBlock)
-import Types (Arg (..), Type (..), instanceName, pattern TBox, pattern TList)
+import Types (Arg (..), Storage (..), Type (..), instanceName)
+import PreludeSource (stdName)
+import TestStorage (pattern TBox, pattern TList, stdProtocols, stdStorage)
 import Utils (Result (..))
 import ValidatorNative (validateCompiled)
 
@@ -159,9 +161,9 @@ testBorrow =
                 , testCase "a struct can hold a value that holds references" (runs "struct Window { first: &Int, last: &Int }; struct Outer { w: Window, n: Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; o = Outer { w: w, n: 1 }; f = o.w.first; return *f + o.n;" (VInt 11))
                 , testCase "a value that holds references can be given to a function" (runs "struct Window { first: &Int, last: &Int }; fn total(w: Window) -> Int { f = w.first; return *f; }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; return total(w);" (VInt 10))
                 , testCase "and put in a list" (runs "struct Window { first: &Int, last: &Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; ws = push([], w); w0 = get(ws, 0); f = w0.first; return *f + size(ws);" (VInt 11))
-                , testCase "a holder of a shared reference is Clone" (runs "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct S { r: &Int }; impl Clone for S { }; x = 1; s = S { r: &x }; t = clone(s); return *t.r;" (VInt 1))
-                , testCase "a cloned shared reference holder keeps its loan" (rejected "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct S { r: &Int }; impl Clone for S { }; x = 1; s = S { r: &x }; t = clone(s); x = 2; return *t.r;" "cannot be assigned while it is borrowed")
-                , testCase "a holder cannot clone its update reference" (rejected "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct S { r: &mut Int }; impl Clone for S { }; x = 1; s = S { r: &mut x }; t = clone(s); return 0;" "lent")
+                , testCase "a holder of a shared reference is Clone" (runs "struct S { r: &Int }; impl Clone for S { }; x = 1; s = S { r: &x }; t = clone(s); return *t.r;" (VInt 1))
+                , testCase "a cloned shared reference holder keeps its loan" (rejected "struct S { r: &Int }; impl Clone for S { }; x = 1; s = S { r: &x }; t = clone(s); x = 2; return *t.r;" "cannot be assigned while it is borrowed")
+                , testCase "a holder cannot clone its update reference" (rejected "struct S { r: &mut Int }; impl Clone for S { }; x = 1; s = S { r: &mut x }; t = clone(s); return 0;" "lent")
                 , testCase "a holder made in the function is returned from what its fields are from" (runs "struct S { r: &Int }; fn f(x: &Int) -> S from x { s = S { r: &x }; return s; }; x = 3; w = f(x); g = w.r; return *g;" (VInt 3))
                 , testCase "an ordinary field is not an origin" (runs "struct S { r: &Int, n: Int }; fn f(x: &Int) -> S from x { n = 1; return S { r: &x, n: n }; }; x = 3; w = f(x); g = w.r; return *g + w.n;" (VInt 4))
                 ]
@@ -513,8 +515,8 @@ testBorrow =
                 , testCase "a part of a joined holder cannot be moved on" (rejected (nestedHolder ++ "fn g(l: &List<B>, c: Bool) -> Int [{ affirm size(l) > 0; }] [{ }] { y = 0; h = get(l, 0); if c { } else { h = B { a: A { r: &mut y, n: 0 }, n: 0 }; }; t = h.a; u = t; return u.n; }; fn f(c: Int) -> Int { x = 1; l = push([], B { a: A { r: &mut x, n: 0 }, n: 0 }); n = g(l, true); return x; }; return f(0);") (readOnly "g" "t" "given on"))
                 , testCase "nor put into a value of the function's own" (rejected (nestedHolder ++ "fn g(l: &List<B>, c: Bool) -> Int [{ affirm size(l) > 0; }] [{ }] { y = 0; h = get(l, 0); if c { } else { h = B { a: A { r: &mut y, n: 0 }, n: 0 }; }; t = h.a; v = B { a: t, n: 0 }; return v.n; }; fn f(c: Int) -> Int { x = 1; l = push([], B { a: A { r: &mut x, n: 0 }, n: 0 }); n = g(l, true); return x; }; return f(0);") (readOnly "g" "t" "given on"))
                 , testCase "and a payload of a joined value taken apart by a match is read-only" (rejected "struct A { r: &mut Int, n: Int }; enum F { Some { a: A }, Nothing }; fn g(l: &List<F>, c: Bool) -> Int [{ affirm size(l) > 0; }] [{ }] { y = 0; h = get(l, 0); if c { } else { h = F::Some { a: A { r: &mut y, n: 0 } }; }; n = match h { F::Some { a: t } => { q = &mut *t.r; 0 }, F::Nothing => 0, }; return n; }; fn f(c: Int) -> Int { x = 1; l = push([], F::Some { a: A { r: &mut x, n: 0 } }); n = g(l, true); return x; }; return f(0);" "so nothing can be changed through it: it cannot be lent for updating")
-                , testCase "nor cloned by a generic function, since an update reference is not Clone" (rejected "fn firstOf<T: Clone>(l: &List<T>) -> T [{ affirm size(l) > 0; }] [{ }] { return get(l, 0).clone(); }; fn g(l: &List<&mut Int>) -> Int [{ affirm size(l) > 0; }] [{ }] { p = firstOf(l); *p = 5; return 0; }; fn f(c: Int) -> Int { x = 1; l = push([], &mut x); n = g(l); return x; }; return f(0);" "firstOf needs T to implement Clone, and &mut Int does not")
-                , testCase "nor by its holder's Clone" (rejected (sharedHolder ++ "impl Clone for W { }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; v = clone(w); return 0; }; return f(0);") "Move error: in <W as Clone>::clone")
+                , testCase "nor cloned by a generic function, since an update reference is not Clone" (rejected "fn firstOf<T: Clone>(l: &List<T>) -> T [{ affirm size(l) > 0; }] [{ }] { return get(l, 0).clone(); }; fn g(l: &List<&mut Int>) -> Int [{ affirm size(l) > 0; }] [{ }] { p = firstOf(l); *p = 5; return 0; }; fn f(c: Int) -> Int { x = 1; l = push([], &mut x); n = g(l); return x; }; return f(0);" ("firstOf needs T to implement " ++ stdName "core/ownership" "Clone" ++ ", and &mut Int does not"))
+                , testCase "nor by its holder's Clone" (rejected (sharedHolder ++ "impl Clone for W { }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; v = clone(w); return 0; }; return f(0);") ("Move error: in <W as " ++ stdName "core/ownership" "Clone" ++ ">::clone"))
                 , testCase "a holder lent for updating can be written through" (runs (sharedHolder ++ "fn mutate(w: &mut W) -> Int { *w.r = 4; return 0; }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; n = mutate(&mut w); return x; }; return f(0);") (VInt 4))
                 , testCase "a holder given by value can be written through" (runs (sharedHolder ++ "fn mutate(w: W) -> Int { *w.r = 4; return 0; }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; n = mutate(w); return x; }; return f(0);") (VInt 4))
                 , testCase "a holder lent to be read can be read through and lent on to be read" (runs (sharedHolder ++ "fn peek(w: &W) -> Int { return *w.r; }; fn g(w: &W) -> Int { p = w.r; q = &*p; return *p + *q + peek(w); }; fn f(c: Int) -> Int { x = 2; w = W { r: &mut x }; return g(w); }; return f(0);") (VInt 6))
@@ -558,7 +560,7 @@ rootedWriteCases = TestList "writes rooted at the reference written through"
     five = M.Use (M.Const (M.CInt 5))
     borrowX = [set 1 (M.Use (M.Const (M.CInt 0))), set 3 (M.Borrow (l 1) [] True)]
     decls = Map.fromList [(l n, M.LocalDecl ty (Just name)) | (n, ty, name) <- [(1, TInt, "x"), (3, TMutRef TInt, "q"), (4, TMutRef TInt, "p"), (6, TInt, "v")]]
-    check ss = checkMoves Set.empty Set.empty Set.empty (M.Program Map.empty Map.empty (M.Function "writes" [] Nothing decls (Map.fromList [(M.BlockId 0, M.BasicBlock ss M.Unreachable)]) [] [] [] [] [] M.emptySpec) Map.empty Map.empty Map.empty Map.empty)
+    check ss = checkMoves Set.empty Set.empty Set.empty (M.Program Map.empty Map.empty (M.Function "writes" [] Nothing decls (Map.fromList [(M.BlockId 0, M.BasicBlock ss M.Unreachable)]) [] [] [] [] [] M.emptySpec) Map.empty Map.empty Map.empty Map.empty Map.empty Nothing)
     requireError msg es = if any (isInfixOf msg) es then Nothing else Just ("Expected " ++ show msg ++ "; got " ++ show es)
     rootOfWrite source name = case parseStatementBlock source of
         Left err -> Just ("Parse error: " ++ err)
@@ -622,9 +624,9 @@ loanTableCases = TestList "MIR loan rules"
         [ ("Envelope", (["T"], [("ref", r), ("wrapped", TNamed "Slots" [ArgType (TParam "T")])]))
         , ("Slots", (["T"], [("slot", TBlock (TParam "T"))]))
         ]
-    check params fs ls bs = checkMoves Set.empty Set.empty Set.empty (M.Program declarations fs (fn "loans" params Nothing ls bs) generics Map.empty Map.empty Map.empty)
+    check params fs ls bs = checkMoves Set.empty Set.empty Set.empty (M.Program declarations fs (fn "loans" params Nothing ls bs) generics Map.empty Map.empty Map.empty stdProtocols Nothing)
     declarations = Map.union types (Map.fromList
-        [(instanceName base [ArgType ty], M.StructDecl [("update", TMutRef TInt)]) | (base, ty) <- [("Box", TInt), ("List", TBool)]])
+        [(instanceName base [ArgType ty], M.StructDecl [("update", TMutRef TInt)]) | (base, ty) <- [(storageBox stdStorage, TInt), (storageList stdStorage, TBool)]])
     declaredResult ty aggregate expectsLoan =
         let pty = if aggregate then holder else r
             param = if aggregate then 7 else 2
@@ -741,7 +743,7 @@ loanTableCases = TestList "MIR loan rules"
                 Nothing -> (b0, M.BasicBlock (start ++ reach) (M.Goto b4)) : atSite
                 Just alt -> [(b0, M.BasicBlock start (M.SwitchBool (cp 9) b2 b3)), (b2, M.BasicBlock reach (M.Goto b4)), (b3, M.BasicBlock alt (M.Goto b4))] ++ atSite
             main = M.Function "loans" (map l (params ++ [9, 23])) Nothing decls (Map.fromList blocks) [] [] (map l borrowed) (map l borrowed) [] M.emptySpec
-         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations boundaryCallees main generics Map.empty Map.empty Map.empty)
+         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations boundaryCallees main generics Map.empty Map.empty Map.empty stdProtocols Nothing)
     expectBoundary callers (refusedForCallers, tiesOwn) es
         | callers && refusedForCallers = if any (\e -> "which is the caller's: return the value that holds it instead" `isInfixOf` e) es then Nothing else Just ("Expected a refusal of a store into the caller's storage; got " ++ show es)
         | not callers && tiesOwn = requireError "owner cannot be assigned while it is borrowed by" es
@@ -761,7 +763,7 @@ loanTableCases = TestList "MIR loan rules"
         , testCase "shared path: lent for updating through a function value" (expectShared True False True False (sharedPathProgram [3, 9, 23] [3] [] [] [set 5 (M.ReadField (cp 3) "UpdateHolder" "ref")] ([], Just (M.Call (cp 23) [cp 5] (l 7) b1))))
         , testCase "shared path: a loop's back edge that changes only the mark is seen on the next turn" (testAssertEq ["in loans: p may be reached through a shared reference or a parameter lent to be read (&T), so nothing can be changed through it: it cannot be given on"] (markOnlyLoop True))
         , testCase "shared path: the same loop over a parameter given by value stays writable" (testAssertEq [] (markOnlyLoop False))
-        , testCase "shared path: a drop writes through what it is given" (testAssertEq [] (checkMoves Set.empty Set.empty (Set.singleton "UpdateHolder") (M.Program declarations Map.empty dropFn generics Map.empty Map.empty Map.empty)))
+        , testCase "shared path: a drop writes through what it is given" (testAssertEq [] (checkMoves Set.empty Set.empty (Set.singleton "UpdateHolder") (M.Program declarations Map.empty dropFn generics Map.empty Map.empty Map.empty stdProtocols Nothing)))
         ]
     sharedNames = Map.fromList [(6, "$match"), (5, "p")]
     -- (the holder is a clone, on entry of a parameter given by value and on the back edge of one lent to be read: clones have
@@ -781,7 +783,7 @@ loanTableCases = TestList "MIR loan rules"
                 , (b1, M.BasicBlock [] M.Unreachable)
                 ]
             main = M.Function "loans" (map l [24, 25, 9]) Nothing decls (Map.fromList blocks) [] [] [l 24 | lentToRead] [] [] M.emptySpec
-         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations calleeFns main generics Map.empty Map.empty Map.empty)
+         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations calleeFns main generics Map.empty Map.empty Map.empty stdProtocols Nothing)
     sharedLocals = [(1, TInt), (3, updateHolder), (4, updateHolder), (5, TMutRef TInt), (6, updateHolder), (7, TInt), (8, TRef updateHolder), (9, TBool), (10, TMutRef TInt), (11, TInt), (12, TMutRef TInt), (13, TList updateHolder), (14, TBox updateHolder), (15, updateOption), (16, TVariant "UpdateOption::Some"), (17, TUninit updateHolder), (18, TRef TInt), (19, TMutRef updateHolder), (21, TList updateHolder), (22, updateHolder), (23, TFn [TMutRef TInt] TInt)]
     updateOption = TNamed "UpdateOption" []
     calleeFns = Map.fromList
@@ -802,7 +804,7 @@ loanTableCases = TestList "MIR loan rules"
                 | otherwise = [(b0, M.BasicBlock (setup ++ final) (maybe M.Unreachable id call))]
             ends = [(b1, M.BasicBlock [] M.Unreachable)]
             main = (M.Function "loans" (map l params) Nothing decls (Map.fromList (blocks ++ ends)) [] [] (map l borrowed) (map l mutBorrowed) [] M.emptySpec)
-         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations calleeFns main generics Map.empty Map.empty Map.empty)
+         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations calleeFns main generics Map.empty Map.empty Map.empty stdProtocols Nothing)
     b2 = M.BlockId 2
     b3 = M.BlockId 3
     b4 = M.BlockId 4

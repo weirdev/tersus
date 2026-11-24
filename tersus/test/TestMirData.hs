@@ -4,7 +4,7 @@ module TestMirData (testMirData, testMirLowered, everyRecord, malformedLowered) 
 
 import Control.Applicative ((<|>))
 import Data.Char (isAscii)
-import Data.List (isInfixOf, isPrefixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, nub, sort)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
@@ -22,13 +22,14 @@ import Modules (LoadResult (..))
 import qualified Modules as Mod
 import MirData
 import qualified PackageCompile as Package
-import PreludeSource (elaboratePackageFiles, libModules, toolPackageFiles, validationPackageFiles)
+import PreludeSource (elaboratePackageFiles, libModuleOf, libModules, toolPackageFiles, validationPackageFiles)
 import qualified Syntax as S
 import Pipeline (ownedSource, loadFromFilesystem)
-import Types (Arg (..), FnClause (..), FnClauseToken (..), FnContract (..), Size (..), Type (..), pattern TList, pattern TBox)
+import Types (Arg (..), FnClause (..), FnClauseToken (..), FnContract (..), OwnershipFacts (..), Size (..), Type (..))
+import TestStorage (pattern TList, pattern TBox)
 import TestHarness
 import ValidatorNative (prepareTexts)
-import TestNative (nativeExamples, validatedPrograms)
+import TestNative (nativeExamples, ownRoleEntry, ownRolePrograms, validatedPrograms)
 import TestVariadic (variadicPrograms)
 import Utils
 
@@ -39,7 +40,7 @@ testMirData =
     TestList
         "testMirData"
         [ TestParallel "examples" [TestCase path (roundTripsAndIrForPath path) | path <- nativeExamples]
-        , TestParallel "programs" [TestCase name (roundTripsAndIr source) | (name, source) <- validatedPrograms]
+        , TestParallel "programs" ([TestCase name (roundTripsAndIr source) | (name, source) <- validatedPrograms] ++ [TestCase name (roundTripResult . mapResult writeProgram <$> ownedFromFiles ownRoleEntry files) | (name, files) <- ownRolePrograms])
         , TestList
             "format"
             [ testCase "the command prints it" $
@@ -62,7 +63,8 @@ testMirData =
             , testCase "a name of any bytes is ASCII and comes back" (names roundTripsNames)
             , testCase "the validator's part is not data" $
                 case ownedSource "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; }; return f(2);" of
-                    Ok program -> if readProgram (writeProgram program) == Ok (forNative program) && not (any isGhost (statements (forNative program))) then Nothing else Just "ghost statements were kept"
+                    -- (the data a checker reads carries the storage binding, not the other roles)
+                    Ok program -> let native = forNative program; storageOnly = native{progProtocols = Map.filterWithKey (\role _ -> role `elem` ["List", "Box"]) (progProtocols native), progOwnership = Nothing} in if readProgram (writeProgram program) == Ok storageOnly && not (any isGhost (statements native)) then Nothing else Just "ghost statements were kept"
                     Error e -> Just e
             ]
         , TestList
@@ -107,7 +109,7 @@ testMirData =
                     []
                     []
                     emptySpec
-            program = Program (Map.fromList [("Callback", StructDecl [("f", contractFnType)])]) Map.empty mainFn Map.empty Map.empty Map.empty Map.empty
+            program = Program (Map.fromList [("Callback", StructDecl [("f", contractFnType)])]) Map.empty mainFn Map.empty Map.empty Map.empty Map.empty Map.empty Nothing
             boxed = TNamed "Holder" [ArgType (TBoxedClosure True (TFn [TBoxedClosure False contractFnType] TInt))]
             boxedProgram = program{progTypes = Map.insert "Holder" (StructDecl [("callback", boxed)]) (progTypes program)}
             boxedText = writeProgramWithGhosts boxedProgram
@@ -201,6 +203,8 @@ nestedInstanceIsDeclared =
                 , progInvariants = Map.empty
                 , progBounded = Map.empty
                 , progInstances = Map.empty
+                , progProtocols = Map.empty
+                , progOwnership = Nothing
                 }
         completed = completeInstances program
      in if Map.lookup "Outer<Int>" (progTypes completed) == Just (StructDecl [("inner", TNamed "Inner" [ArgType TInt]), ("tag", TInt)])
@@ -241,6 +245,8 @@ roundTripsNames =
         , progInvariants = Map.empty
         , progBounded = Map.empty
         , progInstances = Map.empty
+        , progProtocols = Map.empty
+        , progOwnership = Nothing
         }
   where
     oddName = "a \"quoted\" \\ name\nwith caf\233, \955 and \128512"
@@ -409,9 +415,9 @@ packageLowerings files entry =
 
 -- As LibPackage takes each library's unit; every library answers
 libraryLowerings :: Result [UnitLowering] String
-libraryLowerings = case bootstrapLoader (LoadRequest LoadLibraries False (Mod.resolverFromFiles []) Nothing Mod.librarySources []) of
+libraryLowerings = case bootstrapLoader Mod.libraryRequest of
     LoadedLibraries answers Nothing
-        | sort [label | LibraryAnswer label _ _ _ <- answers] == sort [label | (label, _, _) <- libModules] -> libraries answers
+        | sort [label | LibraryAnswer label _ _ _ <- answers] == sort (nub [libModuleOf name | (name, _, _) <- libModules]) -> libraries answers
         | otherwise -> Error "the libraries that answered are not PreludeSource.libModules"
     LoadedLibraries _ (Just e) -> Error e
     _ -> Error "the loader did not answer with the compiler libraries"
@@ -448,10 +454,14 @@ finishedInstances = case fileLowering "instances" "struct Pair<T> { a: T, b: T }
         firstLowering
             [ testAssertEq (Map.keys (progTypes (lowProgram raw))) []
             , testAssertTrue (any isPosition (concatMap blockStatements (allBlocks (lowProgram raw))))
-            , testAssertEq (mapResult renderProgram (finishLowered raw)) (Ok (unlines
-                [ "struct Pair<Int> { a: Int, b: Int }"
-                , ""
-                , "fn main() -> Int {"
+            , case mapResult renderProgram (finishLowered raw) of
+                Error e -> Just e
+                Ok text -> firstLowering [testAssertTrue ("struct Pair<Int> { a: Int, b: Int }\n" `isInfixOf` text), testAssertTrue (not ("struct Pair<'" `isInfixOf` text)), testAssertTrue (mainText `isInfixOf` text)]
+            ]
+    other -> Just ("not one lowered program: " ++ take 300 (show [(label, r) | Ok ls <- [other], (label, r) <- ls]))
+  where
+    mainText = unlines
+                [ "fn main() -> Int {"
                 , "    let _0: Int;"
                 , "    let _1: Pair<Int>; // p"
                 , "    bb0: {"
@@ -460,10 +470,7 @@ finishedInstances = case fileLowering "instances" "struct Pair<T> { a: T, b: T }
                 , "        return;"
                 , "    }"
                 , "}"
-                ]))
-            ]
-    other -> Just ("not one lowered program: " ++ take 300 (show [(label, r) | Ok ls <- [other], (label, r) <- ls]))
-  where
+                ]
     allBlocks program = concatMap (Map.elems . fnBlocks) (progMain program : Map.elems (progFunctions program))
     isPosition stmt = case stmt of
         Ghost _ GhostPosition{} -> True
@@ -478,8 +485,17 @@ finishedStubs :: TestResult
 finishedStubs = case packageLowerings files "app/main.tersus" of
     Ok [(_, Ok _), (_, Ok raw)] ->
         firstLowering
-            [ testAssertEq (Set.toList (lowStubs raw), Map.keys (progFunctions (lowProgram raw))) (["app$util$util$twice"], ["app$util$util$twice"])
-            , testAssertEq (mapResult renderProgram (finishLowered raw)) (Ok (unlines
+            [ testAssertEq (userStubs (Set.toList (lowStubs raw)), userStubs (Map.keys (progFunctions (lowProgram raw)))) (["app$util$util$twice"], ["app$util$util$twice"])
+            , testAssertEq (lowStubs raw) (Map.keysSet (progFunctions (lowProgram raw)))
+            , case finishLowered raw of
+                Error e -> Just e
+                Ok finished -> testAssertEq (Map.keys (progFunctions finished), renderProgram finished{progTypes = Map.empty}) ([], mainText)
+            ]
+    other -> Just ("not two lowered modules: " ++ either' other)
+  where
+    -- (the unit also has stubs of std's storage drops, whose types it uses)
+    userStubs = filter (not . ("std$core$" `isInfixOf`))
+    mainText = unlines
                 [ "fn main() -> Int {"
                 , "    let _0: Int;"
                 , "    bb0: {"
@@ -489,10 +505,7 @@ finishedStubs = case packageLowerings files "app/main.tersus" of
                 , "        return;"
                 , "    }"
                 , "}"
-                ]))
-            ]
-    other -> Just ("not two lowered modules: " ++ either' other)
-  where
+                ]
     files = [("app/package.tersus", ""), ("app/main.tersus", "import app::util::twice;\nreturn twice(2);"), ("app/util/util.tersus", "fn twice(x: Int) -> Int [{ }] [{ }] { return x + x; };")]
     either' r = case r of
         Ok ls -> show [label | (label, _) <- ls]
@@ -520,11 +533,14 @@ loweredRoundTrip raw = case writeLowered raw of
     Ok text -> case readLowered text of
         Error e -> Just ("not read back: " ++ e)
         Ok back
-            | back /= raw -> Just ("read back differently: " ++ unwords (loweredDifferences raw back))
+            | back /= written -> Just ("read back differently: " ++ unwords (loweredDifferences written back))
             -- (Eq on a builtin's value ignores its metadata, which show keeps)
-            | show back /= show raw -> Just "read back with different builtin metadata"
+            | show back /= show written -> Just "read back with different builtin metadata"
             | writeLowered back /= Ok text -> Just "written differently the second time"
             | otherwise -> Nothing
+  where
+    -- (the checked protocols and ownership facts come with the unit's answer, beside its lowered data: lowerAccepted)
+    written = raw{lowProgram = (lowProgram raw){progProtocols = Map.empty, progOwnership = Nothing}}
 
 loweredDifferences :: Lowered -> Lowered -> [String]
 loweredDifferences a b =
@@ -535,6 +551,8 @@ loweredDifferences a b =
         , ("invariants", progInvariants pa == progInvariants pb)
         , ("bounded", progBounded pa == progBounded pb)
         , ("instances", progInstances pa == progInstances pb)
+        , ("protocols", progProtocols pa == progProtocols pb)
+        , ("ownership", progOwnership pa == progOwnership pb)
         , ("main", progMain pa == progMain pb)
         , ("copies", lowCopies a == lowCopies b)
         , ("linear", lowLinear a == lowLinear b)
@@ -567,8 +585,10 @@ everyRecord =
                 , progMain = mainFn
                 , progGenerics = Map.singleton "G" (["n"], [("a", TArrayOf TInt (SizeParam "n"))])
                 , progInvariants = Map.singleton "P" [holds]
-                , progBounded = Map.singleton "f" (BoundedFn ["n"] ["T"] ["f::g"] [PackLoop (BlockId 1) (BlockId 2) (BlockId 3) [BlockId 2, BlockId 4] [Local 7, Local 8] (Local 4) (Local 6) "..T@0" (Local 2) (Local 3) Nothing, PackLoop (BlockId 5) (BlockId 6) (BlockId 7) [BlockId 6] [] (Local 9) (Local 10) "..T@1" (Local 11) (Local 12) (Just (Local 13))])
+                , progBounded = Map.singleton "f" (BoundedFn ["n"] ["T"] ["f::g"] [PackLoop (BlockId 1) (BlockId 2) (BlockId 3) [BlockId 2, BlockId 4] [Local 7, Local 8] (Local 4) (Local 6) "..T@0" (Local 2) (Local 3) Nothing, PackLoop (BlockId 5) (BlockId 6) (BlockId 7) [BlockId 6] [] (Local 9) (Local 10) "..T@1" (Local 11) (Local 12) (Just (Local 13))] [(TNamed "Pair" [ArgType (TParam "T")], OwnershipFacts Nothing (Just ("Drop", "<Pair as Drop>::drop")) (Just ("Clone", "g[T]")) Nothing)])
                 , progInstances = Map.fromList [("f[Int, 3]", ("f", [ArgType TInt, ArgSize (SizeConst 3)])), ("g[T]", ("f", [ArgType (TParam "T")])), ("<$param T as Hash>::hash", ("", []))]
+                , progProtocols = Map.empty
+                , progOwnership = Nothing
                 }
         , lowCopies = Set.singleton "P"
         , lowLinear = Set.singleton "E"
@@ -718,6 +738,10 @@ malformedLowered =
     , ("a negative count in a constant", "not a count of what follows", onFirst (== "assign 0 use copy 1") (const "assign 0 use const list -1"))
     , ("a negative count in a type", "not a count of what follows", onFirst (== "local 0 none int") (const "local 0 none fn -1 int"))
     , ("a count larger than what follows", "not a count of what follows", onFirst ("copies " `isPrefixOf`) (const "copies 5 \"P\""))
+    , ("the facts of a function with bounds the unit does not have", "which is not a function with bounds of the unit", onFirst isFacts (setWord 1 "\"nosuch\""))
+    , ("the facts of a type given twice", "duplicate boundedfacts records", \ls -> let (before, after) = break isFacts ls in before ++ take 1 after ++ after)
+    , ("a fact's provider without its function", "each provider with its function", onFirst isFacts (replaceText "\"<Pair as Drop>::drop\"" "\"\""))
+    , ("a fact's owner that is not a type", "not a type", onFirst isFacts (setWord 2 "nosuchtype"))
     , ("a payload count that wraps", "not as long", onFirst ("data " `isPrefixOf`) (\l -> "data " ++ show (2 ^ (64 :: Int) + read (drop 5 l) :: Integer)))
     , ("a shared environment that wraps", "no shared environment", onFirst (== "env 0 1 \"n\" copy 1") (const "env 18446744073709551616 1 \"n\" copy 1"))
     , ("a function with bounds twice", "duplicate bounded", duplicateFirst ("bounded " `isPrefixOf`))
@@ -726,6 +750,11 @@ malformedLowered =
     ]
   where
     isSpec = ("spec " `isPrefixOf`)
+    isFacts = ("boundedfacts " `isPrefixOf`)
+    replaceText old new l = case l of
+        [] -> []
+        _ | old `isPrefixOf` l -> new ++ drop (length old) l
+        c : rest -> c : replaceText old new rest
     header = "function \"f\" params 1 1 "
     firstLine p ls = head ([l | l <- ls, p l] ++ [""])
     wordOf n l = words l !! n

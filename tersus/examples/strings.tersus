@@ -1,4 +1,4 @@
-// Strings. A literal is a `String` of the UTF-8 bytes of its text (the library is lib/string.tersus, which a program that writes a literal or
+// Strings. A literal is a `String` of the UTF-8 bytes of its text (the library is lib/std/string/string.tersus, which a program that writes a literal or
 // mentions `String` has in front of it), so `size` counts bytes: "caf\u{e9}" is 5 long. A String is a Sequence<Byte> and a Growable<Byte> of its
 // bytes, so `size`, `get`, `set` and `push` work on it and a function on any Sequence<Byte> takes one, and `concat` joins two.
 

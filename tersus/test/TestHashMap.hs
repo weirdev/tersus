@@ -6,11 +6,11 @@ import Solver
 import TestHarness
 import Utils
 
--- HashMap: a map from keys to values in lib/map.tersus, its operations, and what its contracts do and do not say.
+-- HashMap: a map from keys to values in lib/std/map/map.tersus, its operations, and what its contracts do and do not say.
 -- The programs are read as the command line reads them (the map library is put in front by the pipeline, and the
 -- programs are validated as they run), so a lookup is asserted with lookup and a fallback: that an inserted key is
 -- found is true when a map runs, and these tests say so, but fetch after an insert asks a caller to prove it and
--- cannot be written here (see lib/map.tersus). fetch is tested where its precondition is a function's own.
+-- cannot be written here (see lib/std/map/map.tersus). fetch is tested where its precondition is a function's own.
 testHashMap :: Test
 testHashMap =
     TestList
@@ -58,8 +58,8 @@ testHashMap =
                 "contracts"
                 [ testCase "fetch where the key is a precondition" (pipelineValid "fn getIt(m: &HashMap<Int, Int>, k: &Int) -> Int [{ affirm findIn(get(m.buckets, Hash::hash(k) % size(m.buckets)), k) >= 0; }] [{ }] { return m.fetch(k); }; return 0;")
                 , testCase "contains asks no Clone of a function with bounds that calls it" (pipelineRuns "fn has<K: Hash + Eq>(m: &HashMap<K, Int>, k: &K) -> Bool { return m.contains(k); }; m = HashMap::new(); m = m.insert(3, 4); if has(m, 3) { return 1; }; return 0;" (VInt 1))
-                , testCase "a value type without Clone is refused" (pipelineRejected "struct Plain { n: Int }; m = HashMap::new(); x = m.lookup(1, Plain { n: 0 }); return x.n;" "<HashMap>::lookup needs V to implement Clone, and Plain does not")
-                , testCase "a key type without Hash is refused" (pipelineRejected "struct Plain { x: Int }; impl Clone for Plain { }; m = HashMap::new().insert(Plain { x: 1 }, 2); return m.size();" "needs K to implement Hash")
+                , testCase "a value type without Clone is refused" (pipelineRejected "struct Plain { n: Int }; m = HashMap::new(); x = m.lookup(1, Plain { n: 0 }); return x.n;" "<std$map$map$HashMap>::lookup needs V to implement std$core$ownership$Clone, and Plain does not")
+                , testCase "a key type without Hash is refused" (pipelineRejected "struct Plain { x: Int }; impl Clone for Plain { }; m = HashMap::new().insert(Plain { x: 1 }, 2); return m.size();" "needs K to implement std$prelude$prelude$Hash")
                 , testCase "the count after insert is bounded" (pipelineValid "fn addOne(m: HashMap<Int, Int>, k: Int, v: Int) -> Int [{ }] [{ affirm return >= size(m); affirm return <= size(m) + 1; }] { return m.insert(k, v).size(); }; return 0;")
                 ]
             , TestList

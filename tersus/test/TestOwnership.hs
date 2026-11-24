@@ -7,7 +7,7 @@ module TestOwnership
     ) where
 
 import Control.Monad (when)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -16,14 +16,14 @@ import Mir
 import MirEval (MirValue (..), runProgram)
 import MirMoves (Role (..), operandLocal, roles)
 import MirHousekeeping (expandRefWrites, insertOwnership, verifyProgram)
-import Compile (lowerStatements)
+import Compile (lowerParts, parseSourceParts)
 import Modules (LoadResult (..))
-import TestParserFragments (parseStatementBlock)
 import Pipeline
 import TestCopies (boxedClonePrograms)
 import TestErgonomics (ergonomicsPrograms)
-import TestNative (lentPartPrograms, nativeExamples, referenceWritePrograms, unvalidatedPrograms, validatedPrograms)
-import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName)
+import TestNative (freshClone, lentPartPrograms, nativeExamples, ownRoleEntry, ownRoleFiles, ownRolePrograms, referenceWritePrograms, unvalidatedPrograms, validatedPrograms)
+import Types (Arg (..), Name, OwnershipFacts (..), Rel (..), Size (..), Storage (..), Type (..), Variable, instanceName)
+import TestStorage (pattern TList, pattern TBox)
 import TestHarness
 import Utils
 
@@ -128,7 +128,7 @@ holdsSomething :: Program -> Val -> Bool
 holdsSomething _ VNull = False
 holdsSomething _ (VP _) = True
 holdsSomething program (VS name fs)
-    | isListStruct name || isBoxStruct name = True
+    | isListStruct (progStorage program) name || isBoxStruct (progStorage program) name = True
     | Just _ <- typeOfValue program name >>= dropFunction program = True
     | otherwise = any (holdsSomething program . snd) fs
 holdsSomething program (VA values) = any (holdsSomething program) values
@@ -139,9 +139,9 @@ holdsSomething _ _ = False
 holdsMovedPart :: Val -> M Bool
 holdsMovedPart VNull = return True
 holdsMovedPart (VP a) = heapPart a
-holdsMovedPart (VS name fs)
-    | isListStruct name || isBoxStruct name, Just a <- listCell fs = heapPart a
-    | otherwise = or <$> mapM (holdsMovedPart . snd) fs
+holdsMovedPart (VS name fs) = storageM >>= \st -> case listCell fs of
+    Just a | isListStruct st name || isBoxStruct st name -> heapPart a
+    _ -> or <$> mapM (holdsMovedPart . snd) fs
 holdsMovedPart (VA values) = or <$> mapM holdsMovedPart values
 holdsMovedPart _ = return False
 
@@ -172,12 +172,12 @@ children (OBox v) = [v]
 children (OMem slots _) = Map.elems slots
 
 -- The values of the heap that a value holds, inline or not
-pointersOf :: Val -> [Int]
-pointersOf (VP a) = [a]
-pointersOf (VS name fs) | isListStruct name || isBoxStruct name, Just a <- listCell fs = [a]
-pointersOf (VS _ fs) = concatMap (pointersOf . snd) fs
-pointersOf (VA values) = concatMap pointersOf values
-pointersOf _ = []
+pointersOf :: Storage -> Val -> [Int]
+pointersOf _ (VP a) = [a]
+pointersOf st (VS name fs) | isListStruct st name || isBoxStruct st name, Just a <- listCell fs = [a]
+pointersOf st (VS _ fs) = concatMap (pointersOf st . snd) fs
+pointersOf st (VA values) = concatMap (pointersOf st) values
+pointersOf _ _ = []
 
 cloneVal :: Val -> M Val
 cloneVal v = do
@@ -202,14 +202,17 @@ cloneIn _ v = cloneFields v
 
 -- The self-copy guard belongs to CopyOf, not to copies of its fields.
 cloneFields :: Val -> M Val
-cloneFields (VP a) = do
+cloneFields v = storageM >>= \st -> cloneFieldsWith st v
+
+cloneFieldsWith :: Storage -> Val -> M Val
+cloneFieldsWith st (VP a) = do
     c <- cell a
     case cellObject c of
         OList vs -> mapM (cloneIn Nothing) vs >>= alloc . OList
         OBox v -> cloneIn Nothing v >>= alloc . OBox
         OMem _ _ -> failM "memory is copied"
 -- (a copy of a list has memory of its own, with copies of the elements in use)
-cloneFields (VS name fs) | isListStruct name, Just a <- listCell fs = do
+cloneFieldsWith st (VS name fs) | isListStruct st name, Just a <- listCell fs = do
     c <- cell a
     used <- case lookup "len" fs of
         Just (VI n) -> return n
@@ -223,7 +226,7 @@ cloneFields (VS name fs) | isListStruct name, Just a <- listCell fs = do
                 _ -> failM "an allocation is not on the heap"
         _ -> failM "a list that is not in memory"
 -- (a copy of a Box of the library has room of its own, with a copy of the value)
-cloneFields (VS name fs) | isBoxStruct name, Just a <- listCell fs = do
+cloneFieldsWith st (VS name fs) | isBoxStruct st name, Just a <- listCell fs = do
     c <- cell a
     case cellObject c of
         OMem slots size -> do
@@ -233,16 +236,17 @@ cloneFields (VS name fs) | isBoxStruct name, Just a <- listCell fs = do
                 VP b -> return (VS name [(f, if f == "addr" then VI (toInteger b * 2 ^ (32 :: Integer)) else v) | (f, v) <- fs])
                 _ -> failM "an allocation is not on the heap"
         _ -> failM "a Box that is not in memory"
-cloneFields (VS name fs) = VS name <$> mapM (\(f, v) -> (,) f <$> cloneIn Nothing v) fs
-cloneFields (VA values) = VA <$> mapM (cloneIn Nothing) values
-cloneFields v = return v
+cloneFieldsWith st (VS name fs) = VS name <$> mapM (\(f, v) -> (,) f <$> cloneIn Nothing v) fs
+cloneFieldsWith st (VA values) = VA <$> mapM (cloneIn Nothing) values
+cloneFieldsWith st v = return v
 
 -- How many places own the value: locals (not those that only look) and slots of values
 owners :: Int -> M Int
 owners a = do
     s <- getSt
-    let fromFrames = length [() | f <- stFrames s, Slot v Nothing <- Map.elems (frameSlots f), b <- pointersOf v, b == a]
-        fromHeap = length [() | c <- Map.elems (stHeap s), v <- children (cellObject c), b <- pointersOf v, b == a]
+    let st = progStorage (stProgram s)
+        fromFrames = length [() | f <- stFrames s, Slot v Nothing <- Map.elems (frameSlots f), b <- pointersOf st v, b == a]
+        fromHeap = length [() | c <- Map.elems (stHeap s), v <- children (cellObject c), b <- pointersOf st v, b == a]
     return (fromFrames + fromHeap)
 
 currentFrame :: M Frame
@@ -271,7 +275,7 @@ needsDrop program = owning
         TVariant v -> maybe False declared (ownerOf v)
         _ -> False
     declared n
-        | takeWhile (/= '<') n == "List" = True
+        | isListStruct (progStorage program) n = True
         | Just _ <- dropFunction program n = True
         | otherwise = case Map.lookup n (progTypes program) of
             Just (StructDecl fields) -> any (owning . snd) fields
@@ -355,7 +359,8 @@ borrowValue root steps mutable = do
             VR d r prior _ _ _ -> (d, r, prior ++ steps)
             _ -> (frameIdentity f, root, steps)
     current <- readPlace depth owner path
-    generations <- mapM (\a -> cell a >>= \c -> return (a, cellGeneration c)) (pointersOf current)
+    st <- storageM
+    generations <- mapM (\a -> cell a >>= \c -> return (a, cellGeneration c)) (pointersOf st current)
     return (VR depth owner path mutable current generations)
 
 readOperand :: Operand -> M Val
@@ -383,25 +388,28 @@ data Pure = PI Integer | PB Bool | PL [Pure] | PD Name [(Variable, Pure)] | PF N
     deriving (Eq, Show)
 
 toPure :: Val -> M Pure
-toPure (VI i) = return (PI i)
-toPure (VB b) = return (PB b)
-toPure (VA values) = PL <$> mapM toPure values
-toPure (VF n) = return (PF n)
-toPure VNull = failM "a value that was moved from is compared"
-toPure v@VR{} = dereference v >>= toPure
-toPure (VP a) = do
+toPure v = storageM >>= \st -> toPureWith st v
+
+toPureWith :: Storage -> Val -> M Pure
+toPureWith st (VI i) = return (PI i)
+toPureWith st (VB b) = return (PB b)
+toPureWith st (VA values) = PL <$> mapM toPure values
+toPureWith st (VF n) = return (PF n)
+toPureWith st VNull = failM "a value that was moved from is compared"
+toPureWith st v@VR{} = dereference v >>= toPure
+toPureWith st (VP a) = do
     c <- cell a
     case cellObject c of
         OList vs -> PL <$> mapM toPure vs
         OBox v -> toPure v
         OMem _ _ -> failM "memory is compared"
 -- (a list of native code is the elements in use of the array it holds)
-toPure (VS name fs)
-    | isListStruct name, Just a <- listCell fs, Just (VI used) <- lookup "len" fs = do
+toPureWith st (VS name fs)
+    | isListStruct st name, Just a <- listCell fs, Just (VI used) <- lookup "len" fs = do
         (_, obj) <- object (VP a)
         PL <$> mapM toPure (take (fromIntegral used) (children obj))
     -- (a Box of the library is the value it holds)
-    | isBoxStruct name, Just a <- listCell fs = do
+    | isBoxStruct st name, Just a <- listCell fs = do
         (_, obj) <- object (VP a)
         case children obj of
             [v] -> toPure v
@@ -420,18 +428,25 @@ sequenceValues (VA values) = return values
 sequenceValues value = children . snd <$> object value
 
 object :: Val -> M (Int, Obj)
-object (VP a) = do
+object v = storageM >>= \st -> objectWith st v
+
+objectWith :: Storage -> Val -> M (Int, Obj)
+objectWith _ (VP a) = do
     c <- cell a
     return (a, cellObject c)
 -- (a native list or Box is read at the slots its first addr field owns)
-object (VS name fs) | isListStruct name || isBoxStruct name, Just a <- listCell fs = object (VP a)
-object v = failM ("not a value of the heap: " ++ show v)
+objectWith st (VS name fs) | isListStruct st name || isBoxStruct st name, Just a <- listCell fs = objectWith st (VP a)
+objectWith _ v = failM ("not a value of the heap: " ++ show v)
 
-isListStruct :: Name -> Bool
-isListStruct name = takeWhile (/= '<') name == "List"
+-- (the program's storage declarations; a fixture written without a storage record spells them List and Box)
+isListStruct :: Storage -> Name -> Bool
+isListStruct st name = takeWhile (/= '<') name == (if null (storageList st) then "List" else storageList st)
 
-isBoxStruct :: Name -> Bool
-isBoxStruct name = takeWhile (/= '<') name == "Box"
+isBoxStruct :: Storage -> Name -> Bool
+isBoxStruct st name = takeWhile (/= '<') name == (if null (storageBox st) then "Box" else storageBox st)
+
+storageM :: M Storage
+storageM = progStorage . stProgram <$> getSt
 
 -- The fields of a struct or an enum value that a value is: held inline, or in a Box
 dataValue :: Val -> M (Name, [(Variable, Val)])
@@ -445,8 +460,8 @@ dataValue v = failM ("not a struct or an enum: " ++ show v)
 
 -- (a Box of the library is looked into, for a read of what it holds and not of its own field: what it holds is in the one slot at its address)
 throughBox :: Name -> Val -> M Val
-throughBox name v = case v of
-    VS boxName fs | isBoxStruct boxName, boxName /= name, Just a <- listCell fs -> boxed a
+throughBox name v = storageM >>= \st -> case v of
+    VS boxName fs | isBoxStruct st boxName, boxName /= name, Just a <- listCell fs -> boxed a
     _ -> return v
 
 -- The value in the slot of a Box of the library
@@ -493,16 +508,17 @@ evalRvalue rv =
         -- (a Box that is cast is taken out of its room when the cast takes it, and is looked into when it does not)
         AsVariant o _ -> do
             v <- readOperand o
+            st <- storageM
             case (v, o) of
                 (VP _, Move _) -> unbox v
                 (VP _, _) -> dataValueOf v
                 -- (and so is a Box of the library)
-                (VS name fs, Move _) | isBoxStruct name, Just a <- listCell fs -> do
+                (VS name fs, Move _) | isBoxStruct st name, Just a <- listCell fs -> do
                     inner <- boxed a
                     s <- getSt
                     putSt s{stHeap = Map.delete a (stHeap s)}
                     return inner
-                (VS name fs, _) | isBoxStruct name, Just a <- listCell fs -> boxed a
+                (VS name fs, _) | isBoxStruct st name, Just a <- listCell fs -> boxed a
                 _ -> return v
         CopyOf o -> readOperand o >>= cloneVal
         TakeField l name field -> do
@@ -511,8 +527,9 @@ evalRvalue rv =
                 Just (Slot _ (Just _)) -> failM ("a field is taken from " ++ show l ++ ", which only looks")
                 _ -> return ()
             v <- readLocal l
+            st <- storageM
             case v of
-                VS boxName boxFs | isBoxStruct boxName, Just a <- listCell boxFs -> do
+                VS boxName boxFs | isBoxStruct st boxName, Just a <- listCell boxFs -> do
                     c <- cell a
                     case cellObject c of
                         OMem slots size | Just (VS actual fs) <- Map.lookup 0 slots -> do
@@ -594,6 +611,16 @@ listOp op os =
             inPlace a
             setObject a (OList (children obj ++ [v]))
             return list
+        (Pop, [l]) -> do
+            list <- readOperand l
+            (a, obj) <- object list
+            inPlace a
+            case children obj of
+                [] -> failM "Pop of an empty list"
+                vs -> do
+                    freeTree (last vs)
+                    setObject a (OList (init vs))
+                    return list
         (Set, [l, i, x]) -> do
             list <- readOperand l
             n <- fromIntegral <$> intOperand i
@@ -730,7 +757,8 @@ execStatement stmt = do
         Peek d rv -> do
             v <- evalRvalue rv
             -- (a local that only looks remembers how what it looks at was)
-            looks <- mapM (\a -> (\c -> (a, cellGeneration c)) <$> cell a) (pointersOf v)
+            storage <- storageM
+            looks <- mapM (\a -> (\c -> (a, cellGeneration c)) <$> cell a) (pointersOf storage v)
             -- (and owns nothing, even when what it looks at holds nothing of the heap, as a value read where it is at an address;
             -- a value taken apart is cleared, and holds nothing)
             putSlot d (Slot v (if v == VNull then Nothing else Just looks))
@@ -758,8 +786,9 @@ execStatement stmt = do
 assignedValue :: Local -> Rvalue -> M Val
 assignedValue d rv = do
     f <- currentFrame
+    st <- storageM
     case (rv, localType <$> Map.lookup d (fnLocals (frameFunction f))) of
-        (MakeBox (Const (CArray cs)), Just (TNamed base args)) | isListStruct base -> do
+        (MakeBox (Const (CArray cs)), Just (TNamed base args)) | isListStruct st base -> do
             vs <- mapM constant cs
             let n = toInteger (length vs)
             memory <- alloc (OMem (Map.fromList (zip [0 ..] vs)) n)
@@ -819,7 +848,8 @@ callFunction :: Program -> Function -> [Val] -> M (Maybe Val)
 callFunction program fn args = do
     -- (a parameter that is lent only looks at the value: the function owns nothing of it, and cannot move from it)
     -- (and remembers how it was, so that a change to it while it is lent is found)
-    looks <- mapM (\(p, v) -> if p `elem` fnBorrowed fn then mapM (\a -> (\c -> (a, cellGeneration c)) <$> cell a) (pointersOf v) else return []) (zip (fnParams fn) args)
+    storage <- storageM
+    looks <- mapM (\(p, v) -> if p `elem` fnBorrowed fn then mapM (\a -> (\c -> (a, cellGeneration c)) <$> cell a) (pointersOf storage v) else return []) (zip (fnParams fn) args)
     s' <- getSt
     putSt s'{stNextFrame = stNextFrame s' + 1, stFrames = Frame (stNextFrame s') fn (Map.fromList [(p, Slot v (if p `elem` fnBorrowed fn then Just lk else Nothing)) | ((p, v), lk) <- zip (zip (fnParams fn) args) looks]) : stFrames s'}
     result <- runBlock program fn (BlockId 0)
@@ -827,7 +857,7 @@ callFunction program fn args = do
     case stFrames s' of
         f : rest -> do
             -- (the value a drop is given is not freed by it: its fields are freed after it)
-            let dropped l = isDropFunction (fnName fn) && take 1 (fnParams fn) == [l]
+            let dropped l = isDropFunction program (fnName fn) && take 1 (fnParams fn) == [l]
                 leftover = [l | (l, Slot v Nothing) <- Map.toList (frameSlots f), holdsSomething program v, l /= Local 0, localHeap program f l, not (dropped l)]
             if null leftover
                 then putSt s'{stFrames = rest}
@@ -948,9 +978,9 @@ onFile path = do
 -- The same for a program that is lowered without being validated
 onLowered :: String -> String -> TestResult
 onLowered name source =
-    case parseStatementBlock source of
-        Left e -> Just (name ++ " does not parse: " ++ show e)
-        Right stmts -> case lowerStatements stmts of
+    case parseSourceParts True source of
+        Error e -> Just (name ++ " does not parse: " ++ e)
+        Ok parts -> case lowerParts parts of
             Error e -> Just (name ++ " does not lower: " ++ e)
             Ok program -> sameOnModel name program
 
@@ -1026,13 +1056,14 @@ planTests =
 -- looked at
 noDropCopyTests :: [Test]
 noDropCopyTests =
-    [ TestCase name . pure $ case ownedSource source of
+    [TestCase name . pure $ noDropCopy (ownedSource source) | (name, source) <- validatedPrograms, "impl Drop" `isInfixOf` source]
+        ++ [TestCase name (noDropCopy <$> ownedFromFiles ownRoleEntry files) | (name, files) <- ownRolePrograms]
+  where
+    noDropCopy result = case result of
         Error e -> Just e
         Ok owned -> case [(fnName fn, d) | fn <- progMain owned : Map.elems (progFunctions owned), BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign d (CopyOf _) <- stmts, Just decl <- [Map.lookup d (fnLocals fn)], holdsDropOf owned (localType decl)] of
             [] -> Nothing
             copies -> Just ("copies of values with a drop: " ++ show copies)
-    | (name, source) <- validatedPrograms, "impl Drop" `isInfixOf` source
-    ]
 
 holdsDropOf :: Program -> Type -> Bool
 holdsDropOf program = go Set.empty
@@ -1040,7 +1071,7 @@ holdsDropOf program = go Set.empty
     go seen ty = case ty of
         TArrayOf t _ -> go seen t
         TNamed base args
-            | isListStruct n || isBoxStruct n -> any (go seen) [t | ArgType t <- args]
+            | isListStruct (progStorage program) n || isBoxStruct (progStorage program) n -> any (go seen) [t | ArgType t <- args]
             | n `Set.member` seen -> False
             | Just _ <- dropFunction program n -> not (ownClone n)
             | otherwise -> case Map.lookup n (progTypes program) of
@@ -1051,8 +1082,11 @@ holdsDropOf program = go Set.empty
             n = instanceName base args
         TVariant v -> maybe False (\owner -> go seen (TNamed owner [])) (ownerOf program v)
         _ -> False
-    -- (as the emitter finds a Clone: a function `<... as Clone>::clone` whose result is exactly the type)
-    ownClone n = or [True | fn <- Map.elems (progFunctions program), " as Clone>::clone" `isInfixOf` fnName fn, Just (TNamed b a) <- [fnReturns fn], instanceName b a == n]
+    -- (as the emitter finds a Clone: the type's checked Clone, or without checked facts a function `<... as Clone>::clone` whose
+    -- result is exactly the type)
+    ownClone n
+        | Just _ <- progOwnership program = maybe False (`Map.member` progFunctions program) (snd <$> (factsOf program n >>= ownershipClone))
+        | otherwise = or [True | fn <- Map.elems (progFunctions program), " as Clone>::clone" `isInfixOf` fnName fn, Just (TNamed b a) <- [fnReturns fn], instanceName b a == n]
 
 -- The ownership pass refuses, at the types native code is made of, what MirMoves refuses where the program says it: owned MIR given
 -- straight to the pass, which MirMoves never saw, and the copy of a generic function that MirMoves checks only in general
@@ -1108,12 +1142,15 @@ passSafetyTests =
 -- hold no such value), exactly when the shape holds a value with a drop and no Clone; and accepted by both otherwise.
 agreementTests :: [Test]
 agreementTests =
-    [ TestCase (name ++ (if holder then " holds a value with a drop" else " holds none")) . pure $
-        firstFailure
-            [ verdict "MirMoves" holder ("Move error" `isInfixOf`) (ownedSource (prelude ++ "fn f(w: W<" ++ ty ++ ">, w2: W<" ++ ty ++ ">) -> Int { v = w.x; w = w2; return keep(v); }; return f(W::new(" ++ value ++ "), W::new(" ++ value ++ "));"))
-            , verdict "the ownership pass" holder ("still looks at a part of it that holds a value with a drop" `isInfixOf`) (ownedSource (prelude ++ "fn f<T>(w: W<T>, w2: W<T>) -> Int { v = w.x; w = w2; return keep(v); }; return f(W::new(" ++ value ++ "), W::new(" ++ value ++ "));"))
+    [ TestCase (name ++ (if holder then " holds a value with a drop" else " holds none")) $ do
+        concrete <- owned (prelude ++ "fn f(w: W<" ++ ty ++ ">, w2: W<" ++ ty ++ ">) -> Int { v = w.x; w = w2; return keep(v); }; return f(W::new(" ++ value ++ "), W::new(" ++ value ++ "));")
+        generic <- owned (prelude ++ "fn f<T>(w: W<T>, w2: W<T>) -> Int { v = w.x; w = w2; return keep(v); }; return f(W::new(" ++ value ++ "), W::new(" ++ value ++ "));")
+        pure $ firstFailure
+            [ verdict "MirMoves" holder ("Move error" `isInfixOf`) concrete
+            , verdict "the ownership pass" holder ("still looks at a part of it that holds a value with a drop" `isInfixOf`) generic
             ]
     | (name, prelude, ty, value, holder) <- shapes
+    , let owned source = if cloned `isPrefixOf` prelude then ownedFromFiles ownRoleEntry (ownRoleFiles source) else pure (ownedSource source)
     ]
   where
     verdict who holder refusal result = case (holder, result) of
@@ -1135,9 +1172,14 @@ agreementTests =
         , ("a number", base, "Int", "1", False)
         , ("a value with a drop and a Clone of its own", cloned, "C", "C::new(3)", False)
         , ("an instance with a Clone over a value with a Clone of its own", cloned ++ "struct U<T> { x: T, n: Int }; impl<T: Clone> Clone for U<T> { fn clone(self: &Self) -> Self { return U { x: clone(self.x), n: self.n }; }; }; fn used() -> Int { k = clone(U { x: C::new(1), n: 2 }); return k.n; }; ", "U<C>", "U { x: C::new(3), n: 4 }", False)
+        -- (Foo<Int> has the Clone of its own, Foo<Baz> has none, and neither argument holds a value with a drop)
+        , ("an instance of a type with a drop whose Clone it has", cloned ++ fooOwner, "Foo<Int>", "Foo::new(1)", False)
+        , ("an instance of the same type whose Clone it has not", cloned ++ fooOwner, "Foo<Baz>", "Foo::new(Baz { n: 1 })", True)
         ]
     base = "struct H { addr: Addr<Int>, xs: List<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl Drop for H { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl H { fn new() -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, xs: [1, 2], blk: b }; }; }; struct W<T> { addr: Addr<Int>, x: T, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl<T> Drop for W<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> W<T> { fn new(x: T) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, x: x, blk: b }; }; }; fn keep<T>(x: &T) -> Int { return 1; }; "
-    cloned = "trait Clone { fn clone(self: &Self) -> Self; }; trait Drop { fn drop(self: Self) -> Int; }; struct C { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl C { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; }; impl Clone for C { fn clone(self: &Self) -> Self { return C::new(self.n); }; }; impl Drop for C { fn drop(self: Self) -> Int { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; struct W<T> { addr: Addr<Int>, x: T, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl<T> Drop for W<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> W<T> { fn new(x: T) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, x: x, blk: b }; }; }; fn keep<T>(x: &T) -> Int { return 1; }; "
+    fooOwner = "struct Baz { n: Int }; struct Foo<T> { addr: Addr<Int>, x: T, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl<T> Drop for Foo<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> Foo<T> { fn new(x: T) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, x: x, blk: b }; }; }; impl<T: Clone> Clone for Foo<T> { fn clone(self: &Self) -> Self { return Foo::new(clone(self.x)); }; }; fn usedFoo() -> Int { k = clone(Foo::new(1)); return keep(k); }; "
+    -- (C has a Clone of its own, which makes a value of its own, and a drop: its programs are a package that binds them)
+    cloned = freshClone ++ "struct W<T> { addr: Addr<Int>, x: T, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl<T> Drop for W<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> W<T> { fn new(x: T) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, x: x, blk: b }; }; }; fn keep<T>(x: &T) -> Int { return 1; }; "
 
 -- Owned MIR written by hand, with a mistake in each: the model has to see it
 mistakeTests :: [Test]
@@ -1212,6 +1254,8 @@ mainProgram locals stmts =
         , progInvariants = Map.empty
         , progBounded = Map.empty
         , progInstances = Map.empty
+        , progProtocols = Map.empty
+        , progOwnership = Nothing
         }
 
 -- A part of a list that is read after the list changes is copied: the change of a list is a call, which ends the block, and a part that
@@ -1472,7 +1516,7 @@ testOwnership =
             testAssertTrue (all (`notElem` ownershipExamples) arrayExamples && not (null arrayExamples) && usesArrays "a = array(3, 0); return get(a, 0);")
         , TestCase "array ergonomics retain native coverage and stay out of the arrayless heap model" . pure $
             testAssertTrue (not (null arrayErgonomicsPrograms) && all (`elem` validatedPrograms) arrayErgonomicsPrograms && all (`notElem` ownershipPrograms) arrayErgonomicsPrograms)
-        , TestList "programs" [TestCase name (onSource name source) | (name, source) <- ownershipPrograms]
+        , TestList "programs" ([TestCase name (onSource name source) | (name, source) <- ownershipPrograms] ++ [TestCase name (onProgram name <$> programFromFiles ownRoleEntry files) | (name, files) <- ownRolePrograms])
         , TestList "boxed Clone" [TestCase name (onSource name source) | (name, source, _, _) <- boxedClonePrograms]
         , TestList "reference writes" [TestCase name (onSource name source) | (name, source) <- referenceWritePrograms]
         , TestList "lent parts" [TestCase name (onSource name source) | (name, source) <- lentPartPrograms]

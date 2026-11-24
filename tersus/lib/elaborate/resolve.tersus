@@ -3,7 +3,7 @@ import data::reader::reader { readRecord };
 import elaborate::check { indexOfByte };
 import elaborate::core { baseNameOf };
 import elaborate::state { indexIn, joinWith };
-import elaborate::traits { implFunctionName, implFunctionPart };
+import elaborate::traits { implFunctionName, implFunctionPart, isFnTraitName };
 
 struct Line { words: List<Token>, ok: Bool };
 impl Clone for Line { };
@@ -83,7 +83,8 @@ fn finishPackage(p: Pkg) -> Pkg ~ {
         if d.file >= 0 && d.file < size(files) {
             file = get(files, d.file);
             collapsed = file.collapsed;
-            if d.kind = 1 { canonical = variantCanonical(&file, &d.local); } else { canonical = canonicalFor(&file, &d.local); };
+            // (the Fn traits the parser mints for a shape are the shape's in every module, so they keep their names)
+            if d.kind = 1 { canonical = variantCanonical(&file, &d.local); } else if !(d.kind = 2 && isFnTraitName(&d.local)) { canonical = canonicalFor(&file, &d.local); };
         };
         decls = push(decls, Decl { canonical: canonical, collapsed: collapsed, ..clone(d) });
     };

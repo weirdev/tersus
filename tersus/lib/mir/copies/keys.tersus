@@ -201,3 +201,40 @@ fn parseImplCheckName(n: &String) -> Maybe<ImplCheck> ~ {
     if q < p + 5 || q + 2 > size(n.bytes) { return Maybe<ImplCheck> { found: false, value: ImplCheck { trait: "", owner: "", method: "" } }; };
     return Maybe<ImplCheck> { found: true, value: ImplCheck { trait: n.slice(0, p), owner: n.slice(p + 5, q), method: n.slice(q + 2, size(n.bytes)) } };
 };
+
+fn copyProvider(program: &FullProgram, role: &String) -> String ~ {
+    for row in &program.protocols { if row.name = role { return textAt(&row.tokens, 2); }; };
+    return "";
+};
+fn copyStorageName(program: &FullProgram, role: &String) -> String ~ {
+    if !program.checked && size(program.protocols) = 0 { return clone(*role); };
+    return copyProvider(program, role);
+};
+fn copyGround(ty: &List<Token>) -> Bool ~ { return !symbolicAt(ty, 0, false); };
+fn copyMentionsPack(ty: &List<Token>) -> Bool ~ { return symbolicAt(ty, 0, true); };
+fn symbolicAt(ty: &List<Token>, at: Int, packOnly: Bool) -> Bool ~ {
+    tag = textAt(ty, at);
+    if tag = "param" { return !packOnly || textAt(ty, at + 1).startsWith(".."); };
+    if tag = "var" { return !packOnly; };
+    if tag = "forall" { return !packOnly || symbolicAt(ty, monoForallBody(ty, at), true); };
+    if tag = "named" {
+        p = at + 3;
+        for i in 0..numberAt(ty, at + 2) {
+            if wordIs(ty, p, "type") && symbolicAt(ty, p + 1, packOnly) { return true; };
+            if !packOnly && wordIs(ty, p, "size") && (wordIs(ty, p + 1, "p") || wordIs(ty, p + 1, "v")) { return true; };
+            p = argEnd(ty, p);
+        };
+    };
+    if tag = "fn" || tag = "fnc" {
+        p = at + 2;
+        for i in 0..(numberAt(ty, at + 1) + 1) {
+            if symbolicAt(ty, p, packOnly) { return true; }; p = typeEnd(ty, p);
+        };
+    };
+    if tag = "array" {
+        p = typeEnd(ty, at + 1);
+        if !packOnly && (wordIs(ty, p, "p") || wordIs(ty, p, "v")) { return true; };
+    };
+    if tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "list" || tag = "box" || tag = "closure" || tag = "closuremut" { return symbolicAt(ty, at + 1, packOnly); };
+    return false;
+};

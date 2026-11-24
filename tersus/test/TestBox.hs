@@ -9,6 +9,7 @@ import System.Timeout (timeout)
 import Syntax
 import TestHarness
 import Utils (Result (..))
+import PreludeSource (stdName)
 
 -- Box<T>: a struct or an enum held in a Box. A Box has the value of what it holds, so it is looked into wherever the struct or the
 -- enum is (a field read, `is`, `as`, `match`, a method call), and a type that holds itself holds the recursion in one.
@@ -58,15 +59,13 @@ testBox =
                     sourceBoxProof "fn bad(b: Box<List<Int>>) -> Int [{ affirm b.len = 2; }] [{ affirm return = 1; }] { a = b.addr; return 0; };"
                 , TestCase "Box and payload permission fields do not share layout facts" $
                     sourceBoxProof (unlines
-                        [ "trait Drop { fn drop(self: Self) -> Int; };"
-                        , "struct P { addr: Addr<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 2; affirm count(blk) = 0; affirm whole(blk); }];"
+                        [ "struct P { addr: Addr<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 2; affirm count(blk) = 0; affirm whole(blk); }];"
                         , "impl Drop for P { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; };"
                         , "fn bad(b: Box<P>) -> Int [{ }] [{ affirm return = 1; }] { a = b.addr; return 0; };"
                         ])
                 , TestCase "payload block facts cannot prove a Box storage property" $
                     rejectedBoxProperty (unlines
-                        [ "trait Drop { fn drop(self: Self) -> Int; };"
-                        , "struct P { addr: Addr<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 2; affirm count(blk) = 0; affirm whole(blk); }];"
+                        [ "struct P { addr: Addr<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 2; affirm count(blk) = 0; affirm whole(blk); }];"
                         , "impl Drop for P { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; };"
                         , "fn bad(b: Box<P>) -> Int [{ }] [{ affirm cap(b.blk) = 2; }] { return 0; };"
                         ])
@@ -78,8 +77,8 @@ testBox =
                     rejectedLayout "struct P { x: Int }; fn field(b: Box<P>) -> Int { return b.x; };" "does not model yet"
                 , TestCase "native layout validation still checks constructor invariants" $
                     rejectedLayout (unlines
-                        [ "struct Box<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 1; affirm count(blk) = 1; affirm whole(blk); }];"
-                        , "fn bad() -> Box<Int> { (a, b) = Addr::alloc(0); return Box<Int> { addr: a, blk: b }; };"
+                        [ "struct Cell<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 1; affirm count(blk) = 1; affirm whole(blk); }];"
+                        , "fn bad() -> Cell<Int> { (a, b) = Addr::alloc(0); return Cell<Int> { addr: a, blk: b }; };"
                         ]) "Could not prove"
                 ]
             , TestList
@@ -147,7 +146,7 @@ testBox =
                 , testCase "a Box of a size is not given where another size is wanted" (rejected "fn f(a: Box<Array<Int, 3>>) -> Int { return 0; }; return f(Box::new(#[1, 2]));" "expected Box<Array<Int, 3>>, got Box<Array<Int, 2>>")
                 , testCase "a Box of any size is not given where a size is wanted" (rejected "fn f(a: Box<Array<Int, 3>>) -> Int { return 0; }; return f(Array::boxed(3, 1));" "expected Box<Array<Int, 3>>, got Box<Array<Int, ?>>")
                 , testCase "the elements can be lists" (runs "a = Array::boxed(2, push([], 1)); a = set(a, 1, push(push([], 2), 3)); return a;" (VList [VList [VInt 1], VList [VInt 2, VInt 3]]))
-                , testCase "or structs" (runs "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct P { x: Int }; impl Clone for P { }; a = Array::boxed(2, P { x: 1 }); return get(a, 1).x + size(a);" (VInt 3))
+                , testCase "or structs" (runs "struct P { x: Int }; impl Clone for P { }; a = Array::boxed(2, P { x: 1 }); return get(a, 1).x + size(a);" (VInt 3))
                 , testCase "Array::boxed is called, not named" (parseFails "h = Array::boxed; return 0;")
                 , testCase "Array::boxed takes a size and an element" (rejected "return Array::boxed(3);" "Array::boxed takes 2 arguments, got 1")
                 , testCase "the size is an Int" (rejected "return Array::boxed(true, 1);" "argument 1 of Array::boxed: expected Int, got Bool")
@@ -161,11 +160,12 @@ ownPlace :: Bool -> IO TestResult
 ownPlace updating = lowerBox source $ \program ->
     let statements = concatMap (concatMap M.blockStatements . Map.elems . M.fnBlocks) (Map.elems (M.progFunctions program))
         ownsField stmt = case stmt of
-            M.AssignRef _ steps _ | updating -> steps == [M.RefField "Box<Int>" "addr"]
-            M.Assign _ (M.Borrow _ steps _) | not updating -> steps == [M.RefField "Box<Int>" "addr"]
+            M.AssignRef _ steps _ | updating -> steps == [M.RefField boxInt "addr"]
+            M.Assign _ (M.Borrow _ steps _) | not updating -> steps == [M.RefField boxInt "addr"]
             _ -> False
      in testAssertTrue (any ownsField statements)
   where
+    boxInt = stdName "core/types" "Box" ++ "<Int>"
     source
         | updating = "fn field(b: &mut Box<Int>, a: Addr<Int>) -> Int writes(b.addr) { (*b).addr = a; return 0; };"
         | otherwise = "fn field(b: &Box<Int>) -> &Addr<Int> from b { return &b.addr; };"
@@ -187,15 +187,16 @@ monomorphicBoxStorage = nativeStorage (unlines
 
 -- (validated as the native storage library is: a Box is the struct it is made of)
 nativeStorage :: String -> IO TestResult
-nativeStorage source = checkLowered False ("struct Box<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 1; affirm count(blk) = 1; affirm whole(blk); }]; " ++ source) $ \program -> case validateLibrary program of
+nativeStorage source = checkLowered False source $ \program -> case validateLibrary program of
         Error e -> Just e
         Ok _ -> Nothing
 
 rejectedLayout :: String -> String -> IO TestResult
 rejectedLayout source expected = checkLowered False source (testAssertErrorContains expected . validateLibrary)
 
+-- (a Box is std's: Box<T> is the type the Box role is bound to, and its fields are the struct core declares)
 lowerBox :: String -> (M.Program -> TestResult) -> IO TestResult
-lowerBox body = checkLowered False ("struct Box<T> { addr: Addr<T>, ghost blk: Block<T> }; " ++ body)
+lowerBox = checkLowered False
 
 checkLowered :: Bool -> String -> (M.Program -> TestResult) -> IO TestResult
 checkLowered reserving source check = do

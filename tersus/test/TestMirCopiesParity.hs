@@ -519,7 +519,7 @@ function n = M.Function n [] (Just TInt) (Map.singleton (M.Local 0) (M.LocalDecl
     (Map.singleton (M.BlockId 0) (block [M.Assign (M.Local 0) (M.Use (int 0))] M.Return)) [] [] [] [] [] M.emptySpec
 
 empty :: M.Program
-empty = M.Program Map.empty Map.empty (function "main") Map.empty Map.empty Map.empty Map.empty
+empty = M.Program Map.empty Map.empty (function "main") Map.empty Map.empty Map.empty Map.empty Map.empty Nothing
 
 rootId :: ModuleId
 rootId = ModuleId "app" (Just "main")
@@ -539,7 +539,7 @@ checkPermission p =
         (Just (M.StructDecl [("blk", TBlock TInt), ("len", TInt)]))
 
 bounded :: M.BoundedFn
-bounded = M.BoundedFn [] [] [] []
+bounded = M.BoundedFn [] [] [] [] []
 
 template :: String -> M.Function
 template n = (function n){M.fnTypeParams = ["T"]}

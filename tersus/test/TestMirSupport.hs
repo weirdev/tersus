@@ -6,7 +6,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import qualified Interface as I
-import Link (linkPrograms)
+import Link (linkWithLibraries)
 import qualified Mir as M
 import MirEval (MirValue (..), runNamedFunction)
 import MirMoves (finishLowered)
@@ -14,10 +14,10 @@ import qualified Modules as Mod
 import qualified PackageCompile as Package
 import ParsedFile (ParsedFile (..))
 import qualified Syntax as S
-import PreludeSource (mirPackageFiles)
+import PreludeSource (mirPackageFiles, stdName)
 import TestHarness (Test (..), TestResult, testAssertEq, testAssertErrorContains, testCase)
 import Types (Type (..), Arg (..), Signature (..))
-import Utils (Result (..), bindResult, mapResult)
+import Utils (Result (..), bindResult, flatResultMap, mapResult)
 
 testMirSupport :: Test
 testMirSupport = TestList "testMirSupport"
@@ -123,7 +123,7 @@ emitterFileLayout (loaded, compiled, program) = firstFailure
     , testAssertEq (length [() | file <- files, S.Assign _ (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]) 158
     , testAssertEq (Set.fromList [name | file <- files, S.StructDef name _ _ _ <- fileBody (Mod.loadedParsed file)])
         (Set.fromList ["Held", "EmitResult", "Gen", "Sig", "Ctor", "Ctx", "LT", "LTG", "CtorAt", "FnOut", "Storage"])
-    , testAssertEq (all (`Map.member` M.progFunctions program) ["ir", "outline", "bodies", "fieldOffset", "operandValue", "emitStatement", "emitFunction", "<String>::then"]) True
+    , testAssertEq (all (`Map.member` M.progFunctions program) ["ir", "outline", "bodies", "fieldOffset", "operandValue", "emitStatement", "emitFunction", stringThen]) True
     , firstFailure
         [ testAssertEq (Set.fromList [stem | ri <- Mod.loadedImports file, Mod.resolvedTargetModule ri == entryId, Just stem <- [Mod.resolvedTargetFile ri]]) (Set.fromList expected)
         | (stem, expected) <- [("emit", ["types", "values", "functions", "helpers"]), ("functions", ["types", "values", "operations"]), ("helpers", ["types"]), ("operations", ["types", "values"]), ("types", []), ("values", ["types"])]
@@ -190,7 +190,7 @@ renderingCases =
            | (label, value, expected) <- escapedCases
            ]
         ++ [ (supportName "noStrings", "noStrings empty", [], MList [])
-           , ("<String>::then", "local String.then concatenates", [text "a", text "b"], text "ab")
+           , (stringThen, "local String.then concatenates", [text "a", text "b"], text "ab")
            , (supportName "showInt", "showInt zero", [MInt 0], text "0")
            , (supportName "showInt", "showInt minimum signed word", [MInt (-9223372036854775808)], text "-9223372036854775808")
            , (supportName "joinWith", "join empty", [text ", ", MList []], text "")
@@ -274,7 +274,7 @@ definitionOwners (loaded, compiled, program) = firstFailure
      [ testAssertEq [Package.compiledModuleId modu | modu <- modules, Map.member (supportName name) (I.ifFunctions (Package.compiledInterface modu))] [supportId]
      | name <- sharedFunctions
      ] ++
-     [ testAssertEq [Package.compiledModuleId modu | modu <- modules, Set.member ("Clone", supportName name) (I.ifImpls (Package.compiledInterface modu))] [supportId]
+     [ testAssertEq [Package.compiledModuleId modu | modu <- modules, Set.member (stdName "core/ownership" "Clone", supportName name) (I.ifImpls (Package.compiledInterface modu))] [supportId]
      | name <- sharedRecords
      ] ++
      [ testAssertEq (Map.keysSet (I.ifTypes support)) (Set.fromList (map supportName sharedRecords))
@@ -286,8 +286,8 @@ definitionOwners (loaded, compiled, program) = firstFailure
      , testAssertEq (filter (`Map.member` I.ifFunctions support) [supportName "layoutOf", supportName "fieldsLayout", supportName "slotsOf", supportName "global"]) []
      , testAssertEq (all (`Map.member` I.ifFunctions entry) ["layoutOf", "fieldsLayout"]) True
      , testAssertEq (Map.member "slotsOf" (I.ifFunctions entry)) (Mod.moduleName (Mod.packageEntryModule loaded) /= Just "mir_erase")
-     , testAssertEq [Package.compiledModuleId modu | modu <- modules, Map.member "<String>::then" (I.ifFunctions (Package.compiledInterface modu))] [Mod.packageEntryModule loaded]
-     , testAssertEq (all (\name -> Map.member ("<" ++ supportName name ++ " as Clone>::clone") (M.progFunctions program)) sharedRecords) True
+     , testAssertEq [Package.compiledModuleId modu | modu <- modules, Map.member stringThen (I.ifFunctions (Package.compiledInterface modu))] [Mod.packageEntryModule loaded]
+     , testAssertEq (all (\name -> Map.member ("<" ++ supportName name ++ " as " ++ stdName "core/ownership" "Clone" ++ ">::clone") (M.progFunctions program)) sharedRecords) True
      ])
   where
     modules = Package.compiledModules compiled
@@ -301,7 +301,7 @@ interfaceOf id0 compiled = case [Package.compiledInterface modu | modu <- Packag
 
 canonicalTypes :: (Mod.LoadedPackage, Package.CompiledPackage, M.Program) -> TestResult
 canonicalTypes (_, compiled, program) = firstFailure
-    [ testAssertEq (Map.lookup (supportName "Res") (M.progTypes program)) (Just (M.StructDecl [("ok", TBool), ("text", TNamed "String" [])]))
+    [ testAssertEq (Map.lookup (supportName "Res") (M.progTypes program)) (Just (M.StructDecl [("ok", TBool), ("text", TNamed (stdName "string" "String") [])]))
     , testAssertEq (Map.lookup (supportName "Layout") (M.progTypes program)) (Just (M.StructDecl [("size", TInt), ("align", TInt)]))
     , testAssertEq (Map.lookup (supportName "ArrayInfo") (M.progTypes program)) (Just (M.StructDecl [("ok", TBool), ("length", TInt), ("elem", TNamed "data$codec$codec$Type" [])]))
     , testAssertEq (Map.lookup (supportName "Simple") (M.progTypes program)) (Just (M.StructDecl [("ok", TBool), ("layout", TNamed (supportName "Layout") [])]))
@@ -313,8 +313,8 @@ canonicalTypes (_, compiled, program) = firstFailure
 
 borrowedMetadata :: (Mod.LoadedPackage, Package.CompiledPackage, M.Program) -> TestResult
 borrowedMetadata (loaded, compiled, program) = firstFailure
-    [ testAssertEq (Map.member "<String>::then" (I.ifFunctions support)) False
-    , case Map.lookup "<String>::then" (I.ifFunctions (interfaceOf (Mod.packageEntryModule loaded) compiled)) of
+    [ testAssertEq (Map.member stringThen (I.ifFunctions support)) False
+    , case Map.lookup stringThen (I.ifFunctions (interfaceOf (Mod.packageEntryModule loaded) compiled)) of
         Nothing -> Just "consumer does not own String.then"
         Just method -> firstFailure
             [ testAssertEq (I.fnSignature method) (Signature [string, TRef string] string [] [] [] [])
@@ -342,10 +342,10 @@ borrowedMetadata (loaded, compiled, program) = firstFailure
     ]
   where
     support = interfaceOf supportId compiled
-    string = TNamed "String" []
+    string = TNamed (stdName "string" "String") []
     decl = TNamed "mir$reader$reader$TypeDecl" []
     ty = TNamed "data$codec$codec$Type" []
-    list inner = TNamed "List" [ArgType inner]
+    list inner = TNamed (stdName "core/types" "List") [ArgType inner]
 
 directCalls :: (Mod.LoadedPackage, Package.CompiledPackage, M.Program) -> TestResult
 directCalls (loaded, compiled, program) = firstFailure
@@ -358,11 +358,11 @@ directCalls (loaded, compiled, program) = firstFailure
     , testAssertEq (Set.member (supportName "roundUp") (calls "fieldsLayout")) True
     , testAssertEq (Set.member "layoutOf" (calls "fieldsLayout")) True
     , testAssertEq (Set.member (supportName "declNamed") (calls (supportName "lookupDecl"))) True
-    , testAssertEq (Set.member "<String>::concat" (calls (supportName "joinWith"))) True
+    , testAssertEq (Set.member ("<" ++ stdName "string" "String" ++ ">::concat") (calls (supportName "joinWith"))) True
     , testAssertEq (Set.member "data$codec$codec$catStrings" (calls (supportName "joinWith"))) False
     , testAssertEq (Set.member "data$codec$codec$catStrings" (calls (supportName "renderType"))) True
     , testAssertEq (Set.member "data$codec$codec$catStrings" (calls (supportName "renderSize"))) True
-    , testAssertEq (Set.member "<String>::then" (calls "global")) (Mod.moduleName (Mod.packageEntryModule loaded) /= Just "mir_erase")
+    , testAssertEq (Set.member stringThen (calls "global")) (Mod.moduleName (Mod.packageEntryModule loaded) /= Just "mir_erase")
     , testAssertEq [name | name <- Map.keys (I.ifFunctions entry), name `elem` sharedFunctions || any (\local -> ("$" ++ local) `isInfixOf` name && not ("<" `isPrefixOf` name)) sharedFunctions] []
     ]
   where
@@ -372,16 +372,21 @@ directCalls (loaded, compiled, program) = firstFailure
         Just fn -> Set.fromList [callee | block <- Map.elems (M.fnBlocks fn), M.Call (M.Const (M.CFn callee)) _ _ _ <- [M.blockTerminator block]]
 
 supportUnitIdentity :: (Mod.LoadedPackage, Package.CompiledPackage, M.Program) -> TestResult
-supportUnitIdentity (loaded, compiled, _) = inspect (libraries `bindResult` \libs -> mapResult ((,) libs) (lowerSupportUnit loaded compiled)) $ \(libs, unit@(_, program)) -> firstFailure
-    [ case (linkPrograms (libs ++ [unit]), linkPrograms (libs ++ [unit, unit])) of
+supportUnitIdentity (loaded, compiled, _) = inspect inputs $ \(libs, units, unit@(_, program)) -> firstFailure
+    [ case (linkWithLibraries libs (units ++ [unit]), linkWithLibraries libs (units ++ [unit, unit])) of
         (Ok once, Ok twice) -> testAssertEq twice once
         (Error err, _) -> Just err
         (_, Error err) -> Just err
-    , testAssertErrorContains "inconsistent units" (linkPrograms (libs ++ [unit, (supportId, program{M.progFunctions = Map.delete (supportName "lookupDecl") (M.progFunctions program)})]))
+    , testAssertErrorContains "inconsistent units" (linkWithLibraries libs (units ++ [unit, (supportId, program{M.progFunctions = Map.delete (supportName "lookupDecl") (M.progFunctions program)})]))
     ]
   where
     -- (the copies of the libraries' functions with bounds that the unit calls are made from the libraries' units)
     libraries = Package.compiledLibUnits compiled
+    inputs = libraries `bindResult` \libs ->
+        imported `bindResult` \units -> mapResult (\unit -> (libs, units, unit)) (lowerSupportUnit loaded compiled)
+    -- (and the frames of the functions of the modules it imports, data::codec's among them, from those modules' units)
+    imported = flatResultMap (\modu -> mapResult ((,) (Package.compiledModuleId modu)) (Package.compiledLowered modu `bindResult` finishLowered))
+        [modu | modu <- Package.compiledModules compiled, Package.compiledModuleId modu `notElem` [supportId, Mod.packageEntryModule loaded]]
 
 lowerSupportUnit :: Mod.LoadedPackage -> Package.CompiledPackage -> Result (Mod.ModuleId, M.Program) String
 lowerSupportUnit loaded compiled =
@@ -398,11 +403,15 @@ call snapshot name args expected = inspect snapshot $ \(_, _, program) ->
 callSupport :: String -> [MirValue] -> MirValue -> TestResult
 callSupport name = call (snd (head toolSnapshots)) (supportName name)
 
+-- The method String.then, by the name the compiled program gives it
+stringThen :: String
+stringThen = "<" ++ stdName "string" "String" ++ ">::then"
+
 text :: String -> MirValue
 text = bytes . map ord
 
 bytes :: [Int] -> MirValue
-bytes values = MData "String" [("bytes", MList (map (MInt . toInteger) values))]
+bytes values = MData (stdName "string" "String") [("bytes", MList (map (MInt . toInteger) values))]
 
 codec :: String -> [(String, MirValue)] -> MirValue
 codec name = MData ("data$codec$codec$" ++ name)

@@ -7,9 +7,9 @@ import mir::full::tokens { appendTokens, constantEnd, integerAt, intToken, intsE
 import mir::pack::body { RowKind, constInt, operandLocal, rowSites, rvalueSites, targets };
 import mir::instances::names { InstanceNameClasses };
 import mir::instances::complete { tupleArity };
-import mir::copies::keys { CopyCx, CopyNeed, CopiedFunction, Maybe, CopyBinding, CopyInstance, DispatchEdge, containsDispatch, boundCallParts, concreteKey, copyLookup, instanceAt, mentionsParam, nameOf };
+import mir::copies::keys { CopyCx, CopyNeed, CopiedFunction, Maybe, CopyBinding, CopyInstance, DispatchEdge, containsDispatch, boundCallParts, concreteKey, copyLookup, instanceAt, mentionsParam, nameOf, copyStorageName };
 import mir::copies::types { renamesOf, substituteArg, substituteType, typeNameIn };
-import mir::copies::calls { CopyCall, CopyTarget, boxedArray, cloneTarget, functionIndex, isReference, ownerOfType, target, unref, unsizedBoxed };
+import mir::copies::calls { CopyCall, CopyTarget, boxedArray, checkedClone, copyRoleIs, inlineClone, cloneTarget, functionIndex, isReference, ownerOfType, target, unref, unsizedBoxed };
 import mir::copies::proofs { rewriteCopyPayload };
 
 struct CopyWalk {
@@ -102,13 +102,13 @@ fn copiedHeader(fun: &FullFunction, cx: &CopyCx, returns: Int, sizesAt: Int, typ
 fn namedUnary(ty: &List<Token>, at: Int, base: &String) -> Bool ~ {
     return wordIs(ty, at, "named") && textAt(ty, at + 1) = base && numberAt(ty, at + 2) = 1 && wordIs(ty, at + 3, "type");
 };
-fn opaqueType(cx: &CopyCx, ty: &List<Token>, at: Int) -> Bool ~ {
+fn opaqueType(program: &FullProgram, cx: &CopyCx, ty: &List<Token>, at: Int) -> Bool ~ {
     if wordIs(ty, at, "param") {
         original = sliceTokens(ty, at, at + 2);
         return substituteType(&original, &cx.sizes, &cx.types) != original;
     };
-    if wordIs(ty, at, "ref") || wordIs(ty, at, "mutref") || wordIs(ty, at, "box") { return opaqueType(cx, ty, at + 1); };
-    if namedUnary(ty, at, "Box") { return opaqueType(cx, ty, at + 4); };
+    if wordIs(ty, at, "ref") || wordIs(ty, at, "mutref") || wordIs(ty, at, "box") { return opaqueType(program, cx, ty, at + 1); };
+    if namedUnary(ty, at, copyStorageName(program, "Box")) && textAt(ty, at + 1) != "" { return opaqueType(program, cx, ty, at + 4); };
     return false;
 };
 fn emptyCopyArgs() -> List<List<Token>> ~ { return []; };
@@ -159,7 +159,7 @@ fn transformFunction(classes: &InstanceNameClasses, program: &FullProgram, cx: &
         if id > maxLocal { maxLocal = id; };
         start = localStart(&d.tokens);
         ty = sliceTokens(&d.tokens, start, size(d.tokens));
-        if own.copy != "" && opaqueType(&own, &ty, 0) {
+        if own.copy != "" && opaqueType(program, &own, &ty, 0) {
             opaque = push(opaque, EnvEntry { name: "$opaque ".concat(String::fromInt(id)), value: copyOperand(id) });
         };
         extra = HashMap::lookup(&own.localTypes, id, []);
@@ -440,7 +440,7 @@ fn assignRow(dest: Int, rv: &List<Token>) -> List<Token> ~ {
 fn gotoRow(next: Int) -> List<Token> ~ { return push(push([], word("goto")), intToken(next)); };
 fn transformTerminator(program: &FullProgram, cx: &CopyRowCx, row: &List<Token>, before: List<List<Token>>, st: &mut CopyWalk) -> List<List<Token>> ~ {
     if !wordIs(row, 0, "call") { return push(before, rewriteSites(program, cx, clone(row), &mut *st)); };
-    materialized = materializeBoundClone(program, cx, parseCopyCall(row), before, &mut *st);
+    materialized = materializeBoundClone(classes, program, cx, parseCopyCall(row), before, &mut *st);
     call = materialized.call; before = materialized.before;
     if wordIs(&call.callee, 0, "const") && wordIs(&call.callee, 1, "fn") {
         n = textAt(&call.callee, 2);
@@ -558,22 +558,23 @@ fn inlineCall(cx: &CopyRowCx, t: &CopyTarget, args: &List<List<Token>>, st: &mut
     return InlineInput { before: before, value: head };
 };
 struct MaterializedClone { call: CopyCallRow, before: List<List<Token>> };
-fn cloneByValue(program: &FullProgram, ty: &List<Token>) -> Bool ~ {
+fn cloneByValue(classes: &InstanceNameClasses, program: &FullProgram, ty: &List<Token>) -> Bool ~ {
     base = unref(ty);
-    if unsizedBoxed(&base).found { return false; };
+    if unsizedBoxed(program, &base).found { return false; };
     if wordIs(&base, 0, "named") && tupleArity(textAt(&base, 1)) > 0 { return true; };
+    if program.checked || size(program.protocols) > 0 { return inlineClone(&base) && checkedClone(classes, program, &base) = ""; };
     owner = ownerOfType(program, unref(&base));
     return owner = "" || functionIndex(program, "<".concat(owner).concat(" as Clone>::clone")) < 0;
 };
-fn boxPayload(ty: &List<Token>) -> List<Token> ~ {
-    if namedUnary(ty, 0, "Box") { return sliceTokens(ty, 4, size(ty)); };
+fn boxPayload(program: &FullProgram, ty: &List<Token>) -> List<Token> ~ {
+    if namedUnary(ty, 0, copyStorageName(program, "Box")) && textAt(ty, 1) != "" { return sliceTokens(ty, 4, size(ty)); };
     if wordIs(ty, 0, "box") { return sliceTokens(ty, 1, size(ty)); };
     return [];
 };
-fn cloneElement(ty: &List<Token>) -> List<Token> ~ {
-    if namedUnary(ty, 0, "List") { return sliceTokens(ty, 4, size(ty)); };
+fn cloneElement(program: &FullProgram, ty: &List<Token>) -> List<Token> ~ {
+    if namedUnary(ty, 0, copyStorageName(program, "List")) && textAt(ty, 1) != "" { return sliceTokens(ty, 4, size(ty)); };
     if wordIs(ty, 0, "list") || wordIs(ty, 0, "array") { return sliceTokens(ty, 1, typeEnd(ty, 1)); };
-    inner = boxedArray(ty);
+    inner = boxedArray(program, ty);
     return sliceTokens(&inner, 1, typeEnd(&inner, 1));
 };
 fn cloneField(program: &FullProgram, owner: &String, field: &String) -> List<Token> ~ {
@@ -597,7 +598,7 @@ fn placeRead(program: &FullProgram, root: Int, rootTy: &List<Token>, borrow: &Li
     count = numberAt(borrow, 4);
     value = copyOperand(root); before = [];
     if count = 0 {
-        inner = boxPayload(rootTy);
+        inner = boxPayload(program, rootTy);
         if size(inner) = 0 { return InlineInput { before: before, value: value }; };
         tmp = freshCopyLocal(&mut *st, &inner);
         return InlineInput { before: push([], assignRow(tmp, appendTokens(push([], word("unbox")), &value))), value: copyOperand(tmp) };
@@ -607,7 +608,7 @@ fn placeRead(program: &FullProgram, root: Int, rootTy: &List<Token>, borrow: &Li
     for i in 0..count {
         rv = []; nextType = [];
         if wordIs(borrow, at, "index") {
-            nextType = cloneElement(&ty);
+            nextType = cloneElement(program, &ty);
             end = operandEnd(borrow, at + 1);
             rv = appendTokens(push(push(push([], word("listop")), word("get")), intToken(2)), &value);
             rv = appendTokens(rv, sliceTokens(borrow, at + 1, end)); at = end;
@@ -622,12 +623,12 @@ fn placeRead(program: &FullProgram, root: Int, rootTy: &List<Token>, borrow: &Li
     };
     return InlineInput { before: before, value: value };
 };
-fn materializeBoundClone(program: &FullProgram, cx: &CopyRowCx, call: CopyCallRow, before: List<List<Token>>, st: &mut CopyWalk) -> MaterializedClone ~ {
+fn materializeBoundClone(classes: &InstanceNameClasses, program: &FullProgram, cx: &CopyRowCx, call: CopyCallRow, before: List<List<Token>>, st: &mut CopyWalk) -> MaterializedClone ~ {
     if wordIs(&call.callee, 0, "const") && wordIs(&call.callee, 1, "fn") && size(call.args) = 1 {
         arg = get(&call.args, 0);
         if wordIs(arg, 0, "copy") {
             bound = boundCallParts(textAt(&call.callee, 2));
-            if bound.found && bound.value.trait = "Clone" && bound.value.method = "clone" {
+            if bound.found && copyRoleIs(program, "Clone", &bound.value.trait) && bound.value.method = "clone" {
                 ty = contextType(cx.bindings, &bound.value.param);
                 if size(ty) > 0 {
                     local = integerAt(arg, 1).value; n = size(before);
@@ -637,7 +638,7 @@ fn materializeBoundClone(program: &FullProgram, cx: &CopyRowCx, call: CopyCallRo
                         if wordIs(row, 0, "assign") && integerAt(row, 1).value = local && (wordIs(row, 2, "borrow") || wordIs(row, 2, "borrowmut")) {
                             root = integerAt(row, 3).value;
                             rootTy = localTypeOf(cx.fun, root);
-                            if size(rootTy) > 0 && (cloneByValue(program, &ty) || (numberAt(row, 4) = 0 && size(boxedArray(&rootTy)) > 0)) {
+                            if size(rootTy) > 0 && (cloneByValue(classes, program, &ty) || (numberAt(row, 4) = 0 && size(boxedArray(program, &rootTy)) > 0)) {
                                 read = placeRead(program, root, &rootTy, row, &mut *st);
                                 if size(read.value) > 0 {
                                     rows = []; for j in 0..at { rows = push(rows, clone(get(&before, j))); };

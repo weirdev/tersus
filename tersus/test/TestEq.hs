@@ -6,7 +6,7 @@ import Solver
 import TestHarness
 import Utils
 
--- Eq (lib/eq.tersus): `=` and `!=` in code call Eq::eq for every type but the words, `impl Eq for T { };` is the impl that compares
+-- Eq (lib/std/eq/eq.tersus): `=` and `!=` in code call Eq::eq for every type but the words, `impl Eq for T { };` is the impl that compares
 -- the fields, and what eq promises is the validator's equality, so a test of `a = b` tells the validator `a = b` or `a != b`. The
 -- programs are read as the command line reads them, with the libraries the pipeline puts in front of them.
 testEq :: Test
@@ -42,10 +42,10 @@ testEq =
             , TestList
                 "impls with a body"
                 [ testCase "a custom impl is called" (pipelineRuns "struct P { x: Int, y: Int }; impl Eq for P { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }] { if self.y != other.y { return false; }; if self.x != other.x { return false; }; return true; }; }; if P { x: 1, y: 2 } = P { x: 1, y: 2 } { return 1; }; return 0;" (VInt 1))
-                , testCase "a custom impl that does not give the equality" (pipelineRejected "struct P { x: Int, y: Int }; impl Eq for P { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return self.x = other.x; }; }; return 0;" "impl Eq for P: eq does not meet what Eq declares")
+                , testCase "a custom impl that does not give the equality" (pipelineRejected "struct P { x: Int, y: Int }; impl Eq for P { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return self.x = other.x; }; }; return 0;" "impl std$eq$eq$Eq for P: eq does not meet what std$eq$eq$Eq declares")
                 , testCase "Eq::eq on a word is the builtin comparison" (pipelineRuns "if Eq::eq(1, 1) { if Eq::eq(true, false) = false { return 1; }; }; return 0;" (VInt 1))
                 , testCase "Eq::eq on a list and a Box of a sized array" (pipelineRuns "xs = push([], Box::new(array(2, 1))); if xs = xs { if Box::new(#[1, 2]) = Box::new(#[1, 2]) { return 1; }; }; return 0;" (VInt 1))
-                , testCase "Int implements Eq by the language" (pipelineRejected "impl Eq for Int { fn eq(self: &Self, other: &Self) -> Bool { return true; }; }; return 0;" "Int implements Eq by the language")
+                , testCase "Int implements Eq by the language" (pipelineRejected "impl Eq for Int { fn eq(self: &Self, other: &Self) -> Bool { return true; }; }; return 0;" "orphan impl: impl std$eq$eq$Eq for Int defines neither a trait nor a type of this module")
                 ]
             , TestList
                 "what cannot be compared"
@@ -54,6 +54,7 @@ testEq =
                 , testCase "a type parameter with a bound" (pipelineRuns "fn same<T: Eq>(a: &T, b: &T) -> Bool { return a = b; }; if same(push([], 1), push([], 1)) { return 1; }; return 0;" (VInt 1))
                 , testCase "functions" (pipelineRejected "fn f(x: Int) -> Int { return x; }; if f = f { return 1; }; return 0;" "functions cannot be compared")
                 , testCase "a Box of an array of no size of elements without Eq" (pipelineRejected "struct Q { x: Int }; impl Clone for Q { }; b = Array::boxed(3, Q { x: 1 }); if b = Array::boxed(3, Q { x: 1 }) { return 1; }; return 0;" "Box<Array<Q, ?>> is compared with =, which needs its elements to implement Eq")
-                , testCase "a program with an Eq of its own" (pipelineRejected "trait Eq { }; if [1] = [1] { return 1; }; return 0;" "List<Int> is compared with =")
+                , -- (a trait the program spells Eq is another trait: = is std's)
+                  testCase "a program with a trait Eq of its own still compares with std's Eq" (pipelineRuns "trait Eq { }; if [1] = [1] { return 1; }; return 0;" (VInt 1))
                 ]
             ]

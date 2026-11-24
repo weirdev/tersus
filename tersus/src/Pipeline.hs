@@ -31,6 +31,10 @@ module Pipeline
     , nativeProgram
     , validateStatements
     , runStatements
+    , validateParts
+    , runParts
+    , parseWithEqualityParts
+    , parseSourceParts
     , assumptionsOf
     , assumptionsOfNoPrelude
     ) where
@@ -38,7 +42,7 @@ module Pipeline
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
-import Compile (lowerSourceUsing, lowerStatements, parseSource, parseSourcePartsNoPrelude, parseWithEquality)
+import Compile (SourceParts, lowerParts, lowerSourceUsing, lowerStatements, parseSource, parseSourceParts, parseSourcePartsNoPrelude, parseWithEquality, parseWithEqualityParts)
 import ElaboratorTool (Loader, sourceLoader)
 import LibPackage (compileLibPackageWith, libPackage)
 import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesLinked, compileModulesUsing, lowerCompiledPackage)
@@ -199,21 +203,32 @@ listLibrary = do
 
 -- Checks and validates a program given as statements, with the validator written in Tersus
 validateStatements :: [Statement] -> Result () String
-validateStatements stmts =
-    lowerStatements stmts `bindResult` \program ->
-        (case verifyProgram program of
-            Ok () -> Ok program
-            Error e -> Error ("Lowering produced a malformed program: " ++ e))
-            `bindResult` validateCompiled
+validateStatements stmts = lowerStatements stmts `bindResult` validateLowered
+
+-- The same for a program read with compiler libraries (Compile.lowerParts)
+validateParts :: SourceParts -> Result () String
+validateParts parts = lowerParts parts `bindResult` validateLowered
+
+validateLowered :: M.Program -> Result () String
+validateLowered program =
+    (case verifyProgram program of
+        Ok () -> Ok program
+        Error e -> Error ("Lowering produced a malformed program: " ++ e))
+        `bindResult` validateCompiled
 
 -- Runs a program given as statements, once it type checks, without validating it
 runStatements :: [Statement] -> Result (Maybe MirValue) String
-runStatements stmts =
-    lowerStatements stmts `bindResult` \program ->
-        (case verifyProgram program of
-            Ok () -> Ok program
-            Error e -> Error ("Lowering produced a malformed program: " ++ e))
-            `bindResult` eraseGhosts `bindResult` runProgram
+runStatements stmts = lowerStatements stmts `bindResult` runLowered
+
+runParts :: SourceParts -> Result (Maybe MirValue) String
+runParts parts = lowerParts parts `bindResult` runLowered
+
+runLowered :: M.Program -> Result (Maybe MirValue) String
+runLowered program =
+    (case verifyProgram program of
+        Ok () -> Ok program
+        Error e -> Error ("Lowering produced a malformed program: " ++ e))
+        `bindResult` eraseGhosts `bindResult` runProgram
 
 
 -- A package's modules lowered, linked and validated (by the validator
