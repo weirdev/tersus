@@ -17,7 +17,7 @@ module MirMoves
 
 import Control.Applicative ((<|>))
 import Data.Char (isDigit)
-import Data.List (foldl', intercalate, isPrefixOf, nub, tails)
+import Data.List (foldl', intercalate, isPrefixOf, nub, tails, zip4)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
@@ -1015,8 +1015,14 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
 -- An assignment through a reference: the root gets a new version, and no other live loan to the place may be
 -- there but those of the reference it goes through and of what that reference was taken from
 updatePlace :: Cx -> Pos -> St -> Local -> [RefStep] -> Rvalue -> (St, [String])
-updatePlace cx pos st0 root steps rv = (updated, errs ++ placeReads cx pos st1 [] [(l, ps, True) | (l, ps, role) <- accesses rv, role == Read || isCopy cx l] ++ conflicts ++ storeErrs ++ sharedWriteErrs ++ externValues cx pos (operandsOfRvalue rv) ++ take 1 (concatMap (viewsDisturbed cx pos st1 [] "is changed through a reference") targets))
+updatePlace cx pos st0 root steps rv = (updated, errs ++ placeReads cx pos st1 [] [(l, ps, True) | (l, ps, role) <- accesses rv, role == Read || isCopy cx l] ++ conflicts ++ storeErrs ++ callersStoreErrs ++ sharedWriteErrs ++ externValues cx pos (operandsOfRvalue rv) ++ take 1 (concatMap (viewsDisturbed cx pos st1 [] "is changed through a reference") targets))
   where
+    callersStoreErrs =
+        [ message cx pos ("a reference cannot be stored through " ++ describeStoreRoot cx st1 root ++ ", which is the caller's: return the value that holds it instead")
+        | Just l <- [source]
+        , mayHoldReference (cxProgram cx) (typeOf cx l)
+        , any (callersPlace cx st1) targets
+        ]
     -- (a write through root does not assign root: what it was reborrowed through stays)
     defined = (define cx st1 root []){stReborrowedThrough = stReborrowedThrough st1, stExact = stExact st1, stShared = shared'}
     shared'
@@ -1430,7 +1436,8 @@ terminator cx pos st term = case term of
             (st', errs) = foldl' (\acc (l, steps, role) -> accessExcept (outside l) cx pos acc (l, steps, role)) (st, []) ([(l, [], Read) | Just l <- [operandLocal callee]] ++ [(l, [], if b then Read else Consume) | (l, b) <- argLocals])
             forwarded = [l | (l, False) <- argLocals, isPackRoot cx l]
             stMarked = st'{stMoved = foldl' (\m l -> Map.adjust (\(p, _) -> (p, Just forwardedMark)) (l, []) m) (stMoved st') forwarded}
-            returnedFields = returnedArgumentLoans cx stMarked callee args lent mut
+            -- (a call of a function whose body is checked here leaves what the caller's holders hold as it was)
+            returnedFields = if storingCallee (cxProgram cx) callName then returnedArgumentLoans cx stMarked callee args lent mut else stMarked
             defined = (define cx returnedFields dest []){stLoans = Map.delete dest (stLoans returnedFields), stExtraLoans = Map.delete dest (stExtraLoans returnedFields), stFieldLoans = Map.filterWithKey (\(owner, _) _ -> owner /= dest) (stFieldLoans returnedFields), stConst = Map.delete dest (stConst returnedFields)}
             -- (a result that is a reference is a borrow of a place of one of the arguments it is from, made here)
             declared = resultFromArgs cx returnedFields callee args
@@ -1454,23 +1461,14 @@ terminator cx pos st term = case term of
             parented = windowed{stParents = case [l | (a, _) <- sources, Just l <- [operandLocal a], l /= dest] of
                 [] -> Map.delete dest (stParents windowed)
                 from -> Map.insert dest (nub from) (stParents windowed)}
-            -- (a call may store any reference it is given into a holder it reaches: the referent of an update argument, or what
-            -- a reference held by an argument given by value or for updating is to. Such a holder becomes a child of every other
-            -- argument with loans and holds their places, except the update argument it is lent through and a borrow of all of it)
-            loansOf l = maybe [] (\(place, _, _) -> [place]) (Map.lookup l (stLoans st)) ++ Map.findWithDefault [] l (stExtraLoans st)
-            given = [(l, places) | Just l <- map operandLocal args, let places = loansOf l, not (null places)]
-            mayHold = mayHoldReference (cxProgram cx)
-            updateHolders = [(l, nub (map fst (argPlaces l))) | (a, True) <- zip args mut, Just l <- [operandLocal a], TMutRef t <- [typeOf cx l], mayHold t]
-            heldBy = concat [loansOf holder | (_, hs) <- updateHolders, holder <- hs] ++ concat [loansOf l | (a, False, False) <- zip3 args lent mut, Just l <- [operandLocal a], case typeOf cx l of TRef _ -> False; _ -> True]
-            reached = go Set.empty (map fst heldBy)
-              where
-                go _ [] = []
-                go seen (r : rest)
-                    | Set.member r seen = go seen rest
-                    | mayHold (typeOf cx r) = r : go (Set.insert r seen) (rest ++ map fst (loansOf r))
-                    | otherwise = go (Set.insert r seen) rest
-            holders = nub ([(holder, Just l) | (l, hs) <- updateHolders, holder <- hs] ++ [(holder, Nothing) | holder <- reached])
-            storing = [(holder, map fst from, concatMap snd from) | (holder, through) <- holders, holder /= dest, let from = [(r, places) | (r, rPlaces) <- given, r /= holder, Just r /= through, let places = filter (/= (holder, [])) rPlaces, not (null places)], not (null from)]
+            boundary = boundaryHolders cx st callName args lent mut
+            -- (what a holder of the caller's holds is the caller's references, which the call may move about in it too)
+            callersHolderErrs = take 1
+                [ message cx pos ("this call may store a reference to " ++ describeHeld cx (head (filter (/= incomingRoot) places ++ [incomingRoot])) ++ " through " ++ describeHolder cx holder ++ ", which is the caller's: return the value that holds it instead")
+                | (holder, _, places) <- boundary
+                , callersPlace cx st (holder, [])
+                ]
+            storing = [(holder, from, places) | (holder, from, places@(_ : _)) <- boundary, holder /= dest, not (callersPlace cx st (holder, []))]
             stored = foldl' (\acc (holder, from, places) -> acc{stParents = Map.insertWith (flip unionPlaces) holder from (stParents acc), stExtraLoans = Map.insertWith (flip unionPlaces) holder places (stExtraLoans acc), stFieldLoans = Map.mapWithKey (\(root, _) ps -> if root == holder then unionPlaces ps places else ps) (stFieldLoans acc)}) parented storing
             -- (a result that is one known place of what it is from is that place, of the state the call left)
             declaredPlaces = resultSourcePlaces returnedFields [(a, True) | a <- declared]
@@ -1482,9 +1480,9 @@ terminator cx pos st term = case term of
             callName = knownCallee st callee
             foreignCall = [message cx pos (drop 7 name ++ " is an extern fn and gives a value that can hold a reference") | Just name <- [callName], "extern " `isPrefixOf` name, mayHoldReference (cxProgram cx) (typeOf cx dest)]
             foreignBlock = [message cx pos (drop 7 name ++ " is an extern fn and cannot accept a Block that may hold a reference") | Just name <- [callName], "extern " `isPrefixOf` name, any (maybe False (foreignBlockType cx . typeOf cx) . operandLocal) args]
-            -- Generic boundary enforcement is deferred: a known generic callee's result is not yet checked at its instantiated type, so an unsourced one is accepted.
-            unsourced = [message cx pos ("the loans of " ++ describeLocal cx dest ++ " are not modelled: the call gives a value that can hold a reference and is given nothing it could hold or borrow") | null sources, mayHoldReference (cxProgram cx) (typeOf cx dest), not (maybe False (not . null . fnTypeParams) (callName >>= (`Map.lookup` progFunctions (cxProgram cx))))]
-         in (hold cx pos exactResult dest [], take 1 conflicts ++ take 1 readAndUpdated ++ errs ++ mutErrs ++ heldErrs ++ sharedLentErrs ++ readErrs ++ disturbed ++ foreignCall ++ foreignBlock ++ externValues cx pos args ++ unsourced ++ lost cx pos st' dest)
+            -- (a generic call's result holds what its arguments lend and hold, which may be nothing: a generic body makes no reference of its own)
+            unsourced = [message cx pos ("the loans of " ++ describeLocal cx dest ++ " are not modelled: the call gives a value that can hold a reference and is given nothing it could hold or borrow") | null sources, mayHoldReference (cxProgram cx) (typeOf cx dest), not (genericCallee (cxProgram cx) callName)]
+         in (hold cx pos exactResult dest [], take 1 conflicts ++ take 1 readAndUpdated ++ errs ++ mutErrs ++ heldErrs ++ sharedLentErrs ++ readErrs ++ callersHolderErrs ++ disturbed ++ foreignCall ++ foreignBlock ++ externValues cx pos args ++ unsourced ++ lost cx pos st' dest)
     -- (what a function returns is given to its caller, and a permission it has not used by then is lost)
     Return ->
         let (st', errs) = if Local 0 `Map.member` fnLocals (cxFn cx) then accessAll [(Local 0, [], Consume)] else (st, [])
@@ -1748,6 +1746,78 @@ resultFromArgs cx st callee args = case calleeName of
         Copy l -> Map.lookup l (stFnAlias st)
         Move l -> Map.lookup l (stFnAlias st)
         _ -> Nothing
+
+-- Each holder a call's arguments reach that the callee may store into, with the arguments and places it may take (MIR.md,
+-- Moves, "Function boundaries")
+boundaryHolders :: Cx -> St -> Maybe Name -> [Operand] -> [Bool] -> [Bool] -> [(Local, [Local], [Place])]
+boundaryHolders cx st callName args lent mut
+    | not (storingCallee program callName) = []
+    | otherwise = holders
+  where
+    program = cxProgram cx
+    argLocals = [(i, l, isLent, isMut) | (i, a, isLent, isMut) <- zip4 [0 :: Int ..] args (lent ++ repeat False) (mut ++ repeat False), Just l <- [operandLocal a]]
+    loansOf l = maybe [] (\(place, _, _) -> [place]) (Map.lookup l (stLoans st)) ++ Map.findWithDefault [] l (stExtraLoans st)
+    ownPlaces l = case Map.lookup l (stLoans st) of
+        Just (place, _, _) -> place : Map.findWithDefault [] l (stExtraLoans st)
+        Nothing -> mayPlacesOf st l
+    held l = Map.findWithDefault [] l (stExtraLoans st) ++ concat [places | ((root, _), places) <- Map.toList (stFieldLoans st), root == l]
+    -- (an argument lent, or a reference, is a place the body can keep a reference to; one given by value keeps only what it holds)
+    starts l isLent = if isLent || isReference cx l then ownPlaces l else held l
+    stored = referenceBounds st (concat [starts l isLent | (_, l, isLent, _) <- argLocals])
+    sources = nub [l | (_, l, isLent, _) <- argLocals, not (null (starts l isLent))]
+    calleeParams = case callName >>= (`Map.lookup` progFunctions program) of
+        Just f -> [localType <$> Map.lookup p (fnLocals f) | p <- fnParams f]
+        Nothing -> []
+    paramType i = if i < length calleeParams then calleeParams !! i else Nothing
+    isMutRefType ty = case ty of
+        TMutRef _ -> True
+        _ -> False
+    updates i l isMut = isMut || (isMutRefType (typeOf cx l) && maybe True isMutRefType (paramType i))
+    holderRoot r = r == fst incomingRoot || mayHoldReference program (typeOf cx r)
+    -- (only an update reference can be written through: nothing reached through a shared one is a holder, MIR.md "Shared paths")
+    heldHolders r = if r /= fst incomingRoot && mayHoldUpdate program (typeOf cx r) then map fst (loansOf r) else []
+    direct = nub [(root, Just l) | (i, l, _, isMut) <- argLocals, updates i l isMut, (root, _) <- ownPlaces l, holderRoot root]
+    byValue = [l | (_, l, isLent, _) <- argLocals, not isLent, not (isReference cx l), mayHoldUpdate program (typeOf cx l)]
+    reached = go Set.empty (concatMap (heldHolders . fst) direct ++ concat [map fst (loansOf l) | l <- byValue])
+      where
+        go _ [] = []
+        go seen (r : rest)
+            | Set.member r seen = go seen rest
+            | holderRoot r = r : go (Set.insert r seen) (rest ++ heldHolders r)
+            | otherwise = go (Set.insert r seen) rest
+    holders =
+        [ (holder, [l | l <- sources, l /= holder, Just l /= via], [place | place <- stored, place /= (holder, []), maybe True (\l -> place `notElem` ownPlaces l) via])
+        | (holder, via) <- direct ++ [(r, Nothing) | r <- nub reached, r `notElem` map fst direct]
+        ]
+
+-- Whether a call of the function may store what it is given into what its arguments reach: a function this check sees the body
+-- of at the call's types stores nothing (a store into its caller's storage is refused in it), any other one may
+storingCallee :: Program -> Maybe Name -> Bool
+storingCallee program name = case name of
+    Just n
+        | Just (_, targs) <- Map.lookup n (progInstances program) -> any (mayHoldReference program) [t | ArgType t <- targs]
+        | genericCallee program name -> True
+        | "<$param " `isPrefixOf` n -> True
+        | otherwise -> not (Map.member n (progFunctions program))
+    Nothing -> True
+
+-- A generic function, or a copy of one with bounds or a pack
+genericCallee :: Program -> Maybe Name -> Bool
+genericCallee program name = case name of
+    Just n -> Map.member n (progInstances program) || maybe False (not . null . fnTypeParams) (Map.lookup n (progFunctions program))
+    Nothing -> False
+
+describeHeld :: Cx -> Place -> String
+describeHeld cx place = if place == incomingRoot then "what a parameter's references are to" else describe cx place
+
+describeHolder :: Cx -> Local -> String
+describeHolder cx holder = if (holder, []) == incomingRoot then "a reference a parameter holds" else describeLocal cx holder
+
+-- (a write through a reference read out of a value names where it was read from)
+describeStoreRoot :: Cx -> St -> Local -> String
+describeStoreRoot cx st root = case placesOf st root of
+    [place] | place /= (root, []), Nothing <- localSource cx root -> describe cx place
+    _ -> describeLocal cx root
 
 -- The reference fields of a struct type, which a value of it holds loans in
 referenceFields :: Cx -> Type -> [(Variable, Type)]

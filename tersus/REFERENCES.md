@@ -317,6 +317,19 @@ Do not implicitly make an update capability covariant in its stored type;
 initially use invariant reference types and add coercions only with a sound rule.
 Support call-scoped callback borrowing before more general higher-rank contracts.
 
+Status: the move check enforces the boundary without new syntax. A function may
+not store a value that can hold a reference into storage its caller gave it (through
+an update parameter, `self`, or any reference a parameter holds), whatever the
+reference is to; it returns a holder it fills instead. A call of a function whose
+body is checked at the call's types therefore leaves the caller's holders as they
+were. A call that may run a generic body, a bound's impl or a function value is
+taken as a store of every place its arguments lend or hold into every holder they
+reach through update references: refused into a holder of the caller's, a union of
+loans into one of the function's own. This is stricter than Rust for concrete
+holders (an in-place swap of a holder's own references is refused) and merges every
+region of a generic call into one; a `from` clause for update parameters would lift
+the first when a program needs it.
+
 Allocator provenance and borrow validity are different constraints. A reference
 cannot outlive its allocation region. `ALLOCATORS.md`'s region erasure for reads
 must be revisited for escaping references and updates: an update cannot install
