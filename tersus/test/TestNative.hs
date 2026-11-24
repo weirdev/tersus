@@ -79,6 +79,19 @@ testNative =
         , TestParallel "function values" [TestCase name (sameAsMir name source) | (name, source) <- functionPrograms]
         , TestCase "typed MIR moves and drops a nested boxed capture exactly once" boxedClosureMir
         , TestParallel "boxed closures" [TestCase name (sameAsMir name source) | (name, source) <- boxedStoragePrograms]
+        , TestCase "custom Clone of a callback wrapper across replacement" (boxedWrapperClone False)
+        , TestCase "member Clone of a callback wrapper through a generated helper" (boxedWrapperClone True)
+        , TestCase "implicit Clone of a callback wrapper refuses an owning receiver" (boxedWrapperCloneRefused False "Self" "self")
+        , TestCase "member Clone of a callback wrapper refuses an owning receiver" (boxedWrapperCloneRefused True "Self" "self")
+        , TestCase "implicit Clone of a callback wrapper refuses an exclusive receiver" (boxedWrapperCloneRefused False "&mut Self" "make((*self).seed)")
+        , TestCase "explicit by-value Clone of a callback wrapper remains a move" $
+            sameAsMir "explicit by-value Clone of a callback wrapper" (boxedWrapperSource "Self" "self" ++ "saved = make(42).clone(); a = &saved.run; return a(saved.seed);")
+        , testCase "boxed closure still has no direct Clone" $
+            testAssertErrorContains "Clone::clone is called on a Closure<fn() -> Int>, which has no functions"
+                (compileSource "let f: Closure<fn() -> Int> = move fn() -> Int => 42; g = clone(f); return g();")
+        , testCase "boxed closure still has no derived Clone" $
+            testAssertErrorContains "Clone::clone is called on a Closure<fn() -> Int>, which has no functions"
+                (compileSource "struct Wrapper { run: Closure<fn() -> Int> }; impl Clone for Wrapper { }; return 0;")
         , TestParallel "function values (reference effects)" [TestCase name (sameAsUnvalidated name source) | (name, source) <- ergonomicsFunctionPrograms]
         , TestParallel "references given two places" [TestCase name (sameValueUnvalidated name source value) | (name, source, value) <- twoPlacePrograms]
         , TestParallel "ergonomics" [TestCase name (sameAsMir name source) | (name, source) <- ergonomicsPrograms]
@@ -151,6 +164,66 @@ boxedStoragePrograms =
     , ("main displays and drops its opaque boxed closure", "fn make() -> Closure<fn() -> Int> {\n    xs = [21, 21];\n    return move fn() -> Int => size(xs);\n};\nreturn make();\n")
     , ("same-ABI boxed contracts get distinct printers", "struct Callbacks {\n    first: Closure<fn() -> Int [{ }] [{ affirm return = 1; }]>,\n    second: Closure<fn() -> Int [{ }] [{ affirm return = 2; }]>\n};\nfn one() -> Int [{ }] [{ affirm return = 1; }] { return 1; };\nfn two() -> Int [{ }] [{ affirm return = 2; }] { return 2; };\nreturn Callbacks { first: one, second: two };\n")
     , ("an effectful disjoint argument reborrows a named mutable boxed receiver", "fn tick(x: &mut Int) -> Int writes(x) { *x = *x + 1; return *x; };\nfn twice(f: &mut ClosureMut<fn(Int) -> Int>) -> Int { x = 0; a = f(tick(&mut x)); b = f(tick(&mut x)); return a * 10 + b; };\nn = 0;\nlet cb: ClosureMut<fn(Int) -> Int> = move fn(x: Int) -> Int { n = n + x; return n; };\nreturn twice(&mut cb) + 29;\n")
+    ]
+
+boxedWrapperClone :: Bool -> IO TestResult
+boxedWrapperClone nested = do
+    available <- clangAvailable
+    if not available then pure Nothing else do
+        prepared <- boxedWrapperCopy nested "&Self" "make(self.seed)"
+        case prepared of
+            Error e -> pure (Just e)
+            Ok (program, owned) -> case testAssertEq (runProgram program) (Ok (Just (MInt 42))) of
+                Just failure -> pure (Just failure)
+                Nothing -> do
+                    ir <- llvmOfOwned owned
+                    case ir of
+                        Error e -> pure (Just e)
+                        Ok text -> buildAndRunWith True "" [] file file text (ExitSuccess, "42\n", "")
+  where
+    file = if nested then "boxed_wrapper_clone_nested" else "boxed_wrapper_clone"
+
+boxedWrapperCloneRefused :: Bool -> String -> String -> IO TestResult
+boxedWrapperCloneRefused nested receiver result = do
+    available <- clangAvailable
+    if not available then pure Nothing else do
+        prepared <- boxedWrapperCopy nested receiver result
+        case prepared of
+            Error e -> pure (Just e)
+            Ok (_, owned) -> testAssertErrorContains "an implicit Clone of a boxed-closure holder needs a matching shared receiver" <$> llvmOfOwned owned
+
+boxedWrapperCopy :: Bool -> String -> String -> IO (Result (M.Program, M.Program) String)
+boxedWrapperCopy nested receiver result = do
+    compiled <- compileOnce (boxedWrapperSource receiver result ++ replacement)
+    pure $ compiled `bindResult` \program -> ownedOfProgram program `bindResult` \owned ->
+        if insertedCopy owned then Ok (program, owned) else Error ("ownership did not insert a copy of " ++ owner)
+  where
+    owner = if nested then "Shelf" else "Callback"
+    insertedCopy program = or
+        [ M.localType decl == TNamed owner []
+        | f <- M.progMain program : Map.elems (M.progFunctions program), block <- Map.elems (M.fnBlocks f)
+        , M.Assign d (M.CopyOf _) <- M.blockStatements block, Just decl <- [Map.lookup d (M.fnLocals f)]
+        ]
+    replacement = if nested then unlines
+        [ "values = [Shelf { item: make(40) }];"
+        , "saved = get(values, 0);"
+        , "values = set(values, 0, Shelf { item: make(2) });"
+        , "a = &saved.item.run; b = &get(values, 0).item.run; return a(saved.item.seed) + b(get(values, 0).item.seed);"
+        ] else unlines
+        [ "values = [make(40)];"
+        , "saved = get(values, 0);"
+        , "values = set(values, 0, make(2));"
+        , "a = &saved.run; b = &get(values, 0).run; return a(saved.seed) + b(get(values, 0).seed);"
+        ]
+
+boxedWrapperSource :: String -> String -> String
+boxedWrapperSource receiver result = unlines
+    [ "trait Clone { fn clone(self: " ++ receiver ++ ") -> Self; };"
+    , "struct Callback { seed: Int, run: Closure<fn(Int) -> Int> };"
+    , "fn identity(x: Int) -> Int { return x; };"
+    , "fn make(seed: Int) -> Callback { let run: Closure<fn(Int) -> Int> = identity; return Callback { seed: seed, run: run }; };"
+    , "impl Clone for Callback { fn clone(self: " ++ receiver ++ ") -> Self { return " ++ result ++ "; }; };"
+    , "struct Shelf { item: Callback };"
     ]
 
 -- Values laid out as C lays them out (Mir.layoutOf): narrow numbers stored and loaded, structs and enums with their fields at aligned offsets, printed and

@@ -10,7 +10,7 @@ import Data.List (find, isInfixOf, isPrefixOf, isSuffixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import DataCodec (typeTokens)
-import LibPackage (LibPackage (..), compileLibPackageWith, libCatalog, libModuleId, libPackage)
+import LibPackage (LibPackage (..), compileLibPackageWith, libCatalog, libModuleId, libPackage, stripDeclaredFromUnits)
 import Lowering (lowerAccepted)
 import qualified Mir as M
 import MirEval (Outcome (..), RunEnv (..), runProgramEnv)
@@ -384,8 +384,17 @@ packageAssembly pkg = do
         injected = pkg{libPrograms = Map.insert "string" withBoth (libPrograms pkg)}
     cutover <- resultEither (Package.compileModulesUsing capture (Ok injected) assemblySnapshot)
     (libraries, units) <- resultEither (Package.packageLinkInputs cutover)
-    expected <- traverse (\name -> (,) (libModuleId name) <$> if name == "string" then Right withRootShadow else lookupOr "cached unit" name (libPrograms pkg)) names
+    types <- lookupOr "cached types unit" "types" (libPrograms pkg)
+    let storage = Map.restrictKeys (M.progGenerics types) (Set.fromList ["List", "Box"])
+        expectedUnit name = (,) (libModuleId name) <$> case name of
+            "types" -> Right types{M.progCaptureStorage = storage}
+            "string" -> Right withRootShadow
+            _ -> lookupOr "cached unit" name (libPrograms pkg)
+    expected <- traverse expectedUnit names
     require (libraries == expected) "library units did not keep only the first contributor's exclusions"
+    require (Map.keysSet storage == Set.fromList ["List", "Box"] && Map.null (M.progCaptureStorage types)) "only the selected types unit should gain compiler storage provenance"
+    let stripped = stripDeclaredFromUnits ["Box"] libraries
+    require (map (Map.keys . M.progCaptureStorage . snd) stripped == [["List"], [], [], [], []]) "shadowing Box must also remove its storage provenance"
     require (map fst units == [leaf, ModuleId "assembly" (Just "left"), ModuleId "assembly" (Just "right"), vendor, root]) ("unexpected Link unit order: " ++ show (map fst units))
 
 packageDecoderRefusals :: Either String ()
