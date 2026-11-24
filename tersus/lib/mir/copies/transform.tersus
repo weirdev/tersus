@@ -412,7 +412,12 @@ fn transformStatement(program: &FullProgram, cx: &CopyRowCx, row: List<Token>, s
         at = operandEnd(&row, rv + 1); row = renamedAt(row, at, cx.renames);
     };
     if wordIs(&row, rv, "borrow") || wordIs(&row, rv, "borrowmut") { row = renameSteps(row, rv + 2, cx.renames); };
-    return rewriteSites(program, cx, row, &mut *st);
+    moveCapture = wordIs(&row, 2, "packclosure") && wordIs(&row, 3, "move");
+    rewritten = rewriteSites(program, cx, row, &mut *st);
+    if moveCapture && (*st).error = "" && !wordIs(&rewritten, 3, "move") {
+        (*st).error = "a boxed closure must move a capture local after specialization";
+    };
+    return rewritten;
 };
 struct CopyCallRow { callee: List<Token>, args: List<List<Token>>, dest: Int, next: Int };
 fn parseCopyCall(row: &List<Token>) -> CopyCallRow ~ {

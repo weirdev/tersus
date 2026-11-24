@@ -89,19 +89,19 @@ fn collectRenames(classes: &InstanceNameClasses, ty: &List<Token>, cx: &CopyCx, 
             at = end;
         };
     };
-    if tag = "fn" {
+    if tag = "fn" || tag = "fnc" {
         n = numberAt(ty, 1); if n < 0 { return renames; };
         at = 2;
-        for i in 0..n {
-            at = typeEnd(ty, at); if at < 0 { return renames; };
-        };
-        renames = collectRenames(classes, sliceTokens(ty, at, size(ty)), cx, renames); at = 2;
+        for i in 0..n { at = typeEnd(ty, at); if at < 0 { return renames; }; };
+        end = typeEnd(ty, at);
+        if end <= at { return renames; };
+        renames = collectRenames(classes, sliceTokens(ty, at, end), cx, renames); at = 2;
         for i in 0..n {
             end = typeEnd(ty, at); if end <= at { return renames; };
             renames = collectRenames(classes, sliceTokens(ty, at, end), cx, renames); at = end;
         };
     };
-    if tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "box" || tag = "list" {
+    if tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "box" || tag = "list" || tag = "closure" || tag = "closuremut" {
         end = typeEnd(ty, 1);
         if end > 1 { renames = collectRenames(classes, sliceTokens(ty, 1, end), cx, renames); };
     };
