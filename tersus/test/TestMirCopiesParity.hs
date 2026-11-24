@@ -3,6 +3,7 @@ module TestMirCopiesParity
     , testFncReview, testStandaloneFnc, standaloneFncLowered, standaloneFncExpected
     , testMirCopiesDivergence, divergenceProgram, checkDivergence
     , empty, int, block, function, bounded, template, rootId, recursion, growthRefusal, wideStatements, checkWideStatements
+    , profileReader
     ) where
 
 import Control.Concurrent.MVar (MVar, newMVar)

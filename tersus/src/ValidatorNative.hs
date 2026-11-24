@@ -11,7 +11,7 @@
 -- library it is built with. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (withValidatorOperation, validateCompiled, validateCompiledUncached, validationRefusals, inBatches, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, cachedBootstrapSourceEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
+module ValidatorNative (withValidatorOperation, validateCompiled, validateCompiledUncached, validationRefusals, inBatches, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, cachedBootstrapSourceEmitter, validatorKey, certificateKey, prepareTexts, prepareEncodedTexts, raiseStack) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, takeMVar, withMVar)
 import Data.List (foldl', isSuffixOf, sortOn)
@@ -69,7 +69,10 @@ validateWith physical caching program = unsafePerformIO (validateWithExe validat
 
 -- The same, run by the validator the first argument gives
 prepareTexts :: Bool -> M.Program -> Result [(String, String)] String
-prepareTexts physical program = case (if physical then encodeLibrary else encode) program of
+prepareTexts physical program = prepareEncodedTexts ((if physical then encodeLibrary else encode) program)
+
+prepareEncodedTexts :: Either String [(String, (MirValue, MirValue, Integer))] -> Result [(String, String)] String
+prepareEncodedTexts encoded = case encoded of
     Left what -> Error (unmodeledFeature what)
     Right functions -> case mapM (\(name, f) -> fmap (\text -> (name, text)) (serializeFunction f)) functions of
         Left e -> Error e

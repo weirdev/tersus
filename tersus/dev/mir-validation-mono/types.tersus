@@ -1,0 +1,192 @@
+import data::codec::codec { Token, fnClausesAt };
+import mir::full::records { keyOrder };
+import mir::full::tokens { appendTokens, argEnd, fnReturnEnd, namesEnd, normalizeType, numberAt, sizeEnd, sliceTokens, textAt, typeEnd, word, wordIs };
+import mir::instances::names { InstanceNameClasses, instanceNameAt, renderCopyType };
+import mir::mono::functions { MonoKey };
+import mir::mono::tokens { MonoBinding, monoBind, monoCompareDecimal, monoCompareInt, monoCompareNames, monoCompareText, monoForallBody, monoQuotedNames, monoSizeCompare, monoTypeCompare, monoTypeRank, monoTypeItems };
+
+fn signatureEnd(ts: &List<Token>, at: Int) -> Int ~ {
+    return fnReturnEnd(ts, at + 2, numberAt(ts, at + 1));
+};
+
+fn namedTypes(classes: &InstanceNameClasses, ts: &List<Token>, at: Int, out: List<MonoBinding>) -> List<MonoBinding> ~ {
+    tag = textAt(ts, at);
+    if tag = "named" {
+        out = push(out, MonoBinding { name: instanceNameAt(classes, ts, at), tokens: sliceTokens(ts, at, typeEnd(ts, at)) });
+        n = numberAt(ts, at + 2); p = at + 3;
+        for i in 0..n {
+            if wordIs(ts, p, "type") { out = namedTypes(classes, ts, p + 1, out); };
+            p = argEnd(ts, p);
+        };
+    } else if tag = "fn" {
+        n = numberAt(ts, at + 1); p = at + 2;
+        for i in 0..n { p = typeEnd(ts, p); };
+        out = namedTypes(classes, ts, p, out); p = at + 2;
+        for i in 0..n { out = namedTypes(classes, ts, p, out); p = typeEnd(ts, p); };
+    } else if tag = "forall" { out = namedTypes(classes, ts, monoForallBody(ts, at), out); }
+    else if tag = "array" || tag = "ref" || tag = "mutref" || tag = "block" || tag = "addr" || tag = "uninit" {
+        out = namedTypes(classes, ts, at + 1, out);
+    };
+    return out;
+};
+
+fn symbolic(ts: &List<Token>, at: Int) -> Bool ~ {
+    tag = textAt(ts, at);
+    if tag = "param" { return true; };
+    if tag = "named" {
+        n = numberAt(ts, at + 2); p = at + 3;
+        for i in 0..n {
+            if wordIs(ts, p, "type") && symbolic(ts, p + 1) { return true; };
+            if wordIs(ts, p, "size") && wordIs(ts, p + 1, "p") { return true; };
+            p = argEnd(ts, p);
+        };
+    };
+    if tag = "fn" || tag = "fnc" {
+        n = numberAt(ts, at + 1); p = at + 2;
+        for i in 0..n + 1 {
+            if symbolic(ts, p) { return true; };
+            p = typeEnd(ts, p);
+        };
+    };
+    if tag = "array" { return symbolic(ts, at + 1) || wordIs(ts, typeEnd(ts, at + 1), "p"); };
+    if tag = "ref" || tag = "mutref" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "closure" || tag = "closuremut" {
+        return symbolic(ts, at + 1);
+    };
+    return false;
+};
+
+fn typeMatch(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>) -> List<MonoBinding> ~ {
+    if size(pat) = 0 || size(actual) = 0 { return bs; };
+    if wordIs(pat, 0, "param") { return monoBind(bs, textAt(pat, 1), normalizeType(actual)); };
+    if wordIs(pat, 0, "ref") { return typeMatch(bs, sliceTokens(pat, 1, size(pat)), actual); };
+    if wordIs(actual, 0, "ref") { return typeMatch(bs, pat, sliceTokens(actual, 1, size(actual))); };
+    if wordIs(pat, 0, "mutref") { return typeMatch(bs, sliceTokens(pat, 1, size(pat)), actual); };
+    if wordIs(actual, 0, "mutref") { return typeMatch(bs, pat, sliceTokens(actual, 1, size(actual))); };
+    tag = textAt(pat, 0);
+    if tag != textAt(actual, 0) { return bs; };
+    if tag = "array" || tag = "block" || tag = "addr" || tag = "uninit" {
+        return typeMatch(bs, sliceTokens(pat, 1, typeEnd(pat, 1)), sliceTokens(actual, 1, typeEnd(actual, 1)));
+    };
+    if tag = "named" {
+        n = numberAt(pat, 2);
+        if textAt(pat, 1) != textAt(actual, 1) || n != numberAt(actual, 2) { return bs; };
+        p = 3; a = 3;
+        for i in 0..n {
+            pe = argEnd(pat, p); ae = argEnd(actual, a);
+            if wordIs(pat, p, "type") && wordIs(actual, a, "type") {
+                bs = typeMatch(bs, sliceTokens(pat, p + 1, pe), sliceTokens(actual, a + 1, ae));
+            };
+            p = pe; a = ae;
+        };
+    };
+    if tag = "fn" {
+        pn = numberAt(pat, 1); an = numberAt(actual, 1);
+        p = 2; a = 2;
+        for i in 0..pn { p = typeEnd(pat, p); };
+        for i in 0..an { a = typeEnd(actual, a); };
+        bs = typeMatch(bs, sliceTokens(pat, p, size(pat)), sliceTokens(actual, a, size(actual)));
+        p = 2; a = 2; n = pn; if an < n { n = an; };
+        for i in 0..n {
+            pe = typeEnd(pat, p); ae = typeEnd(actual, a);
+            bs = typeMatch(bs, sliceTokens(pat, p, pe), sliceTokens(actual, a, ae)); p = pe; a = ae;
+        };
+    };
+    return bs;
+};
+
+fn instanceLabel(classes: &InstanceNameClasses, key: &MonoKey) -> String ~ {
+    out = clone(key.name).concat("<"); comma = "";
+    for ty in &key.types { out = out.concat(&comma).concat(renderCopyType(classes, ty, 0, false)); comma = ", "; };
+    for s in &key.sizes { out = out.concat(&comma).concat(s); comma = ", "; };
+    return out.concat(">");
+};
+
+fn rank(ts: &List<Token>) -> Int ~ {
+    if wordIs(ts, 0, "fnc") { return 16; };
+    if wordIs(ts, 0, "closure") || wordIs(ts, 0, "closuremut") { return 17; };
+    return monoTypeRank(ts);
+};
+
+fn compareTypes(a: &List<List<Token>>, b: &List<List<Token>>, args: Bool) -> Int ~ {
+    for i in 0..size(a) {
+        if i >= size(b) { return 1; };
+        l = get(a, i); r = get(b, i);
+        order = 0;
+        if args {
+            ls = wordIs(l, 0, "size"); rs = wordIs(r, 0, "size");
+            if ls != rs { if ls { return 0 - 1; }; return 1; };
+            if ls { order = monoSizeCompare(sliceTokens(l, 1, size(l)), sliceTokens(r, 1, size(r))); }
+            else { order = compareType(sliceTokens(l, 1, size(l)), sliceTokens(r, 1, size(r))); };
+        } else { order = compareType(l, r); };
+        if order != 0 { return order; };
+    };
+    return monoCompareInt(size(a), size(b));
+};
+
+fn compareClauses(a: &List<List<Token>>, b: &List<List<Token>>) -> Int ~ {
+    for i in 0..size(a) {
+        if i >= size(b) { return 1; };
+        l = get(a, i); r = get(b, i);
+        for j in 0..size(l) {
+            if j >= size(r) { return 1; };
+            lt = get(l, j); rt = get(r, j);
+            if lt.quoted != rt.quoted { if lt.quoted { return 1; }; return 0 - 1; };
+            order = monoCompareText(&lt.text, &rt.text); if order != 0 { return order; };
+        };
+        if size(l) != size(r) { return monoCompareInt(size(l), size(r)); };
+    };
+    return monoCompareInt(size(a), size(b));
+};
+
+fn compareType(a: &List<Token>, b: &List<Token>) -> Int ~ {
+    if a = b { return 0; };
+    ar = rank(a); order = monoCompareInt(ar, rank(b));
+    if order != 0 { return order; };
+    if ar = 4 {
+        ae = typeEnd(a, 1); be = typeEnd(b, 1);
+        order = compareType(sliceTokens(a, 1, ae), sliceTokens(b, 1, be));
+        if order != 0 { return order; };
+        return monoSizeCompare(sliceTokens(a, ae, size(a)), sliceTokens(b, be, size(b)));
+    };
+    if ar = 5 || ar = 16 {
+        an = numberAt(a, 1); bn = numberAt(b, 1);
+        order = compareTypes(monoTypeItems(a, 2, an, false), monoTypeItems(b, 2, bn, false), false);
+        if order != 0 { return order; };
+        ap = 2; bp = 2;
+        for i in 0..an { ap = typeEnd(a, ap); }; for i in 0..bn { bp = typeEnd(b, bp); };
+        ae = typeEnd(a, ap); be = typeEnd(b, bp);
+        order = compareType(sliceTokens(a, ap, ae), sliceTokens(b, bp, be));
+        if order != 0 || ar = 5 { return order; };
+        order = monoCompareNames(monoQuotedNames(a, ae + 1, an), monoQuotedNames(b, be + 1, bn), false);
+        if order != 0 { return order; };
+        preA = fnClausesAt(a, namesEnd(a, ae)); preB = fnClausesAt(b, namesEnd(b, be));
+        order = compareClauses(&preA.value, &preB.value); if order != 0 { return order; };
+        postA = fnClausesAt(a, preA.pos); postB = fnClausesAt(b, preB.pos);
+        return compareClauses(&postA.value, &postB.value);
+    };
+    if ar = 6 {
+        order = monoCompareText(textAt(a, 1), textAt(b, 1)); if order != 0 { return order; };
+        return compareTypes(monoTypeItems(a, 3, numberAt(a, 2), true), monoTypeItems(b, 3, numberAt(b, 2), true), true);
+    };
+    if ar = 9 {
+        an = numberAt(a, 1); bn = numberAt(b, 1);
+        order = monoCompareNames(monoQuotedNames(a, 2, an), monoQuotedNames(b, 2, bn), false);
+        if order != 0 { return order; };
+        order = monoCompareNames(monoQuotedNames(a, 3 + an, numberAt(a, 2 + an)), monoQuotedNames(b, 3 + bn, numberAt(b, 2 + bn)), false);
+        if order != 0 { return order; };
+        return compareType(sliceTokens(a, monoForallBody(a, 0), size(a)), sliceTokens(b, monoForallBody(b, 0), size(b)));
+    };
+    if ar >= 11 {
+        if ar = 17 {
+            order = monoCompareText(textAt(a, 0), textAt(b, 0)); if order != 0 { return order; };
+        };
+        return compareType(sliceTokens(a, 1, size(a)), sliceTokens(b, 1, size(b)));
+    };
+    return monoTypeCompare(a, b);
+};
+
+fn compareKeys(a: &MonoKey, b: &MonoKey) -> Int ~ {
+    order = monoCompareText(&a.name, &b.name); if order != 0 { return order; };
+    order = compareTypes(&a.types, &b.types, false); if order != 0 { return order; };
+    return monoCompareNames(&a.sizes, &b.sizes, true);
+};
