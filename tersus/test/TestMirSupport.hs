@@ -120,7 +120,11 @@ emitterFileLayout (loaded, compiled, program) = firstFailure
     , testAssertEq (length [m | m <- Package.compiledModules compiled, Package.compiledModuleId m == entryId]) 1
     , testAssertEq [name | file <- files, S.Assign name (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]
         [name | file <- files, S.Assign name (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file), '$' `notElem` name]
-    , testAssertEq (length [() | file <- files, S.Assign _ (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]) 158
+    , testAssertEq (length [() | file <- files, S.Assign _ (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]) 162
+    , firstFailure
+        [ testAssertEq [Mod.loadedFileStem file | file <- files, name `elem` Mod.loadedDeclNames file] ["types"]
+        | name <- ["ownsHeapWord", "hasDropHelper", "structuralCloneCopiesBoxedOwner", "cloneCandidate", "sharedCloneReceiver"]
+        ]
     , testAssertEq (Set.fromList [name | file <- files, S.StructDef name _ _ _ <- fileBody (Mod.loadedParsed file)])
         (Set.fromList ["Held", "EmitResult", "Gen", "Sig", "Ctor", "Ctx", "LT", "LTG", "CtorAt", "FnOut", "Storage"])
     , testAssertEq (all (`Map.member` M.progFunctions program) ["ir", "outline", "bodies", "fieldOffset", "operandValue", "emitStatement", "emitFunction", "<String>::then"]) True
@@ -225,7 +229,7 @@ sharedRecords = ["Res", "ArrayInfo", "Layout", "Simple"]
 sharedFunctions :: [String]
 sharedFunctions =
     [ "noStrings", "showInt", "joinWith", "beforeAngle", "withoutBackticks", "hexUpper", "escaped"
-    , "renderSize", "renderType", "declName", "declNamed", "lookupDecl", "variantNamed", "ownerOf"
+    , "renderSize", "renderType", "renderTypeWith", "runtimeTypeKey", "declName", "declNamed", "lookupDecl", "variantNamed", "ownerOf"
     , "canonical", "variantsOf", "isEnum", "notArray", "sizedArray"
     , "isSizedArray", "isAggregate", "declaredName", "roundUp", "wordLayout", "simpleLayout"
     ]
@@ -360,7 +364,9 @@ directCalls (loaded, compiled, program) = firstFailure
     , testAssertEq (Set.member (supportName "declNamed") (calls (supportName "lookupDecl"))) True
     , testAssertEq (Set.member "<String>::concat" (calls (supportName "joinWith"))) True
     , testAssertEq (Set.member "data$codec$codec$catStrings" (calls (supportName "joinWith"))) False
-    , testAssertEq (Set.member "data$codec$codec$catStrings" (calls (supportName "renderType"))) True
+    , testAssertEq (Set.member (supportName "renderTypeWith") (calls (supportName "renderType"))) True
+    , testAssertEq (Set.member (supportName "renderTypeWith") (calls (supportName "runtimeTypeKey"))) True
+    , testAssertEq (Set.member "data$codec$codec$catStrings" (calls (supportName "renderTypeWith"))) True
     , testAssertEq (Set.member "data$codec$codec$catStrings" (calls (supportName "renderSize"))) True
     , testAssertEq (Set.member "<String>::then" (calls "global")) (Mod.moduleName (Mod.packageEntryModule loaded) /= Just "mir_erase")
     , testAssertEq [name | name <- Map.keys (I.ifFunctions entry), name `elem` sharedFunctions || any (\local -> ("$" ++ local) `isInfixOf` name && not ("<" `isPrefixOf` name)) sharedFunctions] []

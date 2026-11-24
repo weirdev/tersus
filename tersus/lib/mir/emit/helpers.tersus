@@ -1,4 +1,4 @@
-import mir::emit::types { Ctx, Storage, cloneImplName, cloneSymbol, containsName, dropRangeSymbol, dropSymbol, fieldsLayout, functionSymbol, hasDropHelper, holdsBoxedOwner, layoutOf, needsDrop, needsDropIn, printSymbol };
+import mir::emit::types { Ctx, Storage, cloneImplName, cloneSymbol, containsName, dropRangeSymbol, dropSymbol, fieldsLayout, functionSymbol, hasDropHelper, layoutOf, needsDrop, needsDropIn, printSymbol, structuralCloneCopiesBoxedOwner };
 import mir::support::support { noStrings, showInt, beforeAngle, canonical, variantsOf, isEnum, sizedArray, isAggregate, declaredName, roundUp, simpleLayout };
 import data::codec::codec { Type };
 import mir::reader::reader { Field, Variant, TypeDecl, Program, dropOf };
@@ -357,7 +357,7 @@ fn cloneFunctionLines(cx: &Ctx, t: &Type) -> List<String> ~ {
 fn cloneFunctions(cx: &Ctx, closed: &List<Type>) -> List<String> ~ {
     out = noStrings();
     for t in closed {
-        if (t is Type::TNamed || sizedArray(t).ok) && !holdsBoxedOwner(cx, t, []) {
+        if (t is Type::TNamed || sizedArray(t).ok) && !structuralCloneCopiesBoxedOwner(cx, t, [], false, true) {
             for l in cloneFunctionLines(cx, t) { out = push(out, clone(l)); };
             out = push(out, "");
         };

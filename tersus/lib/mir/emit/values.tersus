@@ -1,4 +1,4 @@
-import mir::emit::types { Ctx, Held, LT, bytesIn, cloneImplName, cloneSymbol, ctorAt, ctorIndex, dropSymbol, fieldIndex, fieldIndex2, fieldOffset, functionSymbol, global, holdsBoxedOwner, isArray, isBoxStruct, isListStruct, isNumberWord, listElement, llvmType, localTypeOf, noTypes, ownsIn, refTargetOf, slotsIn };
+import mir::emit::types { Ctx, Held, LT, bytesIn, cloneImplName, cloneSymbol, ctorAt, ctorIndex, dropSymbol, fieldIndex, fieldIndex2, fieldOffset, functionSymbol, global, isArray, isBoxStruct, isListStruct, isNumberWord, listElement, llvmType, localTypeOf, noTypes, ownsIn, refTargetOf, slotsIn, structuralCloneCopiesBoxedOwner };
 import mir::support::support { Res, noStrings, showInt, joinWith, renderType, sizedArray, isAggregate };
 import data::codec::codec { Type, parseInt };
 import mir::reader::reader { Constant, Operand, RefStep, Function };
@@ -92,7 +92,7 @@ fn descriptor(g: Gen, cx: &Ctx, t: &Type) -> Gen ~ {
 // copies of its parts, as the impl the language makes for `impl Clone for T { };` is) and the made function
 // of the type when it does not
 fn cloneValue(g: Gen, cx: &Ctx, current: &String, t: &Type, to: &String, from: &String) -> Gen ~ {
-    if holdsBoxedOwner(cx, t, []) { return failG(g, "a boxed closure cannot be cloned"); };
+    if t is Type::TBoxedClosure { return failG(g, "a boxed closure cannot be cloned"); };
     g1 = descriptor(g, cx, t);
     implName = cloneImplName(cx, t);
     // (a copy inside the `Clone` impl of the type itself is the copy the impl is made of, not the impl called
@@ -101,6 +101,7 @@ fn cloneValue(g: Gen, cx: &Ctx, current: &String, t: &Type, to: &String, from: &
     if implName.ok {
         return emit(g1, "call void ".then(functionSymbol(implName.text)).then("(ptr ").then(clone(to)).then(", ptr ").then(clone(from)).then(")"));
     };
+    if structuralCloneCopiesBoxedOwner(cx, t, [], false, true) { return failG(g1, "an implicit Clone of a boxed-closure holder needs a matching shared receiver"); };
     return emit(g1, "call void ".then(cloneSymbol(&cx.types, t)).then("(ptr ").then(clone(to)).then(", ptr ").then(clone(from)).then(")"));
 };
 

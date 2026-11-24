@@ -270,7 +270,7 @@ fn resultStruct(t: &String) -> String [{ }] [{ }] {
 
 // What a call needs to know of a function of the program: the types of its parameters and of its result. (Looking a function up in the program itself copies it, and all
 // its blocks, so they are taken once.)
-struct Sig { name: String, params: List<Type>, ptrs: List<Bool>, paramsOk: Bool, hasReturn: Bool, returns: Type };
+struct Sig { name: String, params: List<Type>, ptrs: List<Bool>, sharedReceiver: Bool, paramsOk: Bool, hasReturn: Bool, returns: Type };
 
 impl Clone for Sig { };
 
@@ -328,7 +328,11 @@ fn sigOf(f: &Function) -> Sig [{ }] [{ }] {
         };
         ptrs = push(ptrs, hasInt(f.borrowed, param) || hasInt(f.mutBorrowed, param));
     };
-    return Sig { name: clone(f.name), params: params, ptrs: ptrs, paramsOk: ok, hasReturn: f.hasReturn, returns: clone(f.returns) };
+    sharedReceiver = false;
+    if size(f.params) = 1 && size(f.borrowed) = 1 && size(f.mutBorrowed) = 0 {
+        sharedReceiver = hasInt(f.borrowed, get(f.params, 0));
+    };
+    return Sig { name: clone(f.name), params: params, ptrs: ptrs, sharedReceiver: sharedReceiver, paramsOk: ok, hasReturn: f.hasReturn, returns: clone(f.returns) };
 };
 
 fn noCtors() -> List<Ctor> [{ }] [{ }] {
@@ -431,13 +435,30 @@ fn hasText(hay: &String, needle: &String) -> Bool ~ {
 // name says it is the `clone` of the trait `Clone` and whose result is the type (the impl of a list is named
 // for `List`, and its result is the `List` the list is made of, so the name is not made from the type)
 fn cloneImplName(cx: &Ctx, t: &Type) -> Res ~ {
-    want = renderType(canonical(&cx.types, t));
+    return cloneCandidate(cx, t, structuralCloneCopiesBoxedOwner(cx, t, [], false, false));
+};
+
+fn cloneCandidate(cx: &Ctx, t: &Type, sharedOnly: Bool) -> Res ~ {
+    owner = canonical(&cx.types, t);
+    want = renderType(owner);
     i = 0;
     while i < size(cx.clones) && i < size(cx.cloneTys) [{ affirm i >= 0; affirm i <= size(cx.clones); affirm i <= size(cx.cloneTys); }] shrinks size(cx.clones) - i {
-        if get(cx.cloneTys, i) = want { return Res { ok: true, text: clone(get(cx.clones, i)) }; };
+        if get(cx.cloneTys, i) = want {
+            name = clone(get(cx.clones, i));
+            if !sharedOnly || sharedCloneReceiver(cx, owner, name) { return Res { ok: true, text: name }; };
+        };
         i = i + 1;
     };
     return Res { ok: false, text: "" };
+};
+
+fn sharedCloneReceiver(cx: &Ctx, owner: &Type, name: &String) -> Bool ~ {
+    if !isAggregate(owner) || isExtern(name) { return false; };
+    i = sigIndex(cx, name);
+    if i < 0 || i >= size(cx.sigs) { return false; };
+    sig = &get(cx.sigs, i);
+    if !(*sig).paramsOk || !(*sig).hasReturn || !(*sig).sharedReceiver || size((*sig).params) != 1 { return false; };
+    return get((*sig).params, 0) = owner && (*sig).returns = owner;
 };
 
 // The index of the constructor with a name, or -1 (Mir.constructor)
@@ -502,10 +523,13 @@ fn ownsIn(cx: &Ctx, t: &Type) -> Bool ~ {
     return hasDropHelper(t) && needsDropIn(cx, t);
 };
 
-// A struct is its own constructor, and a variant has its enum's representation
-fn holdsBoxedOwner(cx: &Ctx, t: &Type, seen: &List<String>) -> Bool ~ {
+// A structural helper may call a member's Clone, but never its own type's Clone.
+fn structuralCloneCopiesBoxedOwner(cx: &Ctx, t: &Type, seen: &List<String>, member: Bool, useMemberClone: Bool) -> Bool ~ {
     if t is Type::TBoxedClosure { return true; };
-    if t is Type::TArray { return holdsBoxedOwner(cx, Box::unbox((t as Type::TArray).elem), seen); };
+    if t is Type::TArray {
+        if !structuralCloneCopiesBoxedOwner(cx, Box::unbox((t as Type::TArray).elem), seen, true, useMemberClone) { return false; };
+        return !member || !useMemberClone || !cloneCandidate(cx, t, true).ok;
+    };
     n = declaredIn(cx, t);
     if !n.ok || containsName(seen, n.text) { return false; };
     base = beforeAngle(n.text);
@@ -513,13 +537,14 @@ fn holdsBoxedOwner(cx: &Ctx, t: &Type, seen: &List<String>) -> Bool ~ {
     next = push(clone(seen), clone(n.text));
     for v in variantsOf(cx.types, n.text) {
         for f in v.fields {
-            if holdsBoxedOwner(cx, f.ty, &next) { return true; };
-            if storage && f.ty is Type::TAddr && holdsBoxedOwner(cx, Box::unbox((f.ty as Type::TAddr).inner), &next) { return true; };
+            if structuralCloneCopiesBoxedOwner(cx, f.ty, &next, true, useMemberClone) { return !member || !useMemberClone || !cloneCandidate(cx, t, true).ok; };
+            if storage && f.ty is Type::TAddr && structuralCloneCopiesBoxedOwner(cx, Box::unbox((f.ty as Type::TAddr).inner), &next, true, useMemberClone) { return !member || !useMemberClone || !cloneCandidate(cx, t, true).ok; };
         };
     };
     return false;
 };
 
+// A struct is its own constructor, and a variant has its enum's representation
 fn constructedType(cx: &Ctx, name: &String) -> Type [{ }] [{ }] {
     i = declIndex(cx, name);
     if i >= 0 && i < size(&cx.types) {
