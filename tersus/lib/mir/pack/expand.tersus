@@ -4,7 +4,7 @@ import mir::full::full { FullBlock, FullFunction, FullRecord };
 import mir::full::tokens { appendTokens, argEnd, integerAt, intToken, intsEnd, name, namesEnd, operandEnd, sliceTokens, textAt, typeEnd, word, wordIs };
 import mir::full::records { EnvEntry, envEntries, envStart, keyOrder, orderEntries, replaceEnv };
 import mir::pack::numbers { decimalAdd, decimalCmp, decimalFits, decimalInvariantError };
-import mir::pack::body { PackBinding, PackSpread, constantsOf, operandConstant, renameRow, resolveElements, rowLocals, spreadForwards, targets, usesPack };
+import mir::pack::body { PackBinding, PackSpread, constantsOf, movesClosureCaptures, operandConstant, renameRow, resolveElements, rowLocals, spreadForwards, targets, usesPack };
 import mir::pack::proofs { packProofs, proofDefineName, renameInvariantPayload, renameTerminationPayload, renameValidationPayload };
 
 struct PackExpansion {
@@ -273,6 +273,7 @@ fn expandPack(bounded: &FullRecord, packType: &String, count: Int, fun: FullFunc
     fun = orderedFunction(FullFunction { header: header, locals: ls, loops: specs, ..fun });
     st = unrollAll(ExpansionState { fun: fun, arena: arena, nextBlock: nextBlock, nextLocal: nextLocal + count, blocks: HashMap::new(), locals: HashMap::new(), loops: loops, error: "" }, pack, &es);
     if st.error != "" { return packFailure(st.fun, st.arena, st.error); };
+    if !movesClosureCaptures(&st.fun) { return packFailure(st.fun, st.arena, "a boxed closure must move a capture local after pack expansion"); };
     er = resolveElements(st.fun, st.arena, pack, &packName, packType, &es);
     if er.error != "" { return packFailure(er.fun, er.arena, er.error); };
     fw = spreadForwards(prune(orderedFunction(er.fun), false), er.arena, pack, &packName, &es);

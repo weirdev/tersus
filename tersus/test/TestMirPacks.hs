@@ -1,4 +1,4 @@
-module TestMirPacks (testMirPacks) where
+module TestMirPacks (testMirPacks, boxedPackCopiesUsing) where
 
 import Data.List (isPrefixOf, partition, sort)
 import Data.Maybe (catMaybes, listToMaybe)
@@ -10,17 +10,20 @@ import DataCodec (quote)
 import ElaboratorTool (bootstrapLoader)
 import LibPackage (libPackage)
 import qualified Mir as M
+import MirCopiesNameProfile (nameProfilePrefix)
 import MirData (readLowered, writeLowered)
+import MirPass (programData, runPassWith)
 import MirPacksOracle (Expanded (..), expandPack)
 import qualified Native
 import PackageCompile (compileModulesUsing, packageLinkInputs)
-import PackageData (Snapshot (..), resolverFromFiles)
+import PackageData (ModuleId (..), Snapshot (..), resolverFromFiles)
 import StdLib (builtinFunct)
 import qualified Syntax as S
 import TestHarness
+import TestMirCopiesFusedHarness (fusedLinkRequest)
 import TestMirCopiesParity (nativeCopiesProbe)
 import TestVariadic (variadicPrograms)
-import Types (BuiltinFunct (Rel), Rel (Eq, Lt), Type (TBool, TInt, TParam))
+import Types (BuiltinFunct (Rel), Rel (Eq, Lt), Arg (ArgType), Type (TBool, TBoxedClosure, TInt, TFn, TParam))
 import Utils
 
 asUnit :: M.Program -> M.Lowered
@@ -104,6 +107,12 @@ testMirPacks = TestList "testMirPacks"
        , corpusCase "validation statements and defines at loop indices" "f" 2
        , corpusCase "a function defined in a loop over the pack in a branch the copy drops" "f" 0
        , realCase "forwarding preserves the prefix and slice argument order" "forward" 3 forwarding
+       , TestCase "pack unrolling remaps a moved boxed capture local" $
+           compareExpansionWith 2 "fixture" (boxedCaptureLoop (M.Move (M.Local 7))) Nothing (checkRemappedCaptures "thunkAlias")
+       , TestCase "pack unrolling refuses to fold a moved boxed capture index" $
+           compareExpansion 2 "fixture" (boxedCaptureLoop (M.Move (M.Local 4))) (Just foldedCapture)
+       , boxedPackCopiesUsing "source-stage boxed pack copies" $ \request ->
+           runPassWith nativeCopiesProbe "the linker probe" ("link\n" ++ request)
        , TestCase "signed multiword loop bound and block index" (compareExpansion 1 "fixture" wideIndex Nothing)
        , TestCase "nonconstant get index is refused exactly" (compareExpansion 1 "fixture" dynamicIndex (Just unfixedIndex))
        , TestCase "reassigned get index is not folded" (compareExpansion 1 "fixture" reassignedIndex (Just unfixedIndex))
@@ -160,6 +169,105 @@ function :: [M.Local] -> [(Type, Maybe String)] -> [(Int, M.BasicBlock)] -> M.Fu
 function params decls blocks = M.Function "fixture" params (Just TInt)
     (Map.fromList (zip (map M.Local [0 ..]) (map (uncurry M.LocalDecl) decls)))
     (Map.fromList [(M.BlockId i, b) | (i, b) <- blocks]) [] [packType] [] [] [] M.emptySpec
+
+boxedPackCopiesUsing :: String -> (String -> IO (Result M.Program String)) -> Test
+boxedPackCopiesUsing label run = TestList label
+    [ TestList mode
+        [ TestCase "remaps each capture and resolves the thunk alias" $ check request (boxedCaptureLoop (M.Move (M.Local 7))) $ \result ->
+            case result of
+                Error e -> Just e
+                Ok p -> case Map.lookup "fixtureAtInts" (M.progFunctions p) of
+                    Nothing -> Just "missing variadic specialization"
+                    Just fn -> firstFailure
+                        [ checkRemappedCaptures "thunkLast" fn
+                        , testAssertTrue (Map.member "thunkLast" (M.progFunctions p))
+                        ]
+        , TestCase "refuses a capture folded from the pack index" $
+            check request (boxedCaptureLoop (M.Move (M.Local 4))) (\result -> testAssertEq result (Error (prefix ++ foldedCapture)))
+        , TestCase "refuses a copied capture in a retained template" $
+            check request (boxedCaptureLoop (M.Copy (M.Local 7))) (\result -> testAssertEq result (Error (prefix ++ malformedCapture)))
+        , TestCase "refuses a constant capture even with no copy work" $
+            check request nonMovingClosure (\result -> testAssertEq result (Error (prefix ++ malformedCapture)))
+        ]
+    | (mode, request, prefix) <-
+        [ ("merge-copies", \p -> fusedLinkRequest [(ModuleId "app" Nothing, p)], "Validation failed: ")
+        , ("copies", copiesRequest, "")
+        ]
+    ]
+  where
+    check request p expected = case request p of
+        Error e -> pure (Just e)
+        Ok wire -> expected <$> run wire
+    copiesRequest p = programData p `bindResult` \payload ->
+        let text = "pass link\ncopies " ++ show (length (lines payload)) ++ "\n" ++ payload
+         in Ok (text ++ nameProfilePrefix [text])
+
+foldedCapture, malformedCapture :: String
+foldedCapture = "a boxed closure must move a capture local after pack expansion"
+malformedCapture = "a boxed closure must move a capture local"
+
+nonMovingClosure :: M.Program
+nonMovingClosure = p
+    { M.progFunctions = Map.singleton "thunkAlias" (boxedCaptureThunk "thunkAlias")
+    , M.progBounded = Map.empty, M.progInstances = Map.empty
+    , M.progMain = (M.progMain p)
+        { M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl boxedCaptureType Nothing)
+        , M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [M.Assign (M.Local 1) (M.PackClosure (int 7) "thunkAlias")] M.Return)
+        }
+    }
+  where
+    p = boxedCaptureLoop (M.Move (M.Local 7))
+
+boxedCaptureType :: Type
+boxedCaptureType = TBoxedClosure False (TFn [] TInt)
+
+boxedCaptureThunk :: String -> M.Function
+boxedCaptureThunk name = (function [M.Local 1] [(TInt, Nothing), (TInt, Nothing)]
+    [(0, M.BasicBlock [M.Assign (M.Local 0) (M.Use (M.Copy (M.Local 1)))] M.Return)])
+    { M.fnName = name, M.fnBorrowed = [M.Local 1], M.fnTypeParams = [] }
+
+boxedCaptureLoop :: M.Operand -> M.Program
+boxedCaptureLoop operand = p
+    { M.progFunctions = Map.insert "thunk" ((boxedCaptureThunk "thunk"){M.fnTypeParams = ["T"]}) (M.progFunctions p)
+    , M.progBounded = Map.insert "thunk" (M.BoundedFn [] [] [] []) (M.progBounded p)
+    , M.progInstances = Map.fromList
+        [ ("fixtureAtInts", ("fixture", [ArgType TInt, ArgType TInt]))
+        , ("thunkAlias", ("thunk", [ArgType TInt])), ("thunkLast", ("thunk", [ArgType TInt]))
+        ]
+    , M.progMain = (M.progMain p)
+        { M.fnReturns = Just TInt
+        , M.fnLocals = Map.singleton ret (M.LocalDecl TInt Nothing)
+        , M.fnBlocks = Map.fromList
+            [ (b 0, M.BasicBlock [] (M.Call (M.Const (M.CFn "fixtureAtInts")) [int 7, int 8] ret (b 1)))
+            , (b 1, M.BasicBlock [] M.Return)
+            ]
+        }
+    }
+  where
+    p = fixture [loop] $ function [pack]
+        [ (TInt, Nothing), (TParam packType, Just "args"), (TInt, Nothing), (TInt, Nothing)
+        , (TInt, Just "i"), (TParam "..T@0", Nothing), (TBool, Nothing), (TInt, Nothing), (boxedCaptureType, Nothing)
+        ]
+        [ (0, M.BasicBlock [use lo (int 0), use hi (int 2), use ix (M.Copy lo)] (M.Goto (b 1)))
+        , (1, M.BasicBlock [M.Assign test (M.BinaryOp (M.Compare Lt) (M.Copy ix) (M.Copy hi))] (M.SwitchBool (M.Copy test) (b 2) (b 3)))
+        , (2, M.BasicBlock [use capture (M.Copy ix), M.Assign closure (M.PackClosure operand "thunkAlias"), M.Assign ix (M.BinaryOp M.Add (M.Copy ix) (int 1))] (M.Goto (b 1)))
+        , (3, M.BasicBlock [use ret (int 0)] M.Return)
+        ]
+    b = M.BlockId
+    [ret, pack, lo, hi, ix, element, test, capture, closure] = map M.Local [0..8]
+    loop = M.PackLoop (b 1) (b 2) (b 3) [b 2] [capture, closure] ix element "..T@0" lo hi Nothing
+    use l o = M.Assign l (M.Use o)
+
+checkRemappedCaptures :: String -> M.Function -> TestResult
+checkRemappedCaptures thunk f = firstFailure
+    [ testAssertEq [(Map.lookup l initializers, n) | (M.Move l, n) <- captures] [(Just 0, thunk), (Just 1, thunk)]
+    , testAssertEq (length captures) 2
+    , testAssertTrue (and [l /= M.Local 7 && (M.localType <$> Map.lookup l (M.fnLocals f)) == Just TInt | (M.Move l, _) <- captures])
+    ]
+  where
+    statements = concatMap M.blockStatements (Map.elems (M.fnBlocks f))
+    initializers = Map.fromList [(l, n) | M.Assign l (M.Use (M.Const (M.CInt n))) <- statements]
+    captures = [(o, n) | M.Assign _ (M.PackClosure o n) <- statements]
 
 wideIndex :: M.Program
 wideIndex = fixture [loop] $ function [pack]

@@ -381,7 +381,7 @@ testMirCopiesParity = TestList "testMirCopiesParity"
     , TestCase "native linked copies preserves boxed signatures, opaque clauses and last-wins aliases" $
         compareCopies "linked" Set.empty boxedSignatureProgram (Right checkBoxedSignatureCopies)
     , TestCase "pinned production fused Link and source copies rewrite a boxed thunk alias" closurePackCopies
-    , TestCase "a retained bounded closure allocation keeps its nested callback copy" retainedClosurePackCapture
+    , TestCase "a retained bounded closure allocation keeps its specialized thunk" retainedClosurePackCapture
     ]
   where
     plain = Compile.elaborateStatements [S.Return (S.Val (S.VInt 7))]
@@ -674,39 +674,30 @@ closurePackCopies = withResult (programData p) $ \packet -> withResultIO nativeC
         }
 
 retainedClosurePackCapture :: IO TestResult
-retainedClosurePackCapture = withResult (programData p) $ \plain -> do
-    let packet = unlines (map (\line -> if line == "assign 1 use const int 0" then capture "capturedAlias" else line) (lines plain))
+retainedClosurePackCapture = withResult (programData p) $ \packet -> do
     tool <- nativeCopiesProbe
     withResult tool $ \exe -> do
-        (_, oldOut, oldErr) <- runOld packet
-        (_, out, err) <- Native.runWithInputFull exe ("link\n" ++ profiledRequest (rawMergeRequest "merge-copies" packet))
-        pure (testAssertEq oldErr ""
-            <|> testAssertTrue (capture "capturedAlias" `elem` lines oldOut)
-            <|> testAssertEq err ""
+        (status, out, err) <- Native.runWithInputFull exe ("link\n" ++ profiledRequest (rawMergeRequest "merge-copies" packet))
+        pure (testAssertEq (status, err) (ExitSuccess, "")
             <|> testAssertTrue (any (isPrefixOf "function \"retain\" ") (lines out))
-            <|> testAssertTrue (capture "capturedLast" `elem` lines out)
-            <|> (if any (isPrefixOf "function \"capturedLast\" ") (lines out) then Nothing else Just "missing definition for rewritten nested callback capturedLast"))
+            <|> testAssertTrue ("assign 1 packclosure move 2 const fn \"thunkLast\"" `elem` lines out)
+            <|> testAssertTrue (any (isPrefixOf "function \"thunkLast\" ") (lines out)))
   where
-    runOld packet = do
-        seed <- cachedSeed
-        case seed of
-            Error e -> pure (ExitFailure 1, "", e)
-            Ok exe -> Native.runWithInputFull exe (rawMergeRequest "merge" packet)
-    capture alias = "assign 1 packclosure const data \"Env\" 1 \"cb\" fn " ++ quote alias ++ " const fn \"plainThunk\""
-    envType = TNamed "Env" []
+    l = M.Local
+    boxed = TBoxedClosure False (TFn [] TInt)
     retain = (template "retain")
-        { M.fnLocals = Map.insert (M.Local 1) (M.LocalDecl (TBoxedClosure False (TFn [] TInt)) Nothing) (M.fnLocals (template "retain"))
-        , M.fnBlocks = Map.adjust (\b -> b{M.blockStatements = M.Assign (M.Local 1) (M.Use (int 0)) : M.blockStatements b}) (M.BlockId 0) (M.fnBlocks (template "retain"))
+        { M.fnLocals = Map.union (Map.fromList [(l 1, M.LocalDecl boxed Nothing), (l 2, M.LocalDecl TInt Nothing)]) (M.fnLocals (template "retain"))
+        , M.fnBlocks = Map.singleton (M.BlockId 0) (block
+            [ M.Assign (l 2) (M.Use (int 7)), M.Assign (l 1) (M.PackClosure (M.Move (l 2)) "thunkAlias"), M.Assign (l 0) (M.Use (int 0)) ] M.Return)
         }
-    thunk = (function "plainThunk")
-        { M.fnParams = [M.Local 1]
-        , M.fnLocals = Map.insert (M.Local 1) (M.LocalDecl envType Nothing) (M.fnLocals (function "plainThunk"))
+    thunk = (template "thunk")
+        { M.fnParams = [l 1], M.fnBorrowed = [l 1]
+        , M.fnLocals = Map.insert (l 1) (M.LocalDecl TInt Nothing) (M.fnLocals (template "thunk"))
         }
     p = empty
-        { M.progTypes = Map.singleton "Env" (M.StructDecl [("cb", TFn [] TInt)])
-        , M.progFunctions = Map.fromList [(M.fnName f, f) | f <- [retain, thunk, template "captured"]]
-        , M.progBounded = Map.fromList [(n, bounded) | n <- ["retain", "captured"]]
-        , M.progInstances = Map.fromList [(n, ("captured", [ArgType TInt])) | n <- ["capturedAlias", "capturedLast"]]
+        { M.progFunctions = Map.fromList [(M.fnName f, f) | f <- [retain, thunk]]
+        , M.progBounded = Map.fromList [(n, bounded) | n <- ["retain", "thunk"]]
+        , M.progInstances = Map.fromList [(n, ("thunk", [ArgType TInt])) | n <- ["thunkAlias", "thunkLast"]]
         }
 
 boxedSignatureProgram :: M.Program
