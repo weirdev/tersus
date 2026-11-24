@@ -1,0 +1,35 @@
+import copiesprobe::profile::reader { readNameProfile };
+import data::reader::reader { readRecords, tokenizeMir };
+import mir::copies::worklist { makeCopiesWith };
+import mir::full::full { fullAt, printFull };
+import mir::full::tokens { quotedAt, textAt, wordIs };
+import mir::instances::complete { completeInstancesWith };
+
+fn runCopiesProbe() -> Int ~ {
+    input = readRecords(0 - 1);
+    if !input.ok { return 2; };
+    profile = readNameProfile(&input.value);
+    if !profile.ok || profile.end >= size(input.value) { return 2; };
+    header = tokenizeMir(get(&input.value, profile.end));
+    if !header.ok { return 2; };
+    linked = wordIs(&header.value, 0, "linked");
+    if !linked && !wordIs(&header.value, 0, "copies") { return 2; };
+    library = HashSet::new();
+    for i in 1..size(header.value) {
+        if !quotedAt(&header.value, i) { return 2; };
+        library = library.insert(textAt(&header.value, i));
+    };
+    rows = [];
+    for i in profile.end + 1..size(input.value) {
+        row = tokenizeMir(get(&input.value, i));
+        if !row.ok { return 2; };
+        rows = push(rows, row.value);
+    };
+    p = fullAt(&rows);
+    if !p.ok { "copies probe could not read MIR3\n".printError(); return 2; };
+    program = p.value;
+    if linked { program = completeInstancesWith(program, &profile.classes); };
+    made = makeCopiesWith(&profile.classes, program, &library);
+    if size(made.error.bytes) != 0 { made.error.printError(); "\n".printError(); return 1; };
+    printFull(&made.value); return 0;
+};

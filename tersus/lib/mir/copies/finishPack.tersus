@@ -1,0 +1,428 @@
+import data::ast::ast { AstNode, AstProof, AstValidation };
+import data::codec::codec { Token };
+import mir::full::full { FullBlock, FullFunction, FullRecord };
+import mir::full::read { noFunction };
+import mir::full::records { EnvEntry, envEntries, envTokens, keyOrder, mergeEntries, orderEntries };
+import mir::full::tokens { appendTokens, intToken, integerAt, intsEnd, name, namesEnd, numberAt, operandEnd, sliceTokens, textAt, typeEnd, word, wordIs };
+import mir::pack::expand { PackLoop, headerTypes, packLoopIntList, packLoops };
+import mir::pack::body { callDestinationAt, operandIsLocal };
+import mir::pack::proofs { PackPayload, addAtom, addName, addNumber, addPayload, addTermList, addValidation, addValidationBlock, newGhost, relCall };
+import mir::copies::finishProofs { validationBlockItems };
+import mir::copies::finishPackProofs { arithmetic, asserted, assumed, counting, elementsInValidation, getTerm, relation, sizeTerm, validationObligations };
+
+struct GenericPack { fun: FullFunction, arena: List<AstNode>, contract: FullFunction };
+struct PackLocal { id: Int, present: Bool, packName: String, listType: List<Token> };
+struct PackCfg { blocks: List<FullBlock>, locals: List<FullRecord>, nextLocal: Int, nextBlock: Int, tops: HashMap<Int, Int> };
+struct PackRows { arena: List<AstNode>, rows: List<List<Token>>, hasChecks: Bool };
+fn packSliceName() -> String ~ { return "<$packslice>"; };
+fn packConsName() -> String ~ { return "<$packcons>"; };
+fn idsTokens(xs: &List<Int>) -> List<Token> ~ {
+    out = push([], intToken(size(xs))); for x in xs { out = push(out, intToken(x)); }; return out;
+};
+fn namesTokens(xs: &List<String>) -> List<Token> ~ {
+    out = push([], intToken(size(xs))); for x in xs { out = push(out, name(clone(x))); }; return out;
+};
+fn localTypeAt(row: &List<Token>) -> Int ~ { if wordIs(row, 2, "some") { return 4; }; return 3; };
+fn localDecl(id: Int, named: Bool, n: &String, ty: &List<Token>) -> FullRecord ~ {
+    row = push(push([], word("local")), intToken(id));
+    if named { row = push(push(row, word("some")), name(clone(n))); } else { row = push(row, word("none")); };
+    return FullRecord { name: String::fromInt(id), tokens: appendTokens(row, ty) };
+};
+fn listType(param: &String) -> List<Token> ~ {
+    return push(push(push(push(push(push([], word("named")), name("List")), intToken(1)), word("type")), word("param")), name(clone(param)));
+};
+fn copyLocal(id: Int) -> List<Token> ~ { return push(push([], word("copy")), intToken(id)); };
+fn copyEntry(n: String, id: Int) -> EnvEntry ~ { return EnvEntry { name: n, value: copyLocal(id) }; };
+fn constInt(value: &String) -> List<Token> ~ { return push(push(push([], word("const")), word("int")), word(clone(value))); };
+fn oneWord(value: String) -> List<Token> ~ { return push([], word(value)); };
+fn assignment(id: Int, op: String) -> List<Token> ~ { return push(push(push([], word("assign")), intToken(id)), word(op)); };
+fn gotoRow(id: Int) -> List<Token> ~ { return push(push([], word("goto")), intToken(id)); };
+fn callRow(callee: &String, args: &List<List<Token>>, dst: Int, next: Int) -> List<Token> ~ {
+    out = push(push(push(push(push([], word("call")), word("const")), word("fn")), name(clone(callee))), intToken(size(args)));
+    for a in args { out = appendTokens(out, a); };
+    return push(push(out, intToken(dst)), intToken(next));
+};
+fn asLocalGet(row: &List<Token>, pack: Int, index: &List<Token>) -> List<Token> ~ {
+    prefix = push(push(assignment(integerAt(row, 1).value, "listop"), word("get")), intToken(2));
+    return appendTokens(appendTokens(prefix, copyLocal(pack)), index);
+};
+fn packLocal(fun: &FullFunction) -> PackLocal ~ {
+    count = 0; out = PackLocal { id: 0, present: false, packName: "", listType: [] };
+    params = packLoopIntList(&fun.header, 3);
+    for l in &fun.locals {
+        row = &l.tokens; ty = localTypeAt(row); id = integerAt(row, 1).value;
+        if wordIs(row, ty, "param") && textAt(row, ty + 1).startsWith("..") {
+            for p in &params {
+                if id = p {
+                    n = "args"; if ty = 4 { n = textAt(row, 3); };
+                    count = count + 1;
+                    out = PackLocal { id: id, present: true, packName: n, listType: listType(textAt(row, ty + 1)) };
+                };
+            };
+        };
+    };
+    if count != 1 { return PackLocal { id: 0, present: false, packName: "", listType: [] }; };
+    return out;
+};
+fn isVariadic(fun: &FullFunction) -> Bool ~ {
+    at = headerTypes(&fun.header); end = namesEnd(&fun.header, at);
+    if end >= at + 1 {
+        for i in at + 1..end { if textAt(&fun.header, i).startsWith("..") { return true; }; };
+    };
+    return false;
+};
+fn packAt(fun: &FullFunction) -> Int [{ }] [{ affirm return >= 0; }] ~ {
+    params = packLoopIntList(&fun.header, 3);
+    for index, p in &params {
+        for l in &fun.locals {
+            row = &l.tokens;
+            if integerAt(row, 1).value = p {
+                at = localTypeAt(row); if wordIs(row, at, "ref") { at = at + 1; };
+                if wordIs(row, at, "param") && textAt(row, at + 1).startsWith("..") { return index; };
+            };
+        };
+    };
+    return size(params);
+};
+fn asList(row: &List<Token>, p: Int, loops: &List<PackLoop>) -> List<Token> ~ {
+    if !wordIs(row, 0, "assign") { return clone(row); };
+    if wordIs(row, 2, "use") && wordIs(row, 3, "const") && wordIs(row, 4, "fn") && textAt(row, 5) = "$pack element" {
+        dest = integerAt(row, 1).value;
+        for lp in loops { if dest = lp.element { return asLocalGet(row, p, copyLocal(lp.index)); }; };
+    };
+    if wordIs(row, 2, "readfield") && operandIsLocal(row, 3, p) {
+        at = operandEnd(row, 3);
+        if textAt(row, at) = "$pack" { return asLocalGet(row, p, constInt(textAt(row, at + 1))); };
+    };
+    if (wordIs(row, 2, "borrow") || wordIs(row, 2, "borrowmut")) && integerAt(row, 3).value = p && numberAt(row, 4) > 0 && wordIs(row, 5, "field") && textAt(row, 6) = "$pack" {
+        out = push(sliceTokens(row, 0, 5), word("index"));
+        return appendTokens(appendTokens(out, constInt(textAt(row, 7))), sliceTokens(row, 8, size(row)));
+    };
+    return clone(row);
+};
+fn packGhosts(arena: List<AstNode>, pack: &PackLocal, loops: &List<PackLoop>, rows: &List<List<Token>>) -> PackRows ~ {
+    lines = [];
+    for row in rows {
+        if size(row) > 0 && wordIs(row, 0, "ghost") && wordIs(row, 1, "validation") {
+            at = size(row) - 1;
+            v = elementsInValidation(arena, integerAt(row, at).value, &pack.packName);
+            checks = asserted(validationObligations(v.arena, v.id, &pack.packName));
+            for proof in &checks.ids { lines = push(lines, push(sliceTokens(row, 0, at), intToken(proof))); };
+            lines = push(lines, set(clone(row), at, intToken(v.id))); arena = checks.arena;
+        } else { lines = push(lines, asList(row, pack.id, loops)); };
+    };
+    return PackRows { arena: arena, rows: lines, hasChecks: false };
+};
+fn lastRow(b: &FullBlock) -> List<Token> ~ {
+    if size(b.lines) = 0 { return []; }; return clone(get(&b.lines, size(b.lines) - 1));
+};
+fn forwardPack(st: PackCfg, block: &FullBlock, pack: &PackLocal, originals: &List<FullFunction>, fnIndex: &HashMap<String,Int>) -> PackCfg ~ {
+    row = lastRow(block); p = operandEnd(&row, 1);
+    if !wordIs(&row, 0, "call") || !wordIs(&row, 1, "const") || !wordIs(&row, 2, "fn") || p < 0 {
+        return PackCfg { blocks: push(st.blocks, clone(block)), ..st };
+    };
+    count = numberAt(&row, p);
+    if count < 0 { return PackCfg { blocks: push(st.blocks, clone(block)), ..st }; };
+    before = []; tail = []; packPos = -1; at = p + 1;
+    for i in 0..count {
+        end = operandEnd(&row, at);
+        if packPos < 0 && operandIsLocal(&row, at, pack.id) { packPos = i; };
+        arg = sliceTokens(&row, at, end);
+        if packPos < 0 { before = push(before, arg); } else { tail = push(tail, arg); };
+        at = end;
+    };
+    if size(tail) < 3 { return PackCfg { blocks: push(st.blocks, clone(block)), ..st }; };
+    callee = textAt(&row, 3); idx = HashMap::lookup(fnIndex, &callee, -1); fixed = size(before);
+    if idx >= 0 && idx < size(originals) {
+        pos = packAt(get(originals, idx)); if pos < fixed { fixed = pos; };
+    };
+    affirm fixed >= 0; affirm fixed <= size(before);
+    leading = size(before) - fixed; first = st.nextBlock; final = first + leading;
+    lines = sliceBlockRows(&block.lines, size(block.lines) - 1);
+    args = push(push(push([], clone(get(&tail, 0))), clone(get(&tail, 1))), clone(get(&tail, 2)));
+    lines = push(lines, callRow(packSliceName(), &args, st.nextLocal, first));
+    blocks = push(st.blocks, FullBlock { id: block.id, lines: lines });
+    locals = push(st.locals, localDecl(st.nextLocal, false, "", &pack.listType));
+    for k in 0..leading {
+        at = size(before) - k - 1;
+        affirm at >= fixed;
+        value = clone(get(&before, at)); prev = st.nextLocal + k;
+        cons = callRow(packConsName(), push(push([], value), copyLocal(prev)), prev + 1, first + k + 1);
+        blocks = push(blocks, FullBlock { id: first + k, lines: push([], cons) });
+        locals = push(locals, localDecl(prev + 1, false, "", &pack.listType));
+    };
+    args = sliceBlockRows(&before, fixed);
+    args = push(args, copyLocal(st.nextLocal + leading));
+    for k in 3..size(tail) { args = push(args, clone(get(&tail, k))); };
+    dst = callDestinationAt(&row);
+    call = callRow(&callee, &args, integerAt(&row, dst).value, integerAt(&row, dst + 1).value);
+    blocks = push(blocks, FullBlock { id: final, lines: push([], call) });
+    return PackCfg { blocks: blocks, locals: locals, nextLocal: st.nextLocal + leading + 1, nextBlock: final + 1, ..st };
+};
+fn sliceBlockRows(rows: &List<List<Token>>, end: Int) -> List<List<Token>> [{ affirm end <= size(rows); }] ~ {
+    out = []; if end < 0 { return out; };
+    for i in 0..end { out = push(out, clone(get(rows, i))); };
+    return out;
+};
+fn outside(lp: &PackLoop, id: Int) -> Bool ~ { for b in &lp.blocks { if b = id { return false; }; }; return true; };
+fn topOf(st: PackCfg, lp: &PackLoop) -> PackCfg ~ {
+    pre = -1; found = 0;
+    for i in 0..size(st.blocks) {
+        b = get(&st.blocks, i); row = lastRow(b);
+        if wordIs(&row, 0, "goto") && integerAt(&row, 1).value = lp.header && outside(lp, b.id) { found = found + 1; pre = i; };
+    };
+    if found != 1 || pre < 0 || pre >= size(st.blocks) { return st; };
+    b = clone(get(&st.blocks, pre)); top = st.nextLocal; below = top + 1; lo = st.nextBlock; hi = lo + 1;
+    less = appendTokens(appendTokens(push(assignment(below, "binary"), word("lt")), copyLocal(lp.hi)), copyLocal(lp.lo));
+    switch = push(push(appendTokens(oneWord("switch"), copyLocal(below)), intToken(lo)), intToken(hi));
+    lines = push(push(sliceBlockRows(&b.lines, size(b.lines) - 1), less), switch);
+    blocks = set(st.blocks, pre, FullBlock { id: b.id, lines: lines });
+    blocks = push(blocks, FullBlock { id: lo, lines: push(push([], appendTokens(assignment(top, "use"), copyLocal(lp.lo))), gotoRow(lp.header)) });
+    blocks = push(blocks, FullBlock { id: hi, lines: push(push([], appendTokens(assignment(top, "use"), copyLocal(lp.hi))), gotoRow(lp.header)) });
+    locals = push(push(st.locals, localDecl(top, false, "", oneWord("int"))), localDecl(below, false, "", oneWord("bool")));
+    tops = st.tops.insert(lp.header, top);
+    return PackCfg { blocks: blocks, locals: locals, nextLocal: below + 1, nextBlock: hi + 1, tops: tops };
+};
+fn orderBlocks(blocks: List<FullBlock>) -> List<FullBlock> ~ {
+    keys = []; for b in &blocks { keys = push(keys, String::fromInt(b.id)); };
+    out = [];
+    for i in keyOrder(&keys, true) { if i >= 0 && i < size(blocks) { out = push(out, clone(get(&blocks, i))); }; };
+    return out;
+};
+fn blankSpec(req: Int, ens: Int) -> List<Token> ~ {
+    row = push(push(push(push(push(push(push([], word("spec")), word("requires")), intToken(req)), word("ensures")), intToken(ens)), word("termination")), word("none"));
+    row = push(push(push(push(row, word("writes")), intToken(0)), word("mutparams")), intToken(0));
+    return push(push(row, word("from")), intToken(0));
+};
+fn envRow(entries: &List<EnvEntry>) -> List<Token> ~ { return appendTokens(oneWord("env"), envTokens(entries)); };
+fn makeHeader(n: String, params: &List<Int>, ty: &List<Token>, sizes: &List<String>, types: &List<String>, bor: &List<Int>, mutBor: &List<Int>) -> List<Token> ~ {
+    h = appendTokens(push(push(push([], word("function")), name(n)), word("params")), idsTokens(params));
+    h = appendTokens(push(push(h, word("returns")), word("some")), ty);
+    h = appendTokens(push(h, word("sizeparams")), namesTokens(sizes));
+    h = appendTokens(push(h, word("typeparams")), namesTokens(types));
+    h = appendTokens(push(h, word("borrowed")), idsTokens(bor));
+    if size(mutBor) = 0 { return h; };
+    h = appendTokens(push(h, word("mutborrowed")), idsTokens(mutBor));
+    return push(push(h, word("from")), intToken(0));
+};
+fn clauseBlock(arena: List<AstNode>, id: Int, pack: &String, check: Bool) -> PackPayload ~ {
+    old = validationBlockItems(&arena, id); ids = [];
+    for v in &old {
+        r = elementsInValidation(arena, v, pack); arena = r.arena;
+        if check {
+            cs = asserted(validationObligations(arena, r.id, pack)); arena = cs.arena;
+            for p in &cs.ids { ids = push(ids, p); };
+        };
+        ids = push(ids, r.id);
+    };
+    if ids = old { return PackPayload { arena: arena, id: id }; };
+    return addValidationBlock(arena, &ids);
+};
+fn appendCheckRows(rows: List<List<Token>>, ids: &List<Int>, entries: &List<EnvEntry>) -> List<List<Token>> ~ {
+    for p in ids { rows = push(rows, newGhost(p, entries)); };
+    return rows;
+};
+fn validationRows(st: PackRows, id: Int, entries: &List<EnvEntry>, pack: &String) -> PackRows ~ {
+    vs = validationBlockItems(&st.arena, id);
+    for v in &vs {
+        cs = asserted(validationObligations(st.arena, v, pack));
+        rows = appendCheckRows(st.rows, &cs.ids, entries);
+        a = assumed(cs.arena, v);
+        st = PackRows { arena: a.arena, rows: push(rows, newGhost(a.id, entries)), hasChecks: st.hasChecks || size(cs.ids) > 0 };
+    };
+    return st;
+};
+fn fieldNames(row: &List<Token>, at: Int) -> List<String> ~ {
+    ns = []; count = numberAt(row, at);
+    if count < 0 { return ns; };
+    for i in 0..count { ns = push(ns, textAt(row, at + i + 1)); };
+    return ns;
+};
+fn contractPackName(fun: &FullFunction) -> String ~ {
+    found = ""; count = 0; params = packLoopIntList(&fun.header, 3);
+    for l in &fun.locals {
+        ts = &l.tokens;
+        if wordIs(ts, 2, "some") {
+            at = 4;
+            if wordIs(ts, at, "list") { at = at + 1; } else {
+                if wordIs(ts, at, "named") && textAt(ts, at + 1) = "List" && numberAt(ts, at + 2) = 1 && wordIs(ts, at + 3, "type") { at = at + 4; } else { at = -1; };
+            };
+            if at >= 0 && wordIs(ts, at, "param") && textAt(ts, at + 1).startsWith("..") {
+                for p in &params {
+                    if p = integerAt(ts, 1).value { found = textAt(ts, 3); count = count + 1; };
+                };
+            };
+        };
+    };
+    if count = 1 { return found; };
+    return "";
+};
+fn nextLocalId(fun: &FullFunction) -> Int ~ {
+    next = 1;
+    for l in &fun.locals { id = integerAt(&l.tokens, 1).value; if id >= next { next = id + 1; }; };
+    return next;
+};
+fn packContract(fun: FullFunction, arena: List<AstNode>, result: Int) -> GenericPack ~ {
+    packName = contractPackName(&fun);
+    if packName = "" { return GenericPack { fun: fun, arena: arena, contract: noFunction() }; };
+    marker = EnvEntry { name: "$generic", value: constInt("0") };
+    env = mergeEntries(push([], marker), envEntries(&fun.env, 1));
+    withResult = mergeEntries(push([], copyEntry("return", result)), &env);
+    st = PackRows { arena: arena, rows: [], hasChecks: false };
+    st = validationRows(st, integerAt(&fun.spec, 2).value, &env, &packName);
+    st = validationRows(st, integerAt(&fun.spec, 4).value, &withResult, &packName);
+    if !st.hasChecks { return GenericPack { fun: fun, arena: st.arena, contract: noFunction() }; };
+    rows = push(push(st.rows, appendTokens(assignment(0, "use"), constInt("0"))), oneWord("return"));
+    h = &fun.header; typ = headerTypes(h); bor = namesEnd(h, typ) + 1;
+    retAt = intsEnd(h, 3) + 1; rt = oneWord("int"); sizesAt = retAt + 2;
+    if wordIs(h, retAt, "some") {
+        end = typeEnd(h, retAt + 1); rt = sliceTokens(h, retAt + 1, end); sizesAt = end + 1;
+    };
+    sizes = fieldNames(h, sizesAt); locals = push([], localDecl(0, false, "", oneWord("int")));
+    params = packLoopIntList(h, 3); ids = [];
+    for i in 0..size(params) {
+        if i = size(params) - size(sizes) { ids = push(ids, result); };
+        id = get(&params, i); ids = push(ids, id);
+    };
+    if size(sizes) = 0 { ids = push(ids, result); };
+    for l in &fun.locals {
+        for id in &params { if integerAt(&l.tokens, 1).value = id { locals = push(locals, clone(l)); }; };
+    };
+    locals = push(locals, localDecl(result, true, "return", &rt));
+    header = makeHeader(textAt(h, 1).concat("$contract"), &ids, oneWord("int"), &sizes, fieldNames(h, typ), push(packLoopIntList(h, bor), result), packLoopIntList(h, intsEnd(h, bor) + 1));
+    empty = addValidationBlock(st.arena, []);
+    contract = FullFunction { header: header, spec: blankSpec(empty.id, empty.id), env: envRow(&env), locals: locals, loops: [], blocks: push([], FullBlock { id: 0, lines: rows }) };
+    return GenericPack { fun: fun, arena: empty.arena, contract: contract };
+};
+
+struct PackLoopSpec { arena: List<AstNode>, loop: FullRecord };
+fn packLoopSpec(arena: List<AstNode>, lp: &PackLoop, top: Int, original: &List<Token>, env: &List<Token>, pack: &String) -> PackLoopSpec ~ {
+    lo = addAtom(arena, "$lo", true); i = addAtom(lo.arena, "$i", true); hi = addAtom(i.arena, "$hi", true);
+    left = relation(hi.arena, 4, lo.id, i.id); right = relation(left.arena, 4, i.id, hi.id);
+    ids = push(push([], left.id), right.id);
+    if size(original) > 0 {
+        old = clauseBlock(right.arena, integerAt(original, 5).value, pack, true);
+        for v in validationBlockItems(&old.arena, old.id) { ids = push(ids, v); };
+        return renderPackLoopSpec(old.arena, lp, top, integerAt(original, 3).value, envEntries(original, 9), &ids);
+    };
+    return renderPackLoopSpec(right.arena, lp, top, lp.body, envEntries(env, 1), &ids);
+};
+fn renderPackLoopSpec(arena: List<AstNode>, lp: &PackLoop, top: Int, body: Int, entries: &List<EnvEntry>, ids: &List<Int>) -> PackLoopSpec ~ {
+    inv = addValidationBlock(arena, ids);
+    hi = addAtom(inv.arena, "$hi", false); i = addAtom(hi.arena, "$i", false);
+    measure = arithmetic(i.arena, "Minus", hi.id, i.id, false);
+    term = counting(measure.arena, measure.id);
+    extra = push(push(push([], copyEntry("$hi", top)), copyEntry("$i", lp.index)), copyEntry("$lo", lp.lo));
+    out = push(push(push(push(push(push(push(push(push([], word("loop")), intToken(lp.header)), word("body")), intToken(body)), word("invariant")), intToken(inv.id)), word("termination")), intToken(term.id)), word("env"));
+    return PackLoopSpec { arena: term.arena, loop: FullRecord { name: String::fromInt(lp.header), tokens: appendTokens(out, envTokens(mergeEntries(&extra, entries))) } };
+};
+fn packGeneric(fun: FullFunction, arena: List<AstNode>, bounded: &FullRecord, originals: &List<FullFunction>, fnIndex: &HashMap<String,Int>) -> GenericPack ~ {
+    pack = packLocal(&fun);
+    if !pack.present {
+        result = nextLocalId(&fun);
+        return packContract(fun, arena, result);
+    };
+    loops = packLoops(&bounded.tokens); locals = []; blocks = []; nextLocal = 1; nextBlock = 1;
+    for l in &fun.locals {
+        id = integerAt(&l.tokens, 1).value; if id >= nextLocal { nextLocal = id + 1; };
+        if id = pack.id {
+            row = appendTokens(sliceTokens(&l.tokens, 0, localTypeAt(&l.tokens)), &pack.listType);
+            locals = push(locals, FullRecord { name: clone(l.name), tokens: row });
+        } else { locals = push(locals, clone(l)); };
+    };
+    for b in &fun.blocks { if b.id >= nextBlock { nextBlock = b.id + 1; }; };
+    cfg = PackCfg { blocks: blocks, locals: locals, nextLocal: nextLocal, nextBlock: nextBlock, tops: HashMap::new() };
+    for b in &fun.blocks {
+        r = packGhosts(arena, &pack, &loops, &b.lines); arena = r.arena;
+        cfg = forwardPack(cfg, FullBlock { id: b.id, lines: r.rows }, &pack, originals, fnIndex);
+    };
+    for lp in &loops { cfg = topOf(cfg, lp); };
+    specs = []; added = HashSet::new();
+    for lp in &loops {
+        old = [];
+        for s in &fun.loops { if integerAt(&s.tokens, 1).value = lp.header { old = clone(s.tokens); }; };
+        r = packLoopSpec(arena, lp, HashMap::lookup(&cfg.tops, lp.header, lp.hi), &old, &fun.env, &pack.packName);
+        arena = r.arena; specs = push(specs, r.loop); added = added.insert(lp.header);
+    };
+    for s in &fun.loops {
+        if !HashSet::contains(&added, integerAt(&s.tokens, 1).value) {
+            if size(s.tokens) > 5 {
+                r = clauseBlock(arena, integerAt(&s.tokens, 5).value, &pack.packName, true);
+                arena = r.arena; specs = push(specs, FullRecord { name: clone(s.name), tokens: set(clone(s.tokens), 5, intToken(r.id)) });
+            } else { specs = push(specs, clone(s)); };
+        };
+    };
+    keys = []; for s in &specs { keys = push(keys, clone(s.name)); };
+    ordered = [];
+    for i in keyOrder(&keys, true) { if i >= 0 && i < size(specs) { ordered = push(ordered, clone(get(&specs, i))); }; };
+    spec = fun.spec;
+    if wordIs(&spec, 6, "none") {
+        n = textAt(&fun.header, 1);
+        for b in &cfg.blocks {
+            row = lastRow(b);
+            if size(spec) > 6 && wordIs(&spec, 6, "none") && wordIs(&row, 0, "call") && wordIs(&row, 1, "const") && wordIs(&row, 2, "fn") && textAt(&row, 3) = n {
+                p = addAtom(arena, clone(pack.packName), false); s = sizeTerm(p.arena, p.id, false); r = counting(s.arena, s.id);
+                spec = set(spec, 6, intToken(r.id)); arena = r.arena;
+            };
+        };
+    };
+    for i in 0..2 {
+        at = 2 + i * 2;
+        if at >= 0 && at < size(spec) {
+            r = clauseBlock(arena, integerAt(&spec, at).value, &pack.packName, false);
+            spec = set(spec, at, intToken(r.id)); arena = r.arena;
+        };
+    };
+    fun = FullFunction { spec: spec, blocks: orderBlocks(cfg.blocks), locals: cfg.locals, loops: ordered, ..fun };
+    return packContract(fun, arena, cfg.nextLocal);
+};
+
+struct PackStub { fun: FullFunction, arena: List<AstNode> };
+struct StubTerms { arena: List<AstNode>, zero: Int, one: Int, ret: Int, xs: Int, k: Int, binder: Int };
+fn stubTerms(arena: List<AstNode>) -> StubTerms ~ {
+    zero = addNumber(arena, "0", true); one = addNumber(zero.arena, "1", true);
+    ret = addAtom(one.arena, "return", true); xs = addAtom(ret.arena, "xs", true);
+    k = addName(xs.arena, "k"); v = addPayload(k.arena, AstNode::Proof { value: AstProof::BVar { n: k.id } });
+    binder = addName(v.arena, "k");
+    return StubTerms { arena: binder.arena, zero: zero.id, one: one.id, ret: ret.id, xs: xs.id, k: v.id, binder: binder.id };
+};
+fn elementEquality(arena: List<AstNode>, t: &StubTerms, n: Int, i: Int, j: Int) -> PackPayload ~ {
+    lo = relCall(arena, 5, t.k, t.zero); hi = relCall(lo.arena, 2, t.k, n);
+    gs = addTermList(hi.arena, push(push([], lo.id), hi.id), true);
+    left = getTerm(gs.arena, t.ret, i, true); right = getTerm(left.arena, t.xs, j, true);
+    body = relCall(right.arena, 0, left.id, right.id);
+    q = addPayload(body.arena, AstNode::Proof { value: AstProof::Forall { n: t.binder, gs: gs.id, b: body.id } });
+    return addValidation(q.arena, AstValidation::ProofAssert { p: q.id });
+};
+fn makePackStub(n: String, localTy: &List<Token>, params: &List<Int>, types: &List<String>, bor: &List<Int>, req: Int, ens: Int, env: &List<EnvEntry>, locals: List<FullRecord>) -> FullFunction ~ {
+    header = makeHeader(n, params, localTy, [], types, bor, []);
+    return FullFunction { header: header, spec: blankSpec(req, ens), env: envRow(env), locals: locals, loops: [], blocks: push([], FullBlock { id: 0, lines: push([], oneWord("unreachable")) }) };
+};
+fn packSlice(arena: List<AstNode>) -> PackStub ~ {
+    t = stubTerms(arena); lo = addAtom(clone(t.arena), "lo", true); hi = addAtom(lo.arena, "hi", true);
+    n = sizeTerm(hi.arena, t.xs, true);
+    a = relation(n.arena, 4, t.zero, lo.id); b = relation(a.arena, 4, lo.id, hi.id); c = relation(b.arena, 4, hi.id, n.id);
+    req = addValidationBlock(c.arena, push(push(push([], a.id), b.id), c.id));
+    sz = sizeTerm(req.arena, t.ret, true); len = arithmetic(sz.arena, "Minus", hi.id, lo.id, true);
+    d = relation(len.arena, 0, sz.id, len.id);
+    ix = arithmetic(d.arena, "Plus", lo.id, t.k, true); q = elementEquality(ix.arena, &t, sz.id, t.k, ix.id);
+    ens = addValidationBlock(q.arena, push(push([], d.id), q.id));
+    ty = listType("..S"); int = oneWord("int");
+    locals = push(push(push(push([], localDecl(0, false, "", &ty)), localDecl(1, true, "xs", &ty)), localDecl(2, true, "lo", &int)), localDecl(3, true, "hi", &int));
+    env = orderEntries(push(push(push([], copyEntry("xs", 1)), copyEntry("lo", 2)), copyEntry("hi", 3)));
+    fun = makePackStub(packSliceName(), &ty, push(push(push([], 1), 2), 3), push([], "..S"), push([], 1), req.id, ens.id, &env, locals);
+    return PackStub { fun: fun, arena: ens.arena };
+};
+fn packCons(arena: List<AstNode>) -> PackStub ~ {
+    t = stubTerms(arena); req = addValidationBlock(clone(t.arena), []);
+    x = addAtom(req.arena, "x", true); sz = sizeTerm(x.arena, t.ret, true); n = sizeTerm(sz.arena, t.xs, true);
+    len = arithmetic(n.arena, "Plus", n.id, t.one, true); b = relation(len.arena, 0, sz.id, len.id);
+    first = getTerm(b.arena, t.ret, t.zero, true); c = relation(first.arena, 0, first.id, x.id);
+    ix = arithmetic(c.arena, "Plus", t.k, t.one, true); q = elementEquality(ix.arena, &t, n.id, ix.id, t.k);
+    ens = addValidationBlock(q.arena, push(push(push([], b.id), c.id), q.id));
+    ty = listType("..S"); element = push(push([], word("param")), name("..A"));
+    locals = push(push(push([], localDecl(0, false, "", &ty)), localDecl(1, true, "x", &element)), localDecl(2, true, "xs", &ty));
+    env = push(push([], copyEntry("x", 1)), copyEntry("xs", 2));
+    fun = makePackStub(packConsName(), &ty, push(push([], 1), 2), push(push([], "..A"), "..S"), push(push([], 1), 2), req.id, ens.id, &env, locals);
+    return PackStub { fun: fun, arena: ens.arena };
+};

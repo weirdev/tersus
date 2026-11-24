@@ -2,14 +2,14 @@
 -- from its answer, which MirMoves.finishLowered finishes
 module Lowering (lowerAccepted, finishProgram, finishProgramWith) where
 
+import qualified Data.Set as Set
 import ElaborateRequest (MirAnswer (..), Response (..), acceptedResponse)
 import ElaboratorTool (toolFailurePrefix)
-import qualified Data.Set as Set
+import Link (standaloneCopies)
 import Mir (Lowered, Program)
-import MirCopies (makeCopies, makeCopiesWith)
-import Types (Name)
 import MirData (readLoweredBytes)
 import MirMoves (checkSpawns, finishLowered)
+import Types (Name)
 import Utils
 
 -- (the elaborator's refusal to lower is the lowering's error, in its words; a unit that does not read is the tool's
@@ -25,9 +25,9 @@ lowerAccepted response = acceptedResponse response `bindResult` \accepted -> cas
 -- A program lowered on its own is the whole program, so the copies of its functions with bounds are made when it is
 -- finished; a module's are made when the program it is part of is linked (Link)
 finishProgram :: Lowered -> Result Program String
-finishProgram lowered = finishLowered lowered `bindResult` makeCopies
+finishProgram lowered = finishLowered lowered `bindResult` standaloneCopies Set.empty
 
 -- The same for a program given with the compiler's libraries among its statements: their functions with bounds are
--- validated where the program uses them (MirCopies.makeCopiesWith)
+-- validated where the program uses them.
 finishProgramWith :: Set.Set Name -> Lowered -> Result Program String
-finishProgramWith library lowered = finishLowered lowered `bindResult` makeCopiesWith library `bindResult` checkSpawns library
+finishProgramWith library lowered = finishLowered lowered `bindResult` standaloneCopies library `bindResult` checkSpawns library

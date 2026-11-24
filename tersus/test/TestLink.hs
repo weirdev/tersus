@@ -19,7 +19,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import DataCodec (quote)
 import qualified Mir as M
-import MirCopies (makeCopies, makeCopiesWith, genericKey, coveredKey)
+import MirCopiesOracle (makeCopies, makeCopiesWith, genericKey, coveredKey)
 import qualified Link as ProductionLink
 import qualified Compile
 import qualified MirLists
@@ -82,27 +82,11 @@ nativeLinkTool = modifyMVar nativeToolBox $ \cached -> case cached of
         pure (Just result, result)
 
 {-# NOINLINE actualEmitterBox #-}
-actualEmitterBox :: MVar (Maybe (Result FilePath String))
+actualEmitterBox :: MVar (Maybe FilePath)
 actualEmitterBox = unsafePerformIO (newMVar Nothing)
 
 actualEmitterTool :: IO (Result FilePath String)
-actualEmitterTool = modifyMVar actualEmitterBox $ \cached -> case cached of
-    Just tool -> pure (cached, tool)
-    Nothing -> do
-        seed <- cachedSeed
-        result <- case seed of
-            Error e -> pure (Error e)
-            Ok emitter -> do
-                owned <- Housekeeping.ownedToolWith emitter Housekeeping.emitterEntry
-                case owned of
-                    Error e -> pure (Error e)
-                    Ok program -> do
-                        let input = MirData.writeProgram program
-                            key = Housekeeping.ownedContentKey seedHash input []
-                        Native.cachedProgram "emitter" key "the actual Full pass entry" $ \output -> do
-                            ir <- Native.runWithInput emitter input
-                            case ir of Error e -> pure (Error e); Ok text -> Native.buildExecutable output text
-        pure (Just result, result)
+actualEmitterTool = memoizedTestExecutable actualEmitterBox Housekeeping.cachedSourceEmitter
 
 actualEntryRefusal :: String -> TestResult -> IO TestResult
 actualEntryRefusal input control = do
@@ -400,27 +384,41 @@ contractTypesThroughLinkWith wrap = inspect (ProductionLink.linkPrograms [(unitA
     library = empty{M.progFunctions = Map.singleton "callback" f, M.progTypes = Map.singleton "Callback" declaration}
     root = empty{M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl callbackType Nothing)}}
 
-boxedPruneRefusal :: TestResult
-boxedPruneRefusal = testAssertErrorContains "cannot prune MIR3 with boxed closure types" (ProductionLink.pruneProgram program)
+wideCallback :: Type -> Type
+wideCallback ret = TFnContract [TArrayOf TInt (SizeConst (2 ^ (80 :: Int)))] ret contract
   where
-    child = TNamed "Child" [ArgType TInt]
-    ty = boxedCallback (TFn [] child)
-    program = empty
+    contract = FnContract ["xs"] [FnClause [FnWord "closure", FnWord "closuremut", FnWord "0007"]] []
+
+boxedPruneRefusal :: TestResult
+boxedPruneRefusal = firstFailure
+    [ testAssertEq (mapResult mainLocals (ProductionLink.pruneProgram opaque)) (Ok (mainLocals opaque))
+    , testAssertErrorContains "cannot prune MIR3 with boxed closure types" (ProductionLink.pruneProgram boxed)
+    ]
+  where
+    signature = TFn [] (TNamed "Child" [ArgType TInt])
+    mainLocals = M.fnLocals . M.progMain
+    opaque = program signature
+    boxed = program (boxedCallback signature)
+    program ret = empty
         { M.progTypes = Map.singleton "Child<Int>" (M.StructDecl [("value", TInt)])
-        , M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl ty Nothing)}
+        , M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl (wideCallback ret) Nothing)}
         }
 
 boxedMonoRefusal :: IO TestResult
 boxedMonoRefusal = do
     seed <- cachedSeed
     case (seed, MirData.writeLowered (asUnit opaque), MirData.writeLowered (asUnit boxed)) of
-        (Ok emitter, Ok old, Ok new) -> do
-            (_, oldOut, oldErrors) <- Native.runWithInputFull emitter ("pass mono\n" ++ old)
-            (_, out, newErrors) <- Native.runWithInputFull emitter ("pass mono\n" ++ new)
-            (_, combined, combinedErrors) <- Native.runWithInputFull emitter ("pass mono-ownership\n" ++ new)
+        (Ok emitter, Ok opaqueInput, Ok boxedInput) -> do
+            (opaqueStatus, opaqueOut, opaqueErrors) <- Native.runWithInputFull emitter ("pass mono\n" ++ opaqueInput)
+            (_, opaqueCombined, _) <- Native.runWithInputFull emitter ("pass mono-ownership\n" ++ opaqueInput)
+            (_, out, newErrors) <- Native.runWithInputFull emitter ("pass mono\n" ++ boxedInput)
+            (_, combined, combinedErrors) <- Native.runWithInputFull emitter ("pass mono-ownership\n" ++ boxedInput)
             pure (firstFailure
-                [ testAssertEq oldErrors ""
-                , testAssertEq (mapResult M.lowProgram (readLowered oldOut)) (Ok opaque)
+                [ testAssertEq opaqueStatus ExitSuccess
+                , testAssertEq opaqueErrors ""
+                , testAssertEq (mapResult M.lowProgram (readLowered opaqueOut)) (Ok opaque)
+                -- The legacy ownership reader cannot read the wide size; compare only the Full receipt.
+                , testAssertEq (take (length opaqueOut) opaqueCombined) opaqueOut
                 , testAssertEq out "1\n"
                 , testAssertEq combined "1\n"
                 , testAssertEq newErrors "boxed closure types are not supported by the runtime MIR ABI\n"
@@ -430,10 +428,9 @@ boxedMonoRefusal = do
         (_, Error e, _) -> pure (Just e)
         (_, _, Error e) -> pure (Just e)
   where
-    contract = FnContract [] [FnClause [FnWord "closure", FnWord "closuremut", FnWord "0007"]] []
-    wrap ty = empty{M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl ty Nothing)}}
-    opaque = wrap (TFnContract [] TInt contract)
-    boxed = wrap (TFnContract [] (boxedCallback (TFn [] TInt)) contract)
+    wrap ret = empty{M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 1) (M.LocalDecl (wideCallback ret) Nothing)}}
+    opaque = wrap TInt
+    boxed = wrap (boxedCallback (TFn [] TInt))
 
 libraryBoundedRetention :: IO TestResult
 libraryBoundedRetention = do

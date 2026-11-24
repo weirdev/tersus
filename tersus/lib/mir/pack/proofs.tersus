@@ -4,7 +4,7 @@ import data::reader::reader { nameValue, validDecimal };
 import mir::full::full { FullBlock, FullFunction, FullRecord };
 import mir::full::records { EnvEntry, envStart, envEnd, envEntries, envTokens, keyOrder, listItems, mergeEntries, nodeAt, orderEntries, replaceEnv, statementAt };
 import mir::full::tokens { appendTokens, decimalText, integerAt, intToken, textAt, word, wordIs };
-import mir::pack::numbers { decimalAdd, decimalCmp, decimalMul, decimalSub };
+import mir::pack::numbers { decimalAdd, decimalCmp, decimalInvariantError, decimalMul, decimalSub };
 
 struct PackPayload { arena: List<AstNode>, id: Int };
 struct PackGhosts { arena: List<AstNode>, rows: List<List<Token>> };
@@ -32,19 +32,23 @@ fn addName(arena: List<AstNode>, text: String) -> PackPayload ~ {
     length = size(text.bytes);
     if length <= 512 { return addPayload(arena, AstNode::Name { value: AstName::Part { text: text, tail: end } }); };
     // The AST codec chunks names at 512 characters, not bytes.
-    starts = push([], 0); chars = 0;
-    for i in 0..length {
+    parts = []; start = 0; chars = 0;
+    for i in 0..length [{ affirm 0 <= start; affirm start <= i; }] {
         b = toInt(get(text.bytes, i));
         if b < 128 || b >= 192 {
-            if chars = 512 { starts = push(starts, i); chars = 0; };
+            if chars = 512 {
+                parts = push(parts, text.slice(start, i));
+                start = i; chars = 0;
+            };
             chars = chars + 1;
         };
     };
-    tail = end; stop = length;
-    for i in 0..size(starts) {
-        start = get(&starts, size(starts) - i - 1); next = size(arena);
-        arena = push(arena, AstNode::Name { value: AstName::Part { text: text.slice(start, stop), tail: tail } });
-        tail = next; stop = start;
+    parts = push(parts, text.slice(start, length));
+    tail = end;
+    for i in 0..size(parts) {
+        next = size(arena);
+        arena = push(arena, AstNode::Name { value: AstName::Part { text: clone(get(&parts, size(parts) - i - 1)), tail: tail } });
+        tail = next;
     };
     return keepPayload(arena, tail);
 };
@@ -179,47 +183,51 @@ fn fieldIndex(arena: &List<AstNode>, id: Int) -> String ~ {
     if !validDecimal(&field) || field.startsWith("-") { return ""; };
     return decimalText(&field);
 };
-fn foldProof(x: &ProofContext, arena: &List<AstNode>, id: Int) -> String ~ {
+fn proofNumber(value: String) -> Parsed<String> ~ { return Parsed<String> { value: value, pos: 0, ok: true }; };
+fn foldProof(x: &ProofContext, arena: &List<AstNode>, id: Int) -> Parsed<String> ~ {
     t = termView(arena, withoutAscription(arena, id));
     if t is PackTerm::Constant {
         node = nodeAt(arena, (t as PackTerm::Constant).v);
         if node is AstNode::Value {
             v = (node as AstNode::Value).value;
-            if v is AstValue::VInt { return decimalText(nameValue(arena, (v as AstValue::VInt).n)); };
+            if v is AstValue::VInt { return proofNumber(decimalText(nameValue(arena, (v as AstValue::VInt).n))); };
         };
     };
-    if t is PackTerm::Atom { return HashMap::lookup(&x.names, nameValue(arena, (t as PackTerm::Atom).n), ""); };
-    if t is PackTerm::Bound { return HashMap::lookup(&x.names, nameValue(arena, (t as PackTerm::Bound).n), ""); };
+    if t is PackTerm::Atom { return proofNumber(HashMap::lookup(&x.names, nameValue(arena, (t as PackTerm::Atom).n), "")); };
+    if t is PackTerm::Bound { return proofNumber(HashMap::lookup(&x.names, nameValue(arena, (t as PackTerm::Bound).n), "")); };
     if t is PackTerm::Call {
         call = t as PackTerm::Call;
         f = withoutAscription(arena, call.f);
         xs = termItems(arena, call.xs);
-        if size(xs) = 1 && isSize(arena, f) && atomNamed(arena, withoutAscription(arena, get(&xs, 0)), &x.packName) { return clone(x.countText); };
+        if size(xs) = 1 && isSize(arena, f) && atomNamed(arena, withoutAscription(arena, get(&xs, 0)), &x.packName) { return proofNumber(clone(x.countText)); };
         if size(xs) = 2 {
             op = primitiveAt(arena, f);
             if op = "Plus" || op = "Minus" || op = "Times" {
                 a = foldProof(x, arena, get(&xs, 0));
                 b = foldProof(x, arena, get(&xs, 1));
-                if a = "" || b = "" { return ""; };
-                if op = "Plus" { return decimalAdd(&a, &b); };
-                if op = "Minus" { return decimalSub(&a, &b); };
-                return decimalMul(&a, &b);
+                if !a.ok { return a; };
+                if !b.ok { return b; };
+                if a.value = "" || b.value = "" { return proofNumber(""); };
+                value = "";
+                if op = "Plus" { value = decimalAdd(&a.value, &b.value); }
+                else { if op = "Minus" { value = decimalSub(&a.value, &b.value); } else { value = decimalMul(&a.value, &b.value); }; };
+                return Parsed<String> { value: value, pos: 0, ok: value != "" };
             };
         };
     };
-    return "";
+    return proofNumber("");
 };
 fn inRange(x: &ProofContext, k: &String) -> Bool ~ {
     return decimalCmp(k, "0") >= 0 && decimalCmp(k, &x.countText) < 0;
 };
-fn definedElement(x: &ProofContext, arena: &List<AstNode>, id: Int, proof: Bool) -> String ~ {
+fn definedElement(x: &ProofContext, arena: &List<AstNode>, id: Int, proof: Bool) -> Parsed<String> ~ {
     t = termView(arena, id);
-    if !(t is PackTerm::Call) { return ""; };
+    if !(t is PackTerm::Call) { return proofNumber(""); };
     call = t as PackTerm::Call; xs = termItems(arena, call.xs);
-    if size(xs) < 1 || !atomNamed(arena, get(&xs, 0), &x.packName) { return ""; };
-    if !proof && size(xs) = 1 { return fieldIndex(arena, call.f); };
+    if size(xs) < 1 || !atomNamed(arena, get(&xs, 0), &x.packName) { return proofNumber(""); };
+    if !proof && size(xs) = 1 { return proofNumber(fieldIndex(arena, call.f)); };
     if size(xs) = 2 && isGet(arena, call.f) { return foldProof(x, arena, get(&xs, 1)); };
-    return "";
+    return proofNumber("");
 };
 fn definedOutOfRange(x: &ProofContext, arena: &List<AstNode>, id: Int) -> String ~ {
     t = termView(arena, withoutAscription(arena, id));
@@ -417,29 +425,31 @@ fn renameTerminationPayload(arena: List<AstNode>, id: Int, uses: &HashMap<String
 
 fn boundName(x: &ProofContext, old: &String, k: &String) -> String ~ {
     prefix = "<$param ".concat(&x.packType).concat("@");
-    if !old.startsWith(&prefix) { return ""; };
-    start = size(prefix.bytes); at = start;
-    while at < size(old.bytes) && toInt(get(old.bytes, at)) >= 48 && toInt(get(old.bytes, at)) <= 57 [{ }] ~ {
+    start = size(prefix.bytes); end = size(old.bytes);
+    if start > end || !old.startsWith(&prefix) { return ""; };
+    at = start;
+    while at < end && toInt(get(old.bytes, at)) >= 48 && toInt(get(old.bytes, at)) <= 57 [{ affirm 0 <= at; affirm at <= end; }] ~ {
         at = at + 1;
     };
     if at = start { return ""; };
-    rest = old.slice(at, size(old.bytes));
+    rest = old.slice(at, end);
     if !rest.startsWith(" as ") { return ""; };
     return "<$param ".concat(&x.packType).concat("#").concat(k).concat(&rest);
 };
-fn boundCallee(x: &ProofContext, arena: &List<AstNode>, f: Int, xs: &List<Int>, proof: Bool) -> String ~ {
+fn boundCallee(x: &ProofContext, arena: &List<AstNode>, f: Int, xs: &List<Int>, proof: Bool) -> Parsed<String> ~ {
     t = termView(arena, f);
-    if !(t is PackTerm::Atom) || size(xs) = 0 { return ""; };
+    if !(t is PackTerm::Atom) || size(xs) = 0 { return proofNumber(""); };
     old = nameValue(arena, (t as PackTerm::Atom).n);
     argId = get(xs, 0);
     arg = termView(arena, argId);
     if proof && arg is PackTerm::Atom {
         k = HashMap::lookup(&x.defines, nameValue(arena, (arg as PackTerm::Atom).n), "");
-        if k != "" && inRange(x, &k) { return boundName(x, &old, &k); };
+        if k != "" && inRange(x, &k) { return proofNumber(boundName(x, &old, &k)); };
     };
     k = definedElement(x, arena, argId, proof);
-    if k != "" { return boundName(x, &old, &k); };
-    return "";
+    if !k.ok { return k; };
+    if k.value != "" { return proofNumber(boundName(x, &old, &k.value)); };
+    return proofNumber("");
 };
 fn notFixed(x: &ProofContext) -> String ~ {
     return "Type error: get(".concat(&x.packName).concat(", i) in a contract or a validation statement needs an index fixed in each copy (numbers, size(").concat(&x.packName).concat("), the index of a forall over ").concat(&x.packName).concat(", and + - * of those)");
@@ -449,6 +459,9 @@ struct PackTerms { arena: List<AstNode>, id: Int, outside: String, error: String
 
 fn termSuccess(arena: List<AstNode>, id: Int) -> PackTerms ~ {
     return PackTerms { arena: arena, id: id, outside: "", error: "" };
+};
+fn failedDecimalTerm(arena: List<AstNode>) -> PackTerms ~ {
+    return PackTerms { arena: arena, id: -1, outside: "", error: decimalInvariantError() };
 };
 fn termOutside(arena: List<AstNode>, k: String) -> PackTerms ~ {
     return PackTerms { arena: arena, id: -1, outside: k, error: "" };
@@ -476,13 +489,15 @@ fn rewriteTerm(x: &ProofContext, arena: List<AstNode>, id: Int, proof: Bool) -> 
             };
             if size(xs) = 2 && isGet(&arena, c.f) {
                 k = foldProof(x, &arena, get(&xs, 1));
-                return elementTerm(x, arena, k, proof);
+                if !k.ok { return failedDecimalTerm(arena); };
+                return elementTerm(x, arena, k.value, proof);
             };
         };
         renamed = boundCallee(x, &arena, c.f, &xs, proof);
+        if !renamed.ok { return failedDecimalTerm(arena); };
         f = termSuccess(arena, c.f);
-        if renamed != "" {
-            p = addAtom(f.arena, renamed, proof);
+        if renamed.value != "" {
+            p = addAtom(f.arena, renamed.value, proof);
             f = termSuccess(p.arena, p.id);
         } else { f = rewriteTerm(x, f.arena, c.f, proof); };
         if f.error != "" { return f; };
@@ -525,8 +540,9 @@ fn rewriteTerms(x: &ProofContext, arena: List<AstNode>, id: Int, proof: Bool) ->
     return termSuccess(r.arena, r.id);
 };
 fn defineIndex(x: &ProofContext, arena: List<AstNode>, e: Int) -> PackTerms ~ {
-    k = definedElement(x, &arena, e, false);
-    if k != "" { return termOutside(arena, k); };
+    element = definedElement(x, &arena, e, false);
+    if !element.ok { return failedDecimalTerm(arena); };
+    if element.value != "" { return termOutside(arena, element.value); };
     k = definedOutOfRange(x, &arena, e);
     if k != "" { return termOutside(arena, k); };
     return rewriteTerm(x, arena, e, false);
@@ -566,7 +582,8 @@ fn mentionsIndex(x: &ProofContext, arena: &List<AstNode>, id: Int, binder: &Stri
     };
     return false;
 };
-fn guardBound(arena: &List<AstNode>, guards: &List<Int>, binder: &String, rel: Int, indexAt: Int) -> Int ~ {
+fn guardBound(arena: &List<AstNode>, guards: &List<Int>, binder: &String, rel: Int, indexAt: Int) -> Int
+    [{ affirm 0 <= indexAt; affirm indexAt <= 1; }] ~ {
     for g in guards {
         t = termView(arena, g);
         if t is PackTerm::Call {
@@ -715,7 +732,9 @@ fn rewriteValidation(x: &ProofContext, arena: List<AstNode>, id: Int) -> PackVal
                 if lo < 0 { lo = guardBound(&arena, &guards, &binder, 5, 0); };
                 hi = guardBound(&arena, &guards, &binder, 2, 0);
                 if hi < 0 { hi = guardBound(&arena, &guards, &binder, 3, 1); };
-                k = foldProof(x, &arena, lo); upper = foldProof(x, &arena, hi);
+                lower = foldProof(x, &arena, lo); higher = foldProof(x, &arena, hi);
+                if !lower.ok || !higher.ok { return PackValidations { arena: arena, items: [], error: decimalInvariantError() }; };
+                k = lower.value; upper = higher.value;
                 if k = "" || upper = "" {
                     error = "Type error: a forall over the elements of ".concat(&x.packName).concat(" is written forall i in lo..hi with bounds fixed in each copy (numbers, size(").concat(&x.packName).concat("), and + - * of those)");
                     return PackValidations { arena: arena, items: [], error: error };
@@ -727,6 +746,7 @@ fn rewriteValidation(x: &ProofContext, arena: List<AstNode>, id: Int) -> PackVal
                     if w.error != "" { return w; };
                     for item in w.items { items = push(items, PackValidation { id: item.id, entries: clone(item.entries) }); };
                     arena = w.arena; k = decimalAdd(&k, "1");
+                    if k = "" { return PackValidations { arena: arena, items: [], error: decimalInvariantError() }; };
                 };
                 return PackValidations { arena: arena, items: items, error: "" };
             };
@@ -843,7 +863,7 @@ fn validationBlock(x: &ProofContext, arena: List<AstNode>, root: Int) -> PackVal
     return PackValidationBlock { arena: r.arena, id: r.id, entries: entries, error: "" };
 };
 
-struct PackDefines { arena: List<AstNode>, defines: HashMap<String, String> };
+struct PackDefines { arena: List<AstNode>, defines: HashMap<String, String>, error: String };
 
 fn emptyProofNames() -> HashMap<String, String> ~ { return HashMap::new(); };
 fn globalDefines(x: ProofContext, arena: List<AstNode>, blocks: &List<FullBlock>, known: &HashMap<Int, List<Token>>) -> PackDefines ~ {
@@ -859,6 +879,7 @@ fn globalDefines(x: ProofContext, arena: List<AstNode>, blocks: &List<FullBlock>
                     else {
                         x = ProofContext { names: namesIn(row, known), ..x };
                         r = defineIndex(&x, arena, d.e);
+                        if r.error = decimalInvariantError() { return PackDefines { arena: r.arena, defines: defines, error: r.error }; };
                         if r.outside != "" { defines = defines.insert(clone(n), r.outside); };
                         arena = r.arena;
                         seen = seen.insert(n);
@@ -867,26 +888,30 @@ fn globalDefines(x: ProofContext, arena: List<AstNode>, blocks: &List<FullBlock>
             };
         };
     };
-    return PackDefines { arena: arena, defines: defines };
+    return PackDefines { arena: arena, defines: defines, error: "" };
 };
 
 struct PackProofBlock { arena: List<AstNode>, lines: List<List<Token>>, error: String };
 
 fn walkProofBlock(x: ProofContext, arena: List<AstNode>, lines: &List<List<Token>>, known: &HashMap<Int, List<Token>>) -> PackProofBlock ~ {
-    out = []; place = "";
+    out = []; place = ""; prefix = "$pack read at "; from = size(prefix.bytes);
     for row in lines {
         id = ghostValidationAt(row);
         if id < 0 { out = push(out, clone(row)); }
         else {
+            at = envEnd(row, 2);
+            if at < 0 || at >= size(row) {
+                return PackProofBlock { arena: arena, lines: [], error: "internal compiler error: a pack copy has an invalid validation row" };
+            };
             n = proofDefineName(&arena, row);
-            if n.ok && n.value.startsWith("$pack read at ") {
-                place = " at line ".concat(n.value.slice(14, size(n.value.bytes)));
+            to = size(n.value.bytes);
+            if n.ok && from <= to && n.value.startsWith(&prefix) {
+                place = " at line ".concat(n.value.slice(from, to));
             } else {
                 x = ProofContext { names: namesIn(row, known), place: clone(place), ..x };
                 w = rewriteValidation(&x, arena, id);
                 if w.error != "" { return PackProofBlock { arena: w.arena, lines: [], error: w.error }; };
                 for i in &w.items {
-                    at = envEnd(row, 2);
                     updated = set(clone(row), at, intToken(i.id));
                     out = push(out, replaceProofEnv(&updated, &i.entries, true));
                 };
@@ -895,6 +920,7 @@ fn walkProofBlock(x: ProofContext, arena: List<AstNode>, lines: &List<List<Token
                     v = assignmentAt(&arena, id);
                     if v is AstValidation::AssignProofVar {
                         r = defineIndex(&x, arena, (v as AstValidation::AssignProofVar).e);
+                        if r.error = decimalInvariantError() { return PackProofBlock { arena: r.arena, lines: [], error: r.error }; };
                         arena = r.arena;
                         defines = x.defines;
                         if r.outside = "" { defines = defines.remove(&n.value); }
@@ -908,6 +934,9 @@ fn walkProofBlock(x: ProofContext, arena: List<AstNode>, lines: &List<List<Token
     return PackProofBlock { arena: arena, lines: out, error: "" };
 };
 fn packProofs(fun: FullFunction, arena: List<AstNode>, known: &HashMap<Int, List<Token>>, packName: &String, packType: &String, count: Int) -> PackProofResult ~ {
+    if size(fun.spec) <= 4 {
+        return PackProofResult { fun: fun, arena: arena, error: "internal compiler error: a pack copy has an incomplete function specification" };
+    };
     x = ProofContext { packName: clone(packName), packType: clone(packType), count: count, countText: String::fromInt(count),
         names: HashMap::new(), defines: HashMap::new(), place: " in a contract" };
     requires = validationBlock(&x, arena, integerAt(&fun.spec, 2).value);
@@ -919,11 +948,18 @@ fn packProofs(fun: FullFunction, arena: List<AstNode>, known: &HashMap<Int, List
     env = replaceProofEnv(&fun.env, &additions, false);
     x = ProofContext { place: "", ..x };
     globals = globalDefines(clone(x), ensures.arena, &fun.blocks, known);
+    if globals.error != "" { return PackProofResult { fun: fun, arena: globals.arena, error: globals.error }; };
     x = ProofContext { defines: globals.defines, ..x }; arena = globals.arena;
     loopKeys = []; for l in &fun.loops { loopKeys = push(loopKeys, textAt(&l.tokens, 1)); };
     loops = [];
     for i in keyOrder(&loopKeys, true) {
+        if i < 0 || i >= size(fun.loops) {
+            return PackProofResult { fun: fun, arena: arena, error: "internal compiler error: a pack copy has an invalid loop order" };
+        };
         l = get(&fun.loops, i);
+        if size(l.tokens) <= 5 {
+            return PackProofResult { fun: fun, arena: arena, error: "internal compiler error: a pack copy has an incomplete loop specification" };
+        };
         context = ProofContext { names: namesIn(&l.tokens, known), ..clone(x) };
         r = validationBlock(&context, clone(arena), integerAt(&l.tokens, 5).value);
         if r.error != "" { return PackProofResult { fun: fun, arena: r.arena, error: r.error }; };
@@ -934,6 +970,9 @@ fn packProofs(fun: FullFunction, arena: List<AstNode>, known: &HashMap<Int, List
     blockKeys = []; for b in &fun.blocks { blockKeys = push(blockKeys, String::fromInt(b.id)); };
     blocks = [];
     for i in keyOrder(&blockKeys, true) {
+        if i < 0 || i >= size(fun.blocks) {
+            return PackProofResult { fun: fun, arena: arena, error: "internal compiler error: a pack copy has an invalid block order" };
+        };
         b = get(&fun.blocks, i);
         r = walkProofBlock(clone(x), clone(arena), &b.lines, known);
         if r.error != "" { return PackProofResult { fun: fun, arena: r.arena, error: r.error }; };

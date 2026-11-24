@@ -1,0 +1,203 @@
+import data::ast::ast { AstNode };
+import data::codec::codec { Token };
+import mir::full::full { FullFunction, FullProgram };
+import mir::full::tokens { argEnd, decimalText, name, normalizeType, numberAt, sliceTokens, textAt, typeEnd, word, wordIs };
+import mir::instances::names { InstanceNameClasses };
+import mir::instances as instances;
+import mir::mono::tokens { monoForallBody };
+
+struct Maybe<T> { found: Bool, value: T };
+
+struct CopyBinding { name: String, tokens: List<Token> };
+impl Clone for CopyBinding { };
+struct CopyKey { function: String, types: List<List<Token>>, sizes: List<String> };
+impl Clone for CopyKey { };
+struct NamedCopy { key: CopyKey, name: String };
+impl Clone for NamedCopy { };
+struct CopyInstance { function: String, args: List<List<Token>> };
+impl Clone for CopyInstance { };
+struct BoundCall { param: String, trait: String, method: String };
+struct ImplCheck { trait: String, owner: String, method: String };
+
+struct CopyAncestor { function: String, bigness: Int };
+impl Clone for CopyAncestor { };
+
+struct CopyCx {
+    named: List<NamedCopy>, types: List<CopyBinding>, sizes: List<CopyBinding>,
+    lifted: HashMap<String, String>, copy: String, chain: List<CopyAncestor>,
+    blockTypes: HashMap<Int, List<CopyBinding>>, localTypes: HashMap<Int, List<CopyBinding>>
+};
+impl Clone for CopyCx { };
+
+struct CopyNeed { key: CopyKey, chain: List<CopyAncestor> };
+impl Clone for CopyNeed { };
+
+struct CopyMade { generic: String, fun: FullFunction, lifted: List<FullFunction> };
+impl Clone for CopyMade { };
+
+struct DispatchEdge { stub: String, callee: String };
+impl Clone for DispatchEdge { };
+struct CopiedFunction { fun: FullFunction, needs: List<CopyNeed>, dispatch: List<DispatchEdge>, arena: List<AstNode>, error: String };
+
+fn containsDispatch(edges: &List<DispatchEdge>, edge: &DispatchEdge) -> Bool ~ {
+    for prior in edges {
+        if prior.stub = edge.stub && prior.callee = edge.callee { return true; };
+    };
+    return false;
+};
+fn appendDispatch(edges: List<DispatchEdge>, more: &List<DispatchEdge>) -> List<DispatchEdge> ~ {
+    for edge in more {
+        if !containsDispatch(&edges, edge) { edges = push(edges, clone(edge)); };
+    };
+    return edges;
+};
+struct CopiesResult { value: FullProgram, error: String };
+
+fn copyLookup(bindings: &List<CopyBinding>, key: &String) -> List<Token> ~ {
+    for b in bindings { if b.name = key { return clone(b.tokens); }; };
+    return [];
+};
+
+fn instanceIndex(program: &FullProgram, key: &String) -> Int ~ {
+    for i in 0..size(program.instances) { if get(program.instances, i).name = key { return i; }; };
+    return -1;
+};
+
+fn instanceAt(program: &FullProgram, key: &String) -> Maybe<CopyInstance> ~ {
+    i = instanceIndex(program, key);
+    if i < 0 || i >= size(program.instances) { return Maybe<CopyInstance> { found: false, value: CopyInstance { function: "", args: [] } }; };
+    record = get(program.instances, i); ts = &record.tokens;
+    n = numberAt(ts, 3); at = 4; args = [];
+    if n < 0 { return Maybe<CopyInstance> { found: false, value: CopyInstance { function: "", args: [] } }; };
+    for j in 0..n {
+        end = argEnd(ts, at);
+        if end <= at { return Maybe<CopyInstance> { found: false, value: CopyInstance { function: "", args: [] } }; };
+        args = push(args, sliceTokens(ts, at, end)); at = end;
+    };
+    return Maybe<CopyInstance> { found: true, value: CopyInstance { function: textAt(ts, 2), args: args } };
+};
+
+fn concreteKey(instance: &CopyInstance) -> Maybe<CopyKey> ~ {
+    types = []; sizes = [];
+    for arg in &instance.args {
+        if wordIs(arg, 0, "type") {
+            ty = normalizeType(sliceTokens(arg, 1, size(arg)));
+            if mentionsParam(&ty) { return Maybe<CopyKey> { found: false, value: CopyKey { function: "", types: [], sizes: [] } }; };
+            types = push(types, ty);
+        } else {
+            if !wordIs(arg, 0, "size") || !wordIs(arg, 1, "c") { return Maybe<CopyKey> { found: false, value: CopyKey { function: "", types: [], sizes: [] } }; };
+            sizes = push(sizes, decimalText(textAt(arg, 2)));
+        };
+    };
+    return Maybe<CopyKey> { found: true, value: CopyKey { function: clone(instance.function), types: types, sizes: sizes } };
+};
+
+fn sameTokens(a: &List<Token>, b: &List<Token>) -> Bool ~ {
+    if size(a) != size(b) { return false; };
+    for i in 0..size(a) {
+        x = get(a, i); y = get(b, i);
+        if x.quoted != y.quoted || x.text != y.text { return false; };
+    };
+    return true;
+};
+fn sameCopyType(a: &List<Token>, b: &List<Token>) -> Bool ~ {
+    return sameTokens(normalizeType(a), normalizeType(b));
+};
+fn sameKey(a: &CopyKey, b: &CopyKey) -> Bool ~ {
+    if a.function != b.function || size(a.types) != size(b.types) || size(a.sizes) != size(b.sizes) { return false; };
+    for i in 0..size(a.types) { if !sameCopyType(get(a.types, i), get(b.types, i)) { return false; }; };
+    for i in 0..size(a.sizes) { if decimalText(get(a.sizes, i)) != decimalText(get(b.sizes, i)) { return false; }; };
+    return true;
+};
+
+fn copyName(classes: &InstanceNameClasses, key: &CopyKey) -> String ~ {
+    out = clone(key.function).concat("["); sep = "";
+    for ty in &key.types { out = out.concat(&sep).concat(instances::names::renderCopyType(classes, ty, 0, true)); sep = ", "; };
+    for s in &key.sizes { out = out.concat(&sep).concat(decimalText(s)); sep = ", "; };
+    return out.concat("]");
+};
+fn renderCopyType(classes: &InstanceNameClasses, ty: &List<Token>) -> String ~ { return instances::names::renderCopyType(classes, ty, 0, false); };
+fn nameOf(classes: &InstanceNameClasses, named: &List<NamedCopy>, key: &CopyKey) -> String ~ {
+    for i in 0..size(named) {
+        item = get(named, size(named) - 1 - i);
+        if sameKey(&item.key, key) { return item.name.slice(0, size(item.name.bytes)); };
+    };
+    return copyName(classes, key);
+};
+
+fn mentionsParam(ty: &List<Token>) -> Bool ~ { return paramAt(ty, 0); };
+fn paramAt(ty: &List<Token>, at: Int) -> Bool ~ {
+    tag = textAt(ty, at);
+    if tag = "param" { return true; };
+    if tag = "forall" { return paramAt(ty, monoForallBody(ty, at)); };
+    if tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "list" || tag = "box" { return paramAt(ty, at + 1); };
+    if tag = "named" {
+        n = numberAt(ty, at + 2); p = at + 3;
+        if n < 0 { return false; };
+        for i in 0..n {
+            if wordIs(ty, p, "type") && paramAt(ty, p + 1) { return true; };
+            p = argEnd(ty, p);
+        };
+    };
+    if tag = "fn" {
+        n = numberAt(ty, at + 1); p = at + 2;
+        if n < 0 { return false; };
+        for i in 0..n + 1 { if paramAt(ty, p) { return true; }; p = typeEnd(ty, p); };
+    };
+    return false;
+};
+fn typeBigness(ty: &List<Token>) -> Int ~ { return bignessAt(ty, 0); };
+fn bignessAt(ty: &List<Token>, p: Int) -> Int ~ {
+    tag = textAt(ty, p);
+    if tag = "array" || tag = "addr" || tag = "block" || tag = "uninit" || tag = "ref" || tag = "mutref" || tag = "list" || tag = "box" {
+        return 1 + bignessAt(ty, p + 1);
+    };
+    if tag = "named" {
+        n = numberAt(ty, p + 2); at = p + 3; result = 1;
+        if n < 0 { return result; };
+        for i in 0..n {
+            if wordIs(ty, at, "type") { result = result + bignessAt(ty, at + 1); };
+            at = argEnd(ty, at);
+        };
+        return result;
+    };
+    if tag = "fn" {
+        n = numberAt(ty, p + 1); at = p + 2; result = 1;
+        if n < 0 { return result; };
+        for i in 0..n + 1 { result = result + bignessAt(ty, at); at = typeEnd(ty, at); };
+        return result;
+    };
+    return 1;
+};
+
+fn copyFind(text: &String, needle: &String, start: Int) -> Int ~ {
+    n = size(text.bytes); m = size(needle.bytes);
+    if start < 0 || m <= 0 || start > n - m { return -1; };
+    for i in start..n - m + 1 {
+        equal = true;
+        for j in 0..m { if get(text.bytes, i + j) != get(needle.bytes, j) { equal = false; }; };
+        if equal { return i; };
+    };
+    return -1;
+};
+fn boundCallParts(n: &String) -> Maybe<BoundCall> ~ {
+    if !n.startsWith("<$param ") { return Maybe<BoundCall> { found: false, value: BoundCall { param: "", trait: "", method: "" } }; };
+    p = copyFind(n, " as ", 8); if p <= 8 { return Maybe<BoundCall> { found: false, value: BoundCall { param: "", trait: "", method: "" } }; };
+    q = copyFind(n, ">::", p + 4); if q <= p + 4 || q + 3 >= size(n.bytes) { return Maybe<BoundCall> { found: false, value: BoundCall { param: "", trait: "", method: "" } }; };
+    return Maybe<BoundCall> { found: true, value: BoundCall { param: n.slice(8, p), trait: n.slice(p + 4, q), method: n.slice(q + 3, size(n.bytes)) } };
+};
+fn companionOf(n: &String) -> Maybe<String> ~ {
+    if !n.startsWith("<") { return Maybe<String> { found: false, value: "" }; };
+    p = copyFind(n, " ", 1); if p <= 1 || copyFind(n, " as ", 1) != p { return Maybe<String> { found: false, value: "" }; };
+    q = copyFind(n, ">", p + 4);
+    if q <= p + 4 || q + 3 >= size(n.bytes) || copyFind(n, ">::", q) != q { return Maybe<String> { found: false, value: "" }; };
+    owner = n.slice(1, p);
+    if copyFind(&owner, "<", 0) >= 0 { return Maybe<String> { found: false, value: "" }; };
+    return Maybe<String> { found: true, value: n.slice(p + 4, q).concat(" for ").concat(&owner).concat("::").concat(n.slice(q + 3, size(n.bytes))) };
+};
+fn parseImplCheckName(n: &String) -> Maybe<ImplCheck> ~ {
+    p = copyFind(n, " for ", 0); if p < 0 { return Maybe<ImplCheck> { found: false, value: ImplCheck { trait: "", owner: "", method: "" } }; };
+    q = copyFind(n, "::", p + 5);
+    if q < p + 5 || q + 2 > size(n.bytes) { return Maybe<ImplCheck> { found: false, value: ImplCheck { trait: "", owner: "", method: "" } }; };
+    return Maybe<ImplCheck> { found: true, value: ImplCheck { trait: n.slice(0, p), owner: n.slice(p + 5, q), method: n.slice(q + 2, size(n.bytes)) } };
+};
