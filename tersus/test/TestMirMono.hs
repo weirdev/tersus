@@ -14,6 +14,7 @@ import MirHousekeeping (Tool (..), monomorphizeWith, ownershipTool, toolProgram,
 import MirMono (monomorphizeForValidation)
 import qualified MirMonoOracle as Oracle
 import Native (runWithInputFull)
+import PreludeSource (stdName)
 import qualified Syntax as S
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms, unvalidatedPrograms)
@@ -79,7 +80,7 @@ sourceStorageProvenance lower = case lower True source of
     Ok raw ->
         let mono = monomorphizeForValidation raw
             decoded = writeLowered (unitOf raw) `bindResult` readLowered
-         in testAssertTrue (Map.member "List" (progCaptureStorage raw))
+         in testAssertTrue (Map.member (stdName "core/types" "List") (progCaptureStorage raw))
             <> testAssertTrue (any ("keep<" `isPrefixOf`) (Map.keys (progFunctions mono)))
             <> testAssertEq (progCaptureStorage mono) (progCaptureStorage raw)
             <> testAssertEq (validateCompiled raw) (Ok ())

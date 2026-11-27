@@ -385,7 +385,7 @@ companion = case lowerSource True (concat
         , "ys = [[8]]; rs = [&mut ys]; zs = [[9]]; b = Box::new(&mut zs); "
         , "return size(xs) + size(h.xs) + size(rs) + size(*Box::unbox(b));"
         ]) of
-    Ok p -> p
+    Ok p -> monomorphizeForValidation p
     Error e -> error ("the checked storage companion does not compile: " ++ e)
 {-# NOINLINE companion #-}
 

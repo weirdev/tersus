@@ -22,7 +22,7 @@ import System.IO (hClose)
 import System.Posix.Files (setFileMode)
 import qualified PackageCompile as Package
 import Pretty (renderType)
-import PreludeSource (elaboratePackageFiles)
+import PreludeSource (elaboratePackageFiles, stdName)
 import qualified Syntax as S
 import Types
 import Differential
@@ -386,17 +386,19 @@ packageAssembly pkg = do
         injected = pkg{libPrograms = Map.insert "string" withBoth (libPrograms pkg)}
     cutover <- resultEither (Package.compileModulesUsing capture (Ok injected) assemblySnapshot)
     (libraries, units) <- resultEither (Package.packageLinkInputs cutover)
-    types <- lookupOr "cached types unit" "types" (libPrograms pkg)
-    let storage = Map.restrictKeys (M.progGenerics types) (Set.fromList ["List", "Box"])
+    core <- lookupOr "cached core unit" "core" (libPrograms pkg)
+    let listName = stdName "core/types" "List"
+        boxName = stdName "core/types" "Box"
+        storage = Map.restrictKeys (M.progGenerics core) (Set.fromList [listName, boxName])
         expectedUnit name = (,) (libModuleId name) <$> case name of
-            "types" -> Right types{M.progCaptureStorage = storage}
+            "core" -> Right core{M.progCaptureStorage = storage}
             "string" -> Right withRootShadow
             _ -> lookupOr "cached unit" name (libPrograms pkg)
     expected <- traverse expectedUnit names
     require (libraries == expected) "library units did not keep only the first contributor's exclusions"
-    require (Map.keysSet storage == Set.fromList ["List", "Box"] && Map.null (M.progCaptureStorage types)) "only the selected types unit should gain compiler storage provenance"
-    let stripped = stripDeclaredFromUnits ["Box"] libraries
-    require (map (Map.keys . M.progCaptureStorage . snd) stripped == [["List"], [], [], [], []]) "shadowing Box must also remove its storage provenance"
+    require (Map.keysSet storage == Set.fromList [listName, boxName] && Map.null (M.progCaptureStorage core)) "only the selected core unit should gain compiler storage provenance"
+    let stripped = stripDeclaredFromUnits [boxName] libraries
+    require (map (Map.keys . M.progCaptureStorage . snd) stripped == [[listName], [], [], []]) "shadowing Box must also remove its storage provenance"
     require (map fst units == [leaf, ModuleId "assembly" (Just "left"), ModuleId "assembly" (Just "right"), vendor, root]) ("unexpected Link unit order: " ++ show (map fst units))
 
 packageDecoderRefusals :: Either String ()
