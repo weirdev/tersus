@@ -44,7 +44,7 @@ probeCache = unsafePerformIO (newMVar Nothing)
 
 nativeCopiesProbe :: IO (Result FilePath String)
 nativeCopiesProbe = memoizedTestExecutable probeCache $ do
-    sources <- mirSources ["copies", "pack", "instances", "link"]
+    sources <- mirSources ["copies", "pack", "instances", "link", "reachability"]
     copies <- readFile "dev/mir-copies/probe.tersus"
     audit <- readFile "dev/mir-copies-fused/audit.tersus"
     link <- readFile "dev/mir-copies-fused/driver.tersus"
@@ -167,7 +167,7 @@ mergeAuditRequest :: String -> Result String String
 mergeAuditRequest source = case dropWhile (/= signature) (lines source) of
     _ : body -> case break (== "};") body of
         (handler, _ : _) -> case break (== copiesBranch) handler of
-            (parser, suffix) | suffix == productionSuffix -> Ok (unlines (imports ++ [auditSignature] ++ parser ++ auditSuffix))
+            (parser, suffix) | suffix == productionSuffix -> Ok (unlines (imports ++ [auditSignature, "    copies = false;"] ++ parser ++ auditSuffix))
             _ -> bad
         _ -> bad
     _ -> bad
@@ -345,8 +345,8 @@ asUnit :: M.Program -> M.Lowered
 asUnit p = M.Lowered p Set.empty Set.empty Set.empty Set.empty Set.empty Set.empty []
 
 fromStatements :: String -> [S.Statement] -> Result M.Lowered String
-fromStatements declarations statements = Compile.parseSourceParts True declarations `bindResult` \(_, library, body) ->
-    Compile.elaborateStatements (library ++ body ++ statements)
+fromStatements declarations statements = Compile.parseSourcePartsNoPrelude True True declarations `bindResult` \(_, _, body) ->
+    Compile.elaborateStatements (body ++ statements)
 
 testMirCopiesParity :: Test
 testMirCopiesParity = TestList "testMirCopiesParity"

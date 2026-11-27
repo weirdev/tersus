@@ -62,8 +62,29 @@ monoWith finish completeTypes program
     plain' = map fst redirected
     -- (the drop, clone and deref of a struct with types or sizes are the copies of its checked ones for each instance of the
     -- struct that the program has: native code calls a drop where a value of that instance is freed, which no call in the
-    -- program says; the instance's facts then name the copies)
-    (instances, roleKeys) = withRoles (build program (mainNeeds ++ concatMap snd redirected) Map.empty) Map.empty (4 :: Int)
+    -- program says; the instance's facts then name the copies. Without checked facts, an unchecked Drop is named for the base.)
+    (instances, roleKeys) = case progOwnership program of
+        Just _ -> withRoles (build program (mainNeeds ++ concatMap snd redirected) Map.empty) Map.empty (4 :: Int)
+        Nothing -> (Map.mapWithKey dropName (withDrops (build program (mainNeeds ++ concatMap snd redirected) Map.empty) (4 :: Int)), Map.empty)
+    withDrops done k =
+        let p = withInstances program{progFunctions = Map.fromList [(fnName f, f) | f <- plain' ++ Map.elems done], progMain = main'}
+            keys = [key | n <- Map.keys (progTypes p), not (symbolic n), Just key <- [dropKey n], Map.notMember key done]
+         in if null keys || k <= 0 then done else withDrops (build program keys done) (k - 1)
+    dropKey n = do
+        base <- Just (takeWhile (/= '<') n)
+        let name = "<" ++ base ++ " as Drop>::drop"
+        f <- Map.lookup name (progFunctions program)
+        self <- case fnParams f of
+            p : _ -> Just p
+            [] -> Nothing
+        selfTy <- localType <$> Map.lookup self (fnLocals f)
+        let bindings = match selfTy (Map.findWithDefault (TNamed n []) n namedTypes)
+        tys <- mapM (`lookup` bindings) (fnTypeParams f)
+        Just (name, tys, [])
+    dropName (name, _, _) f
+        | isDropName name, self : _ <- fnParams f, Just (TNamed base args) <- localType <$> Map.lookup self (fnLocals f) = f{fnName = "<" ++ instanceName base args ++ " as Drop>::drop"}
+        | otherwise = f
+    isDropName name = let suffix = " as Drop>::drop" in reverse suffix == take (length suffix) (reverse name)
     withRoles done owners k =
         let p = withInstances program{progFunctions = Map.fromList [(fnName f, f) | f <- plain' ++ Map.elems done], progMain = main'}
             held = namedTypesByName p

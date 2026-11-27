@@ -198,34 +198,38 @@ boxedWrapperCloneRefused nested receiver result = do
 
 boxedWrapperCopy :: Bool -> String -> String -> IO (Result (M.Program, M.Program) String)
 boxedWrapperCopy nested receiver result = do
-    compiled <- if stdClone
-        then compileOnce (boxedWrapperBody receiver result ++ replacement)
-        else programFromFiles ownRoleEntry
-            [ ("app/package.tersus", "noPrelude = true;\nList = storage::List;\nClone = own::Clone;\n")
-            , ("app/own/own.tersus", "trait Clone { fn clone(self: " ++ receiver ++ ") -> Self; };\n")
-            , ("app/storage/storage.tersus", "struct List<T> { addr: Addr<T>, len: Int, cap: Int, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap; affirm count(blk) = len; affirm len >= 0; affirm len <= cap; affirm forall j in 0..len: filled(blk, j) = true; affirm forall j in len..cap: filled(blk, j) = false; }];\n")
-            , (ownRoleEntry, "import app::own { Clone };\nimport app::storage { List };\n" ++ boxedWrapperBody receiver result ++ replacement)
-            ]
+    compiled <- programFromFiles ownRoleEntry
+        [ ("app/package.tersus", "noPrelude = true;\nClone = own::Clone;\n")
+        , ("app/own/own.tersus", "trait Clone { fn clone(self: " ++ receiver ++ ") -> Self; };\n")
+        , (ownRoleEntry, "import app::own { Clone };\n" ++ boxedWrapperBody receiver result ++ replacement)
+        ]
     pure $ compiled `bindResult` \program -> ownedOfProgram program `bindResult` \owned ->
         if insertedCopy owned then Ok (program, owned) else Error ("ownership did not insert a copy of " ++ owner)
   where
-    stdClone = receiver == "&Self"
-    owner = (if stdClone then "" else "app$main$") ++ (if nested then "Shelf" else "Callback")
+    owner = "app$main$" ++ (if nested then "Shelf" else "Callback")
     insertedCopy program = or
         [ M.localType decl == TNamed owner []
         | f <- M.progMain program : Map.elems (M.progFunctions program), block <- Map.elems (M.fnBlocks f)
         , M.Assign d (M.CopyOf _) <- M.blockStatements block, Just decl <- [Map.lookup d (M.fnLocals f)]
         ]
     replacement = if nested then unlines
-        [ "values = [Shelf { item: make(40) }];"
-        , "saved = get(values, 0);"
-        , "values = set(values, 0, Shelf { item: make(2) });"
-        , "a = &saved.item.run; b = &get(values, 0).item.run; return a(saved.item.seed) + b(get(values, 0).item.seed);"
+        [ "struct Slot { item: Shelf };"
+        , "fn replace(slot: Slot, next: Slot) -> Int {"
+        , "    saved = slot.item;"
+        , "    slot = next;"
+        , "    a = &saved.item.run; b = &slot.item.item.run;"
+        , "    return a(saved.item.seed) + b(slot.item.item.seed);"
+        , "};"
+        , "return replace(Slot { item: Shelf { item: make(40) } }, Slot { item: Shelf { item: make(2) } });"
         ] else unlines
-        [ "values = [make(40)];"
-        , "saved = get(values, 0);"
-        , "values = set(values, 0, make(2));"
-        , "a = &saved.run; b = &get(values, 0).run; return a(saved.seed) + b(get(values, 0).seed);"
+        [ "struct Slot { item: Callback };"
+        , "fn replace(slot: Slot, next: Slot) -> Int {"
+        , "    saved = slot.item;"
+        , "    slot = next;"
+        , "    a = &saved.run; b = &slot.item.run;"
+        , "    return a(saved.seed) + b(slot.item.seed);"
+        , "};"
+        , "return replace(Slot { item: make(40) }, Slot { item: make(2) });"
         ]
 
 boxedWrapperBody :: String -> String -> String
