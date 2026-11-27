@@ -134,19 +134,27 @@ fn monoMatchSizes(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>
     return bs;
 };
 
+fn emptyIntMap() -> HashMap<String, Int> ~ { return HashMap::new(); };
+fn emptyTokenMap() -> HashMap<String, List<Token>> ~ { return HashMap::new(); };
+fn monoBindingMap(bs: &List<MonoBinding>) -> HashMap<String, List<Token>> ~ {
+    out = emptyTokenMap();
+    for b in bs { if !HashMap::contains(&out, &b.name) { out = HashMap::insert(out, clone(b.name), clone(b.tokens)); }; };
+    return out;
+};
+
 // The copy of a declared type's checked Drop, Clone or Deref (role 0, 1 or 2) for the instance: none when its fact names no
 // function with type or size parameters, or when the instance does not give every parameter (MirMono.roleKey)
-fn monoRoleKey(originals: &List<FullFunction>, owned: &FullRecord, role: Int, held: &List<MonoBinding>, originalNamed: &List<MonoBinding>) -> List<MonoKey> ~ {
+fn monoRoleKey(originals: &List<FullFunction>, fnIdx: &HashMap<String, Int>, owned: &FullRecord, role: Int, heldMap: &HashMap<String, List<Token>>, origNamedMap: &HashMap<String, List<Token>>) -> List<MonoKey> ~ {
     fname = full::tokens::textAt(owned.tokens, 4 + 2 * role);
     if size(fname.bytes) = 0 { return []; };
-    idx = monoFunctionIndex(originals, fname);
-    if idx < 0 { return []; };
+    idx = HashMap::lookup(fnIdx, &fname, 0 - 1);
+    if idx < 0 || idx >= size(originals) { return []; };
     target = get(originals, idx);
     if !monoGeneric(target) { return []; };
     params = monoSection(target.header, "params");
     if size(params) = 0 { return []; };
-    actual = monoLookup(held, owned.name);
-    if size(actual) = 0 { actual = monoLookup(originalNamed, owned.name); };
+    actual = HashMap::lookup(heldMap, &owned.name, []);
+    if size(actual) = 0 { actual = HashMap::lookup(origNamedMap, &owned.name, []); };
     if size(actual) = 0 { actual = push(push(push([], full::tokens::word("named")), full::tokens::name(clone(owned.name))), full::tokens::word("0")); };
     selfTy = monoLocal(target, get(params, 0));
     bs = monoMatch([], selfTy, actual); sbs = monoMatchSizes([], selfTy, actual);
@@ -159,20 +167,22 @@ fn monoRoleKey(originals: &List<FullFunction>, owned: &FullRecord, role: Int, he
 
 struct MonoRole { owner: String, role: Int, key: MonoKey };
 impl Clone for MonoRole { };
-
-fn monoRoleFound(owners: &List<MonoRole>, owner: &String, role: Int) -> Bool ~ {
-    for o in owners { if o.owner = owner && o.role = role { return true; }; };
-    return false;
-};
+fn emptyRoleMap() -> HashMap<String, List<MonoRole>> ~ { return HashMap::new(); };
 
 // The checked facts with each owner's role copies named (MirMono.monoWith's retarget): a provider stays, its function is the copy
 fn monoRetarget(ownership: &List<FullRecord>, owners: &List<MonoRole>) -> List<FullRecord> ~ {
+    byOwner = emptyRoleMap();
+    for o in owners {
+        cur = HashMap::lookup(&byOwner, &o.owner, []);
+        byOwner = HashMap::insert(byOwner, clone(o.owner), push(cur, clone(o)));
+    };
     out = [];
     for r in ownership {
         row = clone(r.tokens);
-        for o in owners {
+        updates = HashMap::lookup(&byOwner, &r.name, []);
+        for o in updates {
             at = 4 + 2 * o.role;
-            if o.owner = r.name && at < size(row) { row = set(row, at, full::tokens::name(monoInstanceName(o.key))); };
+            if at < size(row) { row = set(row, at, full::tokens::name(monoInstanceName(o.key))); };
         };
         out = push(out, FullRecord { name: clone(r.name), tokens: row });
     };
@@ -185,6 +195,7 @@ fn monomorphize(program: FullProgram) -> FullProgram ~ {
     if !anyGeneric { return program; };
     program = clearFunctionMetadata(program);
     originalNamed = monoProgramNamed(program, true);
+    origNamedMap = monoBindingMap(&originalNamed);
     main = monoRedirect(clone(program.entry), program.functions);
     plain = []; pending = main.needs;
     for f in &program.functions {
@@ -196,26 +207,39 @@ fn monomorphize(program: FullProgram) -> FullProgram ~ {
     };
     done = monoBuild(program.functions, pending, []);
     originals = clone(program.functions);
+    fnIdx = emptyIntMap();
+    for i in 0..size(originals) {
+        n = full::tokens::textAt(get(&originals, i).header, 1);
+        if !HashMap::contains(&fnIdx, &n) { fnIdx = HashMap::insert(fnIdx, n, i); };
+    };
     checked = program.checked; ownership = clone(program.ownership);
+    ownershipIdx = emptyIntMap();
+    for i in 0..size(ownership) {
+        n = clone(get(&ownership, i).name);
+        if !HashMap::contains(&ownershipIdx, &n) { ownershipIdx = HashMap::insert(ownershipIdx, n, i); };
+    };
     rewritten = FullProgram { entry: main.function, functions: [], ..program };
     // MirMono discovers implicit drops in at most four rounds; preserve that boundary.
     // (with checked facts, the drop, clone and deref of a declared instance are the copies of the functions its facts name, and
     // the facts then name the copies; without them, a drop is the function named for the type's base)
-    owners = [];
+    owners = []; roleDone = HashSet::new(); roleTags = push(push(push([], "0"), "1"), "2");
     round = 0;
     while round < 4 [{ affirm round >= 0; affirm round <= 4; }] ~ {
         p = monoFiltered(monoWithInstances(clone(rewritten), plain, done), originalNamed);
         keys = [];
         if checked {
             held = monoProgramNamed(p, true);
+            heldMap = monoBindingMap(&held);
             for d in p.types {
-                at = 0 - 1;
-                for i in 0..size(ownership) { if get(&ownership, i).name = d.name { at = i; }; };
+                at = HashMap::lookup(&ownershipIdx, &d.name, 0 - 1);
                 if at >= 0 && at < size(ownership) {
+                    row = clone(get(&ownership, at));
                     for role in 0..3 {
-                        if !monoRoleFound(owners, d.name, role) {
-                            row = clone(get(&ownership, at));
-                            for key in monoRoleKey(originals, &row, role, &held, &originalNamed) {
+                        rt = get(&roleTags, role);
+                        tag = clone(d.name).concat("\n").concat(&rt);
+                        if !HashSet::contains(&roleDone, &tag) {
+                            for key in monoRoleKey(originals, &fnIdx, &row, role, &heldMap, &origNamedMap) {
+                                roleDone = roleDone.insert(clone(tag));
                                 owners = push(owners, MonoRole { owner: clone(d.name), role: role, key: clone(key) });
                                 if !monoBuilt(done, key) { keys = push(keys, clone(key)); };
                             };

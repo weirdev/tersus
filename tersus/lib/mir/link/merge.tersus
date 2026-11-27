@@ -138,17 +138,24 @@ fn completeSpecEnvs(p: FullProgram) -> FullProgram ~ {
 };
 struct MergeRows { ok: Bool, message: String, rows: List<FullRecord>, origins: List<String> };
 impl Clone for MergeRows { };
+fn emptyMergeIdx() -> HashMap<String, Int> ~ { return HashMap::new(); };
+fn emptyTokenGroups() -> HashMap<String, List<List<Token>>> ~ { return HashMap::new(); };
 fn mergeRows(what: &String, units: &List<LinkUnit>, arena: &List<AstNode>, kind: Int) -> MergeRows ~ {
     out = MergeRows { ok: true, message: "", rows: [], origins: [] };
+    idx = emptyMergeIdx();
     for unit in units {
         rows = rowsOf(&unit.program, kind);
         for row in rows {
-            i = rowIndex(&out.rows, &row.name);
+            i = HashMap::lookup(&idx, &row.name, 0 - 1);
             if i >= 0 && i < size(out.rows) && i < size(out.origins) {
                 if !sameRow(&get(out.rows, i).tokens, arena, &row.tokens, arena) {
                     out = MergeRows { ok: false, message: collision(what, &row.name, &get(out.origins, i), unitName(unit)), ..out }; return out;
                 };
-            } else { origins = push(out.origins, unitName(unit)); out = MergeRows { rows: push(out.rows, clone(row)), origins: origins, ..out }; };
+            } else {
+                idx = HashMap::insert(idx, clone(row.name), size(out.rows));
+                origins = push(out.origins, unitName(unit));
+                out = MergeRows { rows: push(out.rows, clone(row)), origins: origins, ..out };
+            };
         };
     };
     return out;
@@ -186,17 +193,25 @@ fn sameExtern(a: &FullFunction, b: &FullFunction, nodes: &List<AstNode>) -> Bool
 // The facts under its bounds of each function with bounds, from the unit that defines it first: another unit that
 // defines it has the same rows, as it has the same bounded record (mergeRows)
 fn mergeBoundedFacts(units: &List<LinkUnit>) -> MergeRows ~ {
-    out = MergeRows { ok: true, message: "", rows: [], origins: [] }; seen = []; origins = [];
+    out = MergeRows { ok: true, message: "", rows: [], origins: [] };
+    seenIdx = emptyMergeIdx(); origins = []; keptGroups = [];
     for unit in units {
+        unitGroups = emptyTokenGroups();
+        for r in &unit.program.boundedFacts {
+            cur = HashMap::lookup(&unitGroups, &r.name, []);
+            unitGroups = HashMap::insert(unitGroups, clone(r.name), push(cur, clone(r.tokens)));
+        };
         for b in &unit.program.bounded {
-            rows = factRowsOf(&unit.program.boundedFacts, &b.name); i = 0; found = 0 - 1;
-            for s in &seen { if s = b.name { found = i; }; i = i + 1; };
-            if found >= 0 && found < size(origins) {
-                kept = factRowsOf(&out.rows, &b.name);
+            rows = HashMap::lookup(&unitGroups, &b.name, []);
+            found = HashMap::lookup(&seenIdx, &b.name, 0 - 1);
+            if found >= 0 && found < size(origins) && found < size(keptGroups) {
+                kept = get(&keptGroups, found);
                 if !sameRowSet(&kept, &rows) { return MergeRows { ok: false, message: collision("function with bounds", &b.name, &get(origins, found), unitName(unit)), ..out }; };
             } else {
-                seen = push(seen, clone(b.name)); origins = push(origins, unitName(unit));
-                for r in &unit.program.boundedFacts { if r.name = b.name { out = MergeRows { rows: push(out.rows, clone(r)), ..out }; }; };
+                seenIdx = HashMap::insert(seenIdx, clone(b.name), size(origins));
+                origins = push(origins, unitName(unit));
+                keptGroups = push(keptGroups, clone(rows));
+                for t in rows { out = MergeRows { rows: push(out.rows, FullRecord { name: clone(b.name), tokens: clone(t) }), ..out }; };
             };
         };
     };
