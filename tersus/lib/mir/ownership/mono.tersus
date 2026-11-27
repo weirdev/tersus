@@ -29,23 +29,26 @@ fn tupleName(n: &String) -> Bool ~ {
     base = n.slice(0, n.find(toByte(60), 0));
     return size(monoTuple(&base).tokens) > 0;
 };
-fn hasFunction(p: &FullProgram, f: &String) -> Bool ~ {
-    for fun in &p.functions { if textAt(&fun.header, 1) = *f { return true; }; };
-    return false;
-};
+fn emptyOwnIdx() -> HashMap<String, Int> ~ { return HashMap::new(); };
 fn checkedMeta(p: &FullProgram) -> Meta ~ {
     rows = push([], push(push(push([], word("storage")), name(protocolOf(p, "List"))), name(protocolOf(p, "Box"))));
     rows = push(rows, push(push([], word("ownership")), intToken(size(p.types))));
     roles = push(push(push([], "Drop"), "Clone"), "Deref");
+    ownIdx = emptyOwnIdx();
+    for i in 0..size(p.ownership) {
+        n = clone(get(&p.ownership, i).name);
+        if !HashMap::contains(&ownIdx, &n) { ownIdx = HashMap::insert(ownIdx, n, i); };
+    };
+    fnNames = HashSet::new();
+    for fun in &p.functions { fnNames = fnNames.insert(textAt(&fun.header, 1)); };
     // (in the order of the declarations the program as data writes, sorted by name)
     for d in sortRecords(clone(p.types)) {
-        at = 0 - 1;
-        for i in 0..size(p.ownership) { if get(&p.ownership, i).name = d.name { at = i; }; };
+        at = HashMap::lookup(&ownIdx, &d.name, 0 - 1);
         if at >= 0 && at < size(p.ownership) {
             row = clone(get(&p.ownership, at).tokens);
             for k in 0..3 {
                 f = textAt(&row, 4 + 2 * k);
-                if size(f.bytes) > 0 && !hasFunction(p, &f) {
+                if size(f.bytes) > 0 && !HashSet::contains(&fnNames, &f) {
                     role = clone(get(&roles, k));
                     return Meta { ok: false, message: "Type error: the checked ".concat(&role).concat(" of ").concat(&d.name).concat(" is ").concat(&f).concat(", which the program does not have"), rows: [] };
                 };
