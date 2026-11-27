@@ -20,7 +20,8 @@ import mir::reachability::prune { ReachIndex, buildReachIndex, liveRootsWith, ty
 import mir::mono::functions { MonoKey, monoGeneric, monoSection, monoInstantiate, monoRedirectCall, monoKeyCompare, monoReturn };
 
 struct CopySources { functions: HashMap<String, Int>, bounded: HashMap<String, Int>, order: List<String> };
-struct CopyBuild { facts: List<FullRecord>, made: List<CopyMade>, dispatch: List<DispatchEdge>, arena: List<AstNode>, error: String };
+struct CopyBuild { done: HashMap<String, List<CopyKey>>, facts: List<FullRecord>, factIdx: HashMap<String, Int>, made: List<CopyMade>, dispatch: List<DispatchEdge>, arena: List<AstNode>, error: String };
+struct RecordableOwner { owner: String, needs: List<CopyNeed> };
 struct CopyBody {
     fun: FullFunction, arena: List<AstNode>, types: List<CopyBinding>,
     blocks: HashMap<Int, List<CopyBinding>>, locals: HashMap<Int, List<CopyBinding>>,
@@ -453,26 +454,41 @@ fn copyBodyFacts(classes: &InstanceNameClasses, program: &FullProgram, sources: 
     };
     return CopiedFacts { rows: rows, needs: needs, error: "" };
 };
-fn recordedNeeds(program: &FullProgram, sources: &CopySources, owners: &HashSet<String>) -> List<CopyNeed> ~ {
+fn recordableOwners(program: &FullProgram, sources: &CopySources) -> List<RecordableOwner> ~ {
     out = [];
     for row in &program.ownership {
-        if HashSet::contains(owners, &row.name) {
-            for role in 0..3 {
-                callee = textAt(&row.tokens, 4 + 2 * role);
-                if callee != "" && !HashMap::contains(&sources.functions, &callee) {
-                    record = instanceAt(program, &callee);
-                    if record.found && HashMap::contains(&sources.bounded, &record.value.function) && HashMap::contains(&sources.functions, &record.value.function) {
-                        key = concreteKey(&record.value);
-                        if key.found {
-                            ground = true; for ty in &key.value.types { if !copyGround(ty) { ground = false; }; };
-                            if ground { out = push(out, CopyNeed { key: key.value, chain: [] }); };
-                        };
+        needs = [];
+        for role in 0..3 {
+            callee = textAt(&row.tokens, 4 + 2 * role);
+            if callee != "" && !HashMap::contains(&sources.functions, &callee) {
+                record = instanceAt(program, &callee);
+                if record.found && HashMap::contains(&sources.bounded, &record.value.function) && HashMap::contains(&sources.functions, &record.value.function) {
+                    key = concreteKey(&record.value);
+                    if key.found {
+                        ground = true; for ty in &key.value.types { if !copyGround(ty) { ground = false; }; };
+                        if ground { needs = push(needs, CopyNeed { key: key.value, chain: [] }); };
                     };
                 };
             };
         };
+        if size(needs) > 0 { out = push(out, RecordableOwner { owner: clone(row.name), needs: needs }); };
     };
     return out;
+};
+fn copyAlreadyDone(done: &HashMap<String, List<CopyKey>>, key: &CopyKey) -> Bool ~ {
+    prior = HashMap::lookup(done, &key.function, []);
+    for k in &prior { if sameKey(k, key) { return true; }; };
+    return false;
+};
+fn hasUnbuiltRecordable(recordable: &List<RecordableOwner>, owners: &HashSet<String>, done: &HashMap<String, List<CopyKey>>) -> Bool ~ {
+    for ro in recordable {
+        if !HashSet::contains(owners, &ro.owner) {
+            for need in &ro.needs {
+                if !copyAlreadyDone(done, &need.key) { return true; };
+            };
+        };
+    };
+    return false;
 };
 struct FrameSplit { frames: List<MonoKey>, instances: List<FullRecord>, error: String };
 fn splitFrames(program: &FullProgram) -> FrameSplit ~ {
@@ -549,10 +565,13 @@ fn reachedFrameOwners(program: &FullProgram, idx: &ReachIndex, supplied: &List<M
     return owners;
 };
 fn emptyCopyDone() -> HashMap<String, List<CopyKey>> ~ { return HashMap::new(); };
-fn buildCopies(classes: &InstanceNameClasses, program: &FullProgram, sources: &CopySources, named: &List<NamedCopy>, queue: List<CopyNeed>, arena: List<AstNode>) -> CopyBuild ~ {
-    done = emptyCopyDone(); made = []; dispatch = []; facts = clone(program.ownership);
+fn initCopyBuild(program: &FullProgram, arena: List<AstNode>) -> CopyBuild ~ {
+    facts = clone(program.ownership);
     factIdx = emptyFactIndex(); fi = 0;
     for r in &facts { if !HashMap::contains(&factIdx, &r.name) { factIdx = HashMap::insert(factIdx, clone(r.name), fi); }; fi = fi + 1; };
+    return CopyBuild { done: emptyCopyDone(), facts: facts, factIdx: factIdx, made: [], dispatch: [], arena: arena, error: "" };
+};
+fn buildCopiesMore(classes: &InstanceNameClasses, program: &FullProgram, sources: &CopySources, named: &List<NamedCopy>, queue: List<CopyNeed>, done: HashMap<String, List<CopyKey>>, facts: List<FullRecord>, factIdx: HashMap<String, Int>, made: List<CopyMade>, dispatch: List<DispatchEdge>, arena: List<AstNode>) -> CopyBuild ~ {
     i = 0;
     while i < size(queue) ~ {
         need = clone(get(&queue, i)); i = i + 1;
@@ -560,13 +579,13 @@ fn buildCopies(classes: &InstanceNameClasses, program: &FullProgram, sources: &C
         for k in &prior { if sameKey(k, &need.key) { seen = true; }; };
         if !seen {
             result = copyOne(classes, program, sources, named, &need, arena);
-            if result.error != "" { return CopyBuild { facts: [], made: [], dispatch: [], arena: [], error: result.error }; };
+            if result.error != "" { return CopyBuild { done: emptyCopyDone(), facts: [], factIdx: emptyFactIndex(), made: [], dispatch: [], arena: [], error: result.error }; };
             for row in &result.facts {
                 at = HashMap::lookup(&factIdx, &row.name, 0 - 1);
                 if at >= 0 && at < size(facts) {
                     if get(&facts, at).tokens != row.tokens {
                         message = "Type error: ".concat(textAt(&result.made.fun.header, 1)).concat(" has a ").concat(&row.name).concat(" whose facts under its bounds disagree with its checked facts");
-                        return CopyBuild { facts: [], made: [], dispatch: [], arena: [], error: message };
+                        return CopyBuild { done: emptyCopyDone(), facts: [], factIdx: emptyFactIndex(), made: [], dispatch: [], arena: [], error: message };
                     };
                 } else {
                     factIdx = HashMap::insert(factIdx, clone(row.name), size(facts));
@@ -578,7 +597,7 @@ fn buildCopies(classes: &InstanceNameClasses, program: &FullProgram, sources: &C
             dispatch = appendDispatch(dispatch, &result.dispatch);
         };
     };
-    return CopyBuild { facts: facts, made: made, dispatch: dispatch, arena: arena, error: "" };
+    return CopyBuild { done: done, facts: facts, factIdx: factIdx, made: made, dispatch: dispatch, arena: arena, error: "" };
 };
 fn hasMayDiverge(fun: &FullFunction, arena: &List<AstNode>) -> Bool ~ {
     id = integerAt(&fun.spec, 6);
@@ -689,23 +708,41 @@ fn makeCopiesWithPolicy(classes: &InstanceNameClasses, program: FullProgram, lib
     if entry.error != "" { return CopiesResult { value: program, error: entry.error }; };
     needs = appendCopyNeeds(needs, &entry.needs); dispatch = appendDispatch(dispatch, &entry.dispatch); used = genericClosure(&program, &sources, clone(always));
     owners = HashSet::new();
+    recordable = [];
+    if recording && program.checked { recordable = recordableOwners(&program, &sources); };
+    built = initCopyBuild(&program, entry.arena);
+    pendingQueue = genericCopyNeeds(&program, &sources, &used, needs);
     while true ~ {
-        queue = genericCopyNeeds(&program, &sources, &used, appendCopyNeeds(clone(needs), recordedNeeds(&program, &sources, &owners)));
-        built = buildCopies(classes, &program, &sources, &named, queue, clone(entry.arena));
+        built = buildCopiesMore(classes, &program, &sources, &named, pendingQueue, built.done, built.facts, built.factIdx, built.made, built.dispatch, built.arena);
         if built.error != "" { return CopiesResult { value: program, error: built.error }; };
         next = genericClosure(&program, &sources, copyUsedAfter(&program, library, &built.made, &sources, &always));
         if copySetEqual(&used, &next) {
-            out = finishCopies(classes, FullProgram { arena: built.arena, ownership: built.facts, ..clone(program) }, &named, &used, clone(roots), clone(entry.fun), &built.made, appendDispatch(clone(dispatch), &built.dispatch));
+            morePossible = recording && program.checked && hasUnbuiltRecordable(&recordable, &owners, &built.done);
+            if !morePossible {
+                out = finishCopies(classes, FullProgram { arena: built.arena, ownership: built.facts, ..program }, &named, &used, roots, entry.fun, &built.made, appendDispatch(dispatch, &built.dispatch));
+                out = divergingCopies(completeInstancesWith(out, classes));
+                return CopiesResult { value: out, error: "" };
+            };
+            out = finishCopies(classes, FullProgram { arena: clone(built.arena), ownership: clone(built.facts), ..clone(program) }, &named, &used, clone(roots), clone(entry.fun), &built.made, appendDispatch(clone(dispatch), &built.dispatch));
             out = divergingCopies(completeInstancesWith(out, classes));
-            if !recording || !program.checked { return CopiesResult { value: out, error: "" }; };
             idx = buildReachIndex(&out);
             live = liveRootsWith(&out, &idx);
             more = reachedFrameOwners(&out, &idx, &frames, &live.functions, live.types);
-            count = size(owners);
-            for n in more.elements() { owners = owners.insert(clone(n)); };
-            if count = size(owners) { return CopiesResult { value: out, error: "" }; };
+            extraNeeds = [];
+            for ro in &recordable {
+                if !HashSet::contains(&owners, &ro.owner) && HashSet::contains(&more, &ro.owner) {
+                    owners = owners.insert(clone(ro.owner));
+                    for need in &ro.needs {
+                        if !copyAlreadyDone(&built.done, &need.key) { extraNeeds = push(extraNeeds, clone(need)); };
+                    };
+                };
+            };
+            if size(extraNeeds) = 0 { return CopiesResult { value: out, error: "" }; };
+            pendingQueue = extraNeeds;
+        } else {
+            used = next;
+            pendingQueue = genericCopyNeeds(&program, &sources, &used, []);
         };
-        used = next;
     };
     return CopiesResult { value: program, error: "internal compiler error: the copy worklist did not reach a fixed point" };
 };
