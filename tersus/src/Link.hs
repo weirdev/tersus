@@ -42,7 +42,7 @@ linkWith recording libraries own = flatResultMap unitData units `bindResult` \pa
     captureStorage program
         | any packs (M.progMain program : Map.elems (M.progFunctions program)) = Map.fromList
             [ (name, declaration)
-            | (ModuleId "std" (Just "core/types"), storage) <- libraries
+            | (ModuleId "std" (Just "core"), storage) <- libraries
             , (name, declaration) <- Map.toList (M.progCaptureStorage storage)
             , Just invariant <- [Map.lookup name (M.progInvariants storage)]
             , Map.lookup name (M.progGenerics program) == Just declaration
