@@ -162,7 +162,7 @@ libCatalog pkg = [Library name (Map.findWithDefault [] name (libImports pkg)) if
 libUnit :: LibPackage -> String -> Result (ModuleId, M.Program) String
 libUnit pkg name = case Map.lookup name (libPrograms pkg) of
     Just program
-        | name == "core/types" -> Ok (libModuleId name, program{M.progCaptureStorage = Map.restrictKeys (M.progGenerics program) (Set.fromList [stdName "core/types" "List", stdName "core/types" "Box"])})
+        | name == "core" -> Ok (libModuleId name, program{M.progCaptureStorage = Map.restrictKeys (M.progGenerics program) (Set.fromList [stdName "core/types" "List", stdName "core/types" "Box"])})
         | otherwise -> Ok (libModuleId name, program)
     Nothing -> Error ("internal: no compiled unit for assembly library " ++ name)
 
