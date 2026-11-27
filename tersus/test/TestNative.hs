@@ -198,11 +198,19 @@ boxedWrapperCloneRefused nested receiver result = do
 
 boxedWrapperCopy :: Bool -> String -> String -> IO (Result (M.Program, M.Program) String)
 boxedWrapperCopy nested receiver result = do
-    compiled <- compileOnce (boxedWrapperSource receiver result ++ replacement)
+    compiled <- if stdClone
+        then compileOnce (boxedWrapperBody receiver result ++ replacement)
+        else programFromFiles ownRoleEntry
+            [ ("app/package.tersus", "noPrelude = true;\nList = storage::List;\nClone = own::Clone;\n")
+            , ("app/own/own.tersus", "trait Clone { fn clone(self: " ++ receiver ++ ") -> Self; };\n")
+            , ("app/storage/storage.tersus", "struct List<T> { addr: Addr<T>, len: Int, cap: Int, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap; affirm count(blk) = len; affirm len >= 0; affirm len <= cap; affirm forall j in 0..len: filled(blk, j) = true; affirm forall j in len..cap: filled(blk, j) = false; }];\n")
+            , (ownRoleEntry, "import app::own { Clone };\nimport app::storage { List };\n" ++ boxedWrapperBody receiver result ++ replacement)
+            ]
     pure $ compiled `bindResult` \program -> ownedOfProgram program `bindResult` \owned ->
         if insertedCopy owned then Ok (program, owned) else Error ("ownership did not insert a copy of " ++ owner)
   where
-    owner = if nested then "Shelf" else "Callback"
+    stdClone = receiver == "&Self"
+    owner = (if stdClone then "" else "app$main$") ++ (if nested then "Shelf" else "Callback")
     insertedCopy program = or
         [ M.localType decl == TNamed owner []
         | f <- M.progMain program : Map.elems (M.progFunctions program), block <- Map.elems (M.fnBlocks f)
@@ -220,15 +228,18 @@ boxedWrapperCopy nested receiver result = do
         , "a = &saved.run; b = &get(values, 0).run; return a(saved.seed) + b(get(values, 0).seed);"
         ]
 
-boxedWrapperSource :: String -> String -> String
-boxedWrapperSource receiver result = unlines
-    [ "trait Clone { fn clone(self: " ++ receiver ++ ") -> Self; };"
-    , "struct Callback { seed: Int, run: Closure<fn(Int) -> Int> };"
+boxedWrapperBody :: String -> String -> String
+boxedWrapperBody receiver result = unlines
+    [ "struct Callback { seed: Int, run: Closure<fn(Int) -> Int> };"
     , "fn identity(x: Int) -> Int { return x; };"
     , "fn make(seed: Int) -> Callback { let run: Closure<fn(Int) -> Int> = identity; return Callback { seed: seed, run: run }; };"
     , "impl Clone for Callback { fn clone(self: " ++ receiver ++ ") -> Self { return " ++ result ++ "; }; };"
     , "struct Shelf { item: Callback };"
     ]
+
+boxedWrapperSource :: String -> String -> String
+boxedWrapperSource receiver result =
+    "trait Clone { fn clone(self: " ++ receiver ++ ") -> Self; };\n" ++ boxedWrapperBody receiver result
 
 -- Values laid out as C lays them out (Mir.layoutOf): narrow numbers stored and loaded, structs and enums with their fields at aligned offsets, printed and
 -- compared by their descriptors, as the executor of the MIR has them
