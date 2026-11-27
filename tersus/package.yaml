@@ -30,6 +30,7 @@ extra-source-files:
 - lib/mir/copies/*.tersus
 - dev/mir-copies/probe.tersus
 - dev/mir-copies-fused/*.tersus
+- dev/mir-validation-mono/*.tersus
 - lib/mir/link/fused.tersus
 - lib/mir/link/profile.tersus
 - lib/mir/instances/*.tersus
