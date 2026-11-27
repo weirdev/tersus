@@ -24,7 +24,7 @@ import Lowering (finishProgramWith)
 import qualified Mir as M
 import MirCopiesNameProfile (nameProfilePrefix)
 import MirCopiesOracle (coveredKey, genericKey, makeCopiesWith)
-import MirData (readLowered, writeProgram)
+import MirData (readCheckedLowered, readLowered, writeProgram)
 import qualified MirHousekeeping as Housekeeping
 import MirMoves (finishLowered)
 import MirPass (programData, runPassWith)
@@ -291,7 +291,7 @@ compareCopies mode library input outcome = case (makeCopiesWith library referenc
     referenceInput = if mode == "linked" then M.completeInstances input else input
 
 compareProgram :: M.Program -> String -> TestResult
-compareProgram expected out = case readLowered out of
+compareProgram expected out = case readCheckedLowered out of
     Error e -> Just ("copies probe wrote unreadable MIR3: " ++ e ++ "; output starts " ++ take 120 out)
     Ok lowered ->
         let actual = M.lowProgram lowered in case (programData expected, programData actual) of
@@ -328,7 +328,7 @@ linkUnitData (ModuleId pkg modu) text =
 linkedCase :: Result [(ModuleId, M.Program)] String -> (Set.Set String -> M.Program -> TestResult) -> IO TestResult
 linkedCase compiled check = withResult compiled $ \units -> do
     merged <- oldMerge units
-    let library = Set.fromList [n | (ModuleId "tersuslib" _, p) <- units, n <- Map.keys (M.progBounded p)]
+    let library = Set.fromList [n | (ModuleId pkg _, p) <- units, pkg `elem` ["tersuslib", "std"], n <- Map.keys (M.progBounded p)]
     withResult merged $ \input -> compareCopies "linked" library input (Right (check library))
 
 sourceUnits :: String -> Result [(ModuleId, M.Program)] String

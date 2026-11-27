@@ -7,6 +7,7 @@ import Control.Exception (evaluate)
 import Control.Monad (replicateM)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (sort, stripPrefix)
+import Data.Maybe (isJust)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC.Clock (getMonotonicTimeNSec)
@@ -42,7 +43,16 @@ linkRequest units = flatResultMap part units `bindResult` \parts ->
 
 fusedLinkRequest :: [(ModuleId, M.Program)] -> Result String String
 fusedLinkRequest units = linkRequest units `bindResult` \input ->
-    Ok (linkOperation "merge-copies" input ++ nameProfilePrefix [input])
+    Ok (fusedHeader units input ++ nameProfilePrefix [input])
+
+fusedHeader :: [(ModuleId, M.Program)] -> String -> String
+fusedHeader units input
+    | any (isJust . M.progOwnership . snd) units = case stripPrefix ("pass link\nmerge " ++ show (length units) ++ "\n") input of
+        Just rest -> "pass link\nmerge-copies " ++ show (length units) ++ " " ++ show libPrefix ++ " validate\n" ++ rest
+        Nothing -> linkOperation "merge-copies" input
+    | otherwise = linkOperation "merge-copies" input
+  where
+    libPrefix = length (takeWhile (\(ModuleId pkg _, _) -> pkg `elem` ["tersuslib", "std"]) units)
 
 linkOperation :: String -> String -> String
 linkOperation op input = case stripPrefix "pass link\nmerge " input of
@@ -59,7 +69,7 @@ oldCopies units merged = case makeCopiesWith library (M.completeInstances merged
     Error e -> Error ("Validation failed: " ++ e)
     ok -> ok
   where
-    library = Set.fromList [n | (ModuleId "tersuslib" _, p) <- units, n <- Map.keys (M.progBounded p)]
+    library = Set.fromList [n | (ModuleId pkg _, p) <- units, pkg `elem` ["tersuslib", "std"], n <- Map.keys (M.progBounded p)]
 
 compareFused :: [(ModuleId, M.Program)] -> IO TestResult
 compareFused units = case linkRequest units of
@@ -94,7 +104,8 @@ standaloneCopies :: Set.Set String -> M.Program -> IO (Result M.Program String)
 standaloneCopies library p = case programData p of
     Error e -> pure (Error e)
     Ok payload ->
-        let header = unwords ("copies" : show (length (lines payload)) : map quote (Set.toList library))
+        let policy = ["record" | isJust (M.progOwnership p)]
+            header = unwords ("copies" : show (length (lines payload)) : policy ++ map quote (Set.toList library))
             input = "pass link\n" ++ header ++ "\n" ++ payload
          in fusedRequest (input ++ nameProfilePrefix [input])
 
@@ -102,7 +113,7 @@ measureLink :: [(ModuleId, M.Program)] -> IO TestResult
 measureLink units = case linkRequest units of
     Error e -> pure (Just e)
     Ok input -> do
-        let fused = linkOperation "merge-copies" input ++ nameProfilePrefix [input]
+        let fused = fusedHeader units input ++ nameProfilePrefix [input]
         _ <- evaluate (length fused)
         old <- oldRun input
         new <- fusedRequest fused

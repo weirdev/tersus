@@ -78,7 +78,7 @@ realCase measure source check = withResult (realUnits source) $ \units -> do
     actual <- fusedLink units
     parity <- compareFused units
     beforeWire <- compareBeforeWire units
-    let library = Set.fromList [n | (ModuleId "tersuslib" _, p) <- units, n <- Map.keys (M.progBounded p)]
+    let library = Set.fromList [n | (ModuleId pkg _, p) <- units, pkg `elem` ["tersuslib", "std"], n <- Map.keys (M.progBounded p)]
     case asum [parity, beforeWire, inspect actual (\p -> asum [checkPrefix units p, check library p])] of
         Nothing | measure -> do
             enabled <- lookupEnv "TERSUS_MEASURE_MIRCOPIES_FUSED"

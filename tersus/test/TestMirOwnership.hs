@@ -177,7 +177,7 @@ testOwnershipInterpreted = TestList "testOwnershipInterpreted"
      ])
   where
     -- (a list of these programs is std's List, with the checked facts a compiled program has for it)
-    stored = checkedStorage
+    stored = checkedStorageWith companionMono
     -- (the interpreted emitter owns the program as the native tool does, and the owned program runs on the heap model to the executor's answer)
     -- (on the copies native monomorphisation makes, as insertOwnership gives the native tool the program)
     monomorphized p = unsafePerformIO (monomorphizeWith ownershipTool p)
@@ -372,11 +372,14 @@ nativeFixtures =
 -- Native code is made with the checked std storage, so a fixture given to it is checked too: it is given the protocols, the facts and
 -- the std drops and clones the compiler gives a program of its types
 checkedStorage :: Program -> Program
-checkedStorage p = p
-    { progProtocols = progProtocols companion
-    , progOwnership = progOwnership companion
-    , progFunctions = Map.union (progFunctions p) (progFunctions companion)
-    , progTypes = Map.union (progTypes p) (progTypes companion)
+checkedStorage = checkedStorageWith companion
+
+checkedStorageWith :: Program -> Program -> Program
+checkedStorageWith base p = p
+    { progProtocols = progProtocols base
+    , progOwnership = progOwnership base
+    , progFunctions = Map.union (progFunctions p) (progFunctions base)
+    , progTypes = Map.union (progTypes p) (progTypes base)
     }
 
 companion :: Program
@@ -385,9 +388,13 @@ companion = case lowerSource True (concat
         , "ys = [[8]]; rs = [&mut ys]; zs = [[9]]; b = Box::new(&mut zs); "
         , "return size(xs) + size(h.xs) + size(rs) + size(*Box::unbox(b));"
         ]) of
-    Ok p -> monomorphizeForValidation p
+    Ok p -> p
     Error e -> error ("the checked storage companion does not compile: " ++ e)
 {-# NOINLINE companion #-}
+
+companionMono :: Program
+companionMono = monomorphizeForValidation companion
+{-# NOINLINE companionMono #-}
 
 -- A lowered fixture's List and Box written as data names, as std's
 stdNamed :: Program -> Program

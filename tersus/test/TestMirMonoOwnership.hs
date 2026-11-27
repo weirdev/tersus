@@ -181,7 +181,7 @@ testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusio
     lowerForFusion source = lower ("fn fusionIdentity<T>(x: T) -> T { return x; }; " ++ source)
     package = Package.compileModulesWith loader (Mod.Snapshot (Mod.resolverFromFiles moduleFiles) "app/main.tersus" False) `bindResult` Package.lowerCompiledPackage
     moduleFiles = [(path,case path of
-        "app/main.tersus" -> "import app::apply; import app::provider; fn hold<F>(f: &F) -> &F from f [{ }] [{ }] { return f; }; a = provider::Adder { n: 10 }; return apply::apply(hold(&a), 5);"
+        "app/main.tersus" -> "import app::apply; import app::provider; fn fusionIdentity<T>(x: T) -> T { return x; }; a = provider::Adder { n: 10 }; return fusionIdentity(apply::apply(&a, 5));"
         "app/apply.tersus" -> source
         _ -> source) | (path,source) <- closureModuleFiles]
         ++ [("app/provider/provider.tersus", closureAdder)]
