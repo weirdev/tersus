@@ -8,6 +8,7 @@ import data::reader::reader { readRecord, readRecords, tokenizeMir };
 import mir::reader::reader { TypeDecl, Function, Program, programAt, readLines, storageProblemIn };
 import mir::ownership::ownership { isOwnershipRequest, runOwnership };
 import mir::mono::mono { isMonoRequest, runMono };
+import mir::validationmono::request { isValidationMonoRequest, runValidationMono };
 import mir::ownership::mono { isMonoOwnershipRequest, runMonoOwnership };
 import mir::link::link { isLinkRequest, runLink };
 
@@ -265,7 +266,7 @@ fn readEmitterInput() -> Parsed<List<List<Token>>> ~ {
     if first.pos = 0 { return Parsed<List<List<Token>>> { value: [], pos: 0, ok: true }; };
     header = tokenize(&first.value); if !header.ok { return bad; };
     if size(header.value) = 0 { return Parsed<List<List<Token>>> { value: [], pos: 0, ok: true }; };
-    full = isWord(&header.value, 0, "pass") && (isWord(&header.value, 1, "link") || isWord(&header.value, 1, "mono") || isWord(&header.value, 1, "mono-ownership"));
+    full = isWord(&header.value, 0, "pass") && (isWord(&header.value, 1, "link") || isWord(&header.value, 1, "mono") || isWord(&header.value, 1, "mono-ownership") || isWord(&header.value, 1, "validation-mono"));
     if full {
         strict = tokenizeMir(&first.value); if !strict.ok { return bad; };
         records = readRecords(0 - 1); if !records.ok { return bad; };
@@ -290,6 +291,8 @@ if !read.ok {
 };
 if isLinkRequest(read.value) {
     if !runLink(read.value) { return 1; };
+} else { if isValidationMonoRequest(read.value) {
+    if !runValidationMono(read.value) { return 1; };
 } else { if isMonoOwnershipRequest(read.value) {
     if !runMonoOwnership(read.value) { return 1; };
 } else { if isMonoRequest(read.value) {
@@ -320,4 +323,4 @@ if isLinkRequest(read.value) {
             return 1;
         };
     };
-}; }; }; };
+}; }; }; }; };

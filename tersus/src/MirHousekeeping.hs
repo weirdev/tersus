@@ -18,6 +18,7 @@ module MirHousekeeping
     , emitterIdentity
     , emitterIdentityAgainst
     , cachedEmitterContentKeyFor
+    , emitterForIdentity
     , guardEmitterDirectory
     , prepareValidatorFor
     , cachedUncheckedValidatorFrom

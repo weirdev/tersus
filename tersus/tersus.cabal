@@ -53,8 +53,6 @@ extra-source-files:
     dev/mir-copies-fused/audit.tersus
     dev/mir-copies-fused/driver.tersus
     dev/mir-validation-mono/driver.tersus
-    dev/mir-validation-mono/mono.tersus
-    dev/mir-validation-mono/types.tersus
     lib/mir/link/fused.tersus
     lib/mir/link/profile.tersus
     lib/mir/instances/complete.tersus
@@ -71,6 +69,9 @@ extra-source-files:
     lib/mir/mono/tokens.tersus
     lib/mir/mono/functions.tersus
     lib/mir/mono/types.tersus
+    lib/mir/validationmono/mono.tersus
+    lib/mir/validationmono/request.tersus
+    lib/mir/validationmono/types.tersus
     lib/mir/ownership/ownership.tersus
     lib/mir/ownership/mono.tersus
     lib/mir/ownership/common.tersus

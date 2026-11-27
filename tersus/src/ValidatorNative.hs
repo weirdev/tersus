@@ -11,7 +11,7 @@
 -- library it is built with. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (withValidatorOperation, validateCompiled, validateCompiledUncached, validationRefusals, inBatches, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, cachedBootstrapSourceEmitter, validatorKey, certificateKey, prepareTexts, prepareEncodedTexts, raiseStack) where
+module ValidatorNative (withValidatorOperation, validateCompiled, validateCompiledUncached, validationRefusals, inBatches, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, cachedBootstrapSourceEmitter, validatorKey, certificateKey, prepareTexts, prepareEncodedTexts, prepareValidationWith, ValidationNotes (..), validateTexts, raiseStack) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, takeMVar, withMVar)
 import Data.List (foldl', isSuffixOf, sortOn)
@@ -33,11 +33,12 @@ import CacheLock (copyFileCloexec, openLockHandle, openTempFileCloexec)
 import Hash (fingerprint)
 import MirEval (MirValue (..))
 import MirHousekeeping (cachedEmitter, cachedSourceEmitter, cachedUncheckedValidatorFrom,
-    emitterIdentity, guardEmitterDirectory, cachedEmitterContentKeyFor, prepareValidatorFor, nativeStorage, prepareBootstrap,
+    emitterIdentity, emitterForIdentity, guardEmitterDirectory, cachedEmitterContentKeyFor, prepareValidatorFor, nativeStorage, prepareBootstrap,
     cachedPreparedInput)
+import MirPass (programData, runPassWith, validationMonoRequest)
 import EmitterProvenance (emitterSourcesMatch)
 import Native (cacheDirectory, cacheLock, cachedProgram, cachedProgramIfPresent, availableProcessors, parallelBuilds, runCommandWithInputFull, raiseStack)
-import SelfHostedMir (encode, encodeLibrary, obligationNote)
+import SelfHostedMir (encode, encodeLibrary, encodePrepared, needsValidationMono, obligationNotePrepared, retainValidationTemplates, validationView)
 import Syntax (parseImplCheckName)
 import Utils (Result (..), mapResult)
 
@@ -65,7 +66,35 @@ validateLibrary :: M.Program -> Result () String
 validateLibrary = validateWith True True
 
 validateWith :: Bool -> Bool -> M.Program -> Result () String
-validateWith physical caching program = unsafePerformIO (validateWithExe validatorExecutable physical caching program)
+validateWith physical caching program = unsafePerformIO $ do
+    prepared <- prepareValidationWith (nativeValidationPass Nothing) physical program
+    case prepared of
+        Error e -> pure (Error e)
+        Ok (producer, view) -> case prepareEncodedTexts (encodePrepared physical view) of
+            Error e -> pure (Error e)
+            Ok texts -> validateTexts (verdicts producer caching) (PreparedNotes view) physical texts
+
+type EmitterProducer = (Bool, String, FilePath)
+
+prepareValidationWith :: (String -> IO (Result (a, M.Program) String)) -> Bool -> M.Program -> IO (Result (Maybe a, M.Program) String)
+prepareValidationWith run physical raw = case validationView physical raw of
+    Left what -> pure (Error (unmodeledFeature what))
+    Right view
+        | not (needsValidationMono view) -> pure (Ok (Nothing, view))
+        | otherwise -> case programData view of
+            Error e -> pure (Error e)
+            Ok input -> fmap (mapResult (\(producer, mono) -> (Just producer, retainValidationTemplates view mono))) (run (validationMonoRequest input))
+
+nativeValidationPass :: Maybe EmitterProducer -> String -> IO (Result (EmitterProducer, M.Program) String)
+nativeValidationPass given request = do
+    selected <- maybe emitterIdentity (pure . Ok) given
+    case selected of
+        Error e -> pure (Error e)
+        Ok producer -> validationPassFor producer (emitterForIdentity producer) request
+
+validationPassFor :: EmitterProducer -> IO (Result FilePath String) -> String -> IO (Result (EmitterProducer, M.Program) String)
+validationPassFor producer emitter request = guardEmitterDirectory producer $
+    fmap (mapResult ((,) producer)) (runPassWith emitter "the validation monomorphization pass" request)
 
 -- The same, run by the validator the first argument gives
 prepareTexts :: Bool -> M.Program -> Result [(String, String)] String
@@ -81,23 +110,31 @@ prepareEncodedTexts encoded = case encoded of
 unmodeledFeature :: String -> String
 unmodeledFeature what = "the program uses a feature the Tersus validator does not model yet: " ++ what
 
-validateWithExe :: IO (Result FilePath String) -> Bool -> Bool -> M.Program -> IO (Result () String)
-validateWithExe exe physical caching program = case prepareTexts physical program of
-    Error e -> pure (Error e)
-    Ok texts -> validateTexts exe physical caching program texts
+data ValidationNotes = PreparedNotes M.Program | ReceiptNotes (IO (Result M.Program String))
 
-validateTexts :: IO (Result FilePath String) -> Bool -> Bool -> M.Program -> [(String, String)] -> IO (Result () String)
-validateTexts exe physical caching program texts = do
-    checked <- verdicts exe caching (map snd texts)
-    pure $ case checked of
-        Error e -> Error e
+validateTexts :: ([String] -> IO (Result [Maybe (Int, Int, Int)] String)) -> ValidationNotes -> Bool -> [(String, String)] -> IO (Result () String)
+validateTexts check notes physical texts = do
+    checked <- check (map snd texts)
+    case checked of
+        Error e -> pure (Error e)
         Ok results -> case [(index, verdict) | (index, Just verdict@(status, _, _)) <- zip [0 ..] results, status /= 0] of
-            [] -> Ok ()
-            (index, verdict) : _ -> Error (refusalMessage physical program (fst (texts !! index)) verdict)
+            [] -> pure (Ok ())
+            (index, verdict@(status, _, _)) : _ -> do
+                let name = fst (texts !! index)
+                view <- if status == 1 then noteView else pure Nothing
+                pure (Error (refusalMessage physical view name verdict))
+  where
+    noteView = case notes of
+        PreparedNotes view -> pure (Just view)
+        ReceiptNotes prepare -> do
+            reconstructed <- prepare
+            pure $ case reconstructed of
+                Ok view | prepareEncodedTexts (encodePrepared physical view) == Ok texts -> Just view
+                _ -> Nothing
 
-refusalMessage :: Bool -> M.Program -> String -> (Int, Int, Int) -> String
+refusalMessage :: Bool -> Maybe M.Program -> String -> (Int, Int, Int) -> String
 refusalMessage physical program name (status, block, step) = case status of
-    1 -> case (obligationNote physical program name block step, parseImplCheckName name) of
+    1 -> case (program >>= \view -> obligationNotePrepared physical view name block step, parseImplCheckName name) of
         (Just note, Just (trait, owner, function)) -> "impl " ++ trait ++ " for " ++ owner ++ ": " ++ function ++ " does not meet what " ++ trait ++ " declares: could not prove " ++ note
         (Just note, Nothing) -> "Could not prove: " ++ note ++ " (in " ++ shown ++ ")"
         _ -> "Could not prove: an obligation could not be proved by the Tersus validator (in " ++ shown ++ ", block " ++ show block ++ ", step " ++ show step ++ ")"
@@ -117,29 +154,38 @@ refusalMessage physical program name (status, block, step) = case status of
 --
 -- Each worker serializes and releases its function's proof text; keeping every text exhausted the Host runner.
 validationRefusals :: M.Program -> IO (Result [String] String)
-validationRefusals program = case encode program of
-    Left what -> pure (Error (unmodeledFeature what))
-    Right functions -> do
-        sized <- evaluate (forcedSizes [(name, function, functionSize function) | (name, function) <- functions])
-        namespace <- validatorKey
-        built <- validatorExecutable
-        case (namespace, built) of
-            (Error e, _) -> pure (Error e)
-            (_, Error e) -> pure (Error e)
-            (Ok key, Ok exe) -> do
-                _ <- evaluate (fullyEvaluated key `seq` fullyEvaluated exe)
-                let check (_, function, _) = case serializeFunction function of
-                        Left e -> pure (Left e)
-                        Right text -> Right <$> storedOrChecked key (pure (Ok exe)) text
-                checked <- inParallelBy (\(_, _, size) -> size) check sized
-                pure $ case [e | Left e <- checked] of
-                    e : _ -> Error e
-                    [] -> Ok [message | ((name, _, _), Right outcome) <- zip sized checked, Just message <- [failure name outcome]]
+validationRefusals raw = do
+    prepared <- prepareValidationWith (nativeValidationPass Nothing) False raw
+    case prepared of
+        Error e -> pure (Error e)
+        Ok (producer, view) -> case encodePrepared False view of
+            Left what -> pure (Error (unmodeledFeature what))
+            Right functions -> stream producer view functions
   where
+    stream producer view functions = do
+        sized <- evaluate (forcedSizes [(name, function, functionSize function) | (name, function) <- functions])
+        selected <- maybe emitterIdentity (pure . Ok) producer
+        case selected of
+            Error e -> pure (Error e)
+            Ok identity -> guardEmitterDirectory identity $ do
+                namespace <- validatorKeyFor identity
+                built <- validatorExecutableFor identity
+                case (namespace, built) of
+                    (Error e, _) -> pure (Error e)
+                    (_, Error e) -> pure (Error e)
+                    (Ok key, Ok exe) -> do
+                        _ <- evaluate (fullyEvaluated key `seq` fullyEvaluated exe)
+                        let check (_, function, _) = case serializeFunction function of
+                                Left e -> pure (Left e)
+                                Right text -> Right <$> storedOrChecked key (pure (Ok exe)) text
+                        checked <- inParallelBy (\(_, _, size) -> size) check sized
+                        pure $ case [e | Left e <- checked] of
+                            e : _ -> Error e
+                            [] -> Ok [message | ((name, _, _), Right outcome) <- zip sized checked, Just message <- [failure view name outcome]]
     forcedSizes items = foldr (\(_, _, size) rest -> size `seq` rest) () items `seq` items
-    failure name (Error e) = Just ("the compiled validator could not check " ++ name ++ ": " ++ e)
-    failure name (Ok verdict@(status, _, _))
-        | status /= 0 = Just (refusalMessage False program name verdict)
+    failure _ name (Error e) = Just ("the compiled validator could not check " ++ name ++ ": " ++ e)
+    failure view name (Ok verdict@(status, _, _))
+        | status /= 0 = Just (refusalMessage False (Just view) name verdict)
         | otherwise = Nothing
 
 inBatches :: Int -> ([a] -> IO (Result [String] String)) -> [a] -> IO (Result [String] String)
@@ -172,21 +218,24 @@ validationCacheHits = readIORef cacheHitCount
 -- the validator checks the functions in order and stops at the first it
 -- refuses, so a function after it has none (Nothing), and is never
 -- reached when the verdicts are read in order
-verdicts :: IO (Result FilePath String) -> Bool -> [String] -> IO (Result [Maybe (Int, Int, Int)] String)
-verdicts exe False texts = do
+verdicts :: Maybe EmitterProducer -> Bool -> [String] -> IO (Result [Maybe (Int, Int, Int)] String)
+verdicts producer False = uncachedVerdicts (maybe validatorExecutable validatorExecutableFor producer)
+verdicts producer True = \texts -> do
+    selected <- maybe emitterIdentity (pure . Ok) producer
+    case selected of
+        Error e -> pure (Error e)
+        Ok identity -> do
+            namespace <- validatorKeyFor identity
+            case namespace of
+                Error e -> pure (Error e)
+                Ok key -> withValidatorOperation identity key (\exe -> cachedVerdicts key exe texts)
+
+uncachedVerdicts :: IO (Result FilePath String) -> [String] -> IO (Result [Maybe (Int, Int, Int)] String)
+uncachedVerdicts exe texts = do
     checked <- inParallel (checkOne exe) texts
     pure $ case [e | Error e <- checked] of
         e : _ -> Error e
         [] -> Ok [Just verdict | Ok verdict <- checked]
-verdicts _ True texts = do
-    selected <- emitterIdentity
-    case selected of
-        Error e -> pure (Error e)
-        Ok producer -> do
-            namespace <- validatorKeyFor producer
-            case namespace of
-                Error e -> pure (Error e)
-                Ok key -> withValidatorOperation producer key (\exe -> cachedVerdicts key exe texts)
 
 -- Keep misses on one certified namespace; source drift must refuse, not mix producers.
 withValidatorOperation :: (Bool, String, FilePath) -> String -> (IO (Result FilePath String) -> IO (Result a String)) -> IO (Result a String)
@@ -409,7 +458,8 @@ cachedBootstrapSourceEmitter = do
 -- it validates what it is made of: the native storage library its lists and
 -- Boxes are built with, and its own source; only a validator that has done
 -- so is used.
-type PreparedCertificate = (String, String, FilePath, FilePath, M.Program, [(String, String)], M.Program, [(String, String)])
+type CertificateSide = (ValidationNotes, [(String, String)])
+type PreparedCertificate = (String, String, FilePath, FilePath, CertificateSide, CertificateSide)
 
 {-# NOINLINE certificateCache #-}
 certificateCache :: MVar (Map.Map (FilePath, String) PreparedCertificate)
@@ -429,22 +479,48 @@ prepareCertificateFor producer@(_, _, directory) = guardEmitterDirectory produce
             case executable of
                 Error e -> pure (Error e)
                 Ok exe -> modifyMVar certificateCache $ \made -> case Map.lookup (directory, unchecked) made of
-                    Just ready@(_, _, _, previousExe, _, _, _, _) | previousExe == exe -> pure (made, Ok ready)
+                    Just ready@(_, _, _, previousExe, _, _) | previousExe == exe -> pure (made, Ok ready)
                     _ -> do
-                        stored <- cachedPreparedInput "validator-selfcheck" [] validChecks $ pure $ case nativeStorage of
-                            Error e -> Error ("the native storage library: " ++ e)
-                            Ok (_, library) -> case (prepareTexts True library, prepareTexts False own) of
-                                (Error e, _) -> Error ("the native storage library: " ++ e)
-                                (_, Error e) -> Error ("its own source: " ++ e)
-                                (Ok a, Ok b) -> Ok (show (a, b))
+                        savedEmitter <- newMVar Nothing
+                        let emitter = modifyMVar savedEmitter $ \saved -> case saved of
+                                Just path -> pure (saved, Ok path)
+                                Nothing -> do
+                                    built <- emitterForIdentity producer
+                                    pure (case built of Ok path -> Just path; Error _ -> Nothing, built)
+                            pass = validationPassFor producer emitter
+                            prepare physical raw = mapResult snd <$> prepareValidationWith pass physical raw
+                            buildSide physical raw = do
+                                view <- prepare physical raw
+                                pure $ case view of
+                                    Error e -> Error e
+                                    Ok p -> mapResult ((,) p) (prepareEncodedTexts (encodePrepared physical p))
+                        views <- newIORef Nothing
+                        stored <- cachedPreparedInput "validator-selfcheck" [] validChecks $ case nativeStorage of
+                            Error e -> pure (Error ("the native storage library: " ++ e))
+                            Ok (_, library) -> do
+                                storage <- buildSide True library
+                                case storage of
+                                    Error e -> pure (Error ("the native storage library: " ++ e))
+                                    Ok (libraryView, a) -> do
+                                        source <- buildSide False own
+                                        case source of
+                                            Error e -> pure (Error ("its own source: " ++ e))
+                                            Ok (ownView, b) -> do
+                                                atomicModifyIORef' views (const (Just (libraryView, ownView), ()))
+                                                pure (Ok (show (a, b)))
                         case stored of
                             Error e -> pure (made, Error e)
                             Ok text -> case readChecks text of
                                 Nothing -> pure (made, Error "invalid prepared self-check transport")
                                 Just (libraryTexts, ownTexts) -> do
+                                    fresh <- readIORef views
                                     let library = case nativeStorage of Ok (_, value) -> value; Error e -> error e
+                                        notesFor physical raw pick = case fresh of
+                                            Just pair -> PreparedNotes (pick pair)
+                                            Nothing -> ReceiptNotes (prepare physical raw)
                                         key = certificateKey unchecked (map snd libraryTexts) (map snd ownTexts)
-                                        ready = (key, unchecked, directory, exe, library, libraryTexts, own, ownTexts)
+                                        ready = (key, unchecked, directory, exe,
+                                            (notesFor True library fst, libraryTexts), (notesFor False own snd, ownTexts))
                                     _ <- evaluate (length key)
                                     pure (Map.insert (directory, unchecked) ready made, Ok ready)
   where
@@ -465,7 +541,7 @@ validatorKey = do
 validatorKeyFor :: (Bool, String, FilePath) -> IO (Result String String)
 validatorKeyFor producer = cachedEmitterContentKeyFor producer "validator-checked" ["-O2"]
     [("validator", []), ("validator-selfcheck", [])] $
-        fmap (mapResult (\(key, _, _, _, _, _, _, _) -> key)) (prepareCertificateFor producer)
+        fmap (mapResult (\(key, _, _, _, _, _) -> key)) (prepareCertificateFor producer)
 
 validatorExecutable :: IO (Result FilePath String)
 validatorExecutable = do
@@ -491,17 +567,17 @@ buildCheckedValidatorFor producer = guardEmitterDirectory producer $ do
     prepared <- prepareCertificateFor producer
     case prepared of
         Error e -> pure (Error e)
-        Ok (key, unchecked, directory, exe, library, libraryTexts, own, ownTexts) ->
+        Ok (key, unchecked, directory, exe, (library, libraryTexts), (own, ownTexts)) ->
             cachedProgram "validator" key "the validator written in Tersus, checked" $ \output -> do
                 current <- cacheDirectory
                 if current /= Ok directory || certificateKey unchecked (map snd libraryTexts) (map snd ownTexts) /= key
                     then pure (Error "validator certificate producer changed before validation")
                     else do
-                        storage <- validateTexts (pure (Ok exe)) True False library libraryTexts
+                        storage <- validateTexts (uncachedVerdicts (pure (Ok exe))) library True libraryTexts
                         checked <- case storage of
                             Error e -> pure (Error ("the native storage library: " ++ e))
                             Ok () -> do
-                                result <- validateTexts (pure (Ok exe)) False False own ownTexts
+                                result <- validateTexts (uncachedVerdicts (pure (Ok exe))) own False ownTexts
                                 pure $ case result of
                                     Error e -> Error ("its own source: " ++ e)
                                     Ok () -> Ok ()

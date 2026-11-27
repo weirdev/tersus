@@ -10,7 +10,7 @@ import mir::instances::names { InstanceNameClasses, instanceNameAt };
 import mir::mono::functions { MonoKey, MonoCall, MonoRedirect, monoArgumentType, monoFunctionIndex, monoKept, monoLocal, monoRenameLine, monoReturn, monoSection, monoSectionTokens };
 import mir::mono::tokens { MonoBinding, monoBind, monoLookup, monoSubstitute };
 import mir::mono::types { monoFields };
-import validationmonoprobe::types { compareKeys, instanceLabel, namedTypes, symbolic, typeMatch };
+import mir::validationmono::types { compareKeys, instanceLabel, namedTypes, symbolic, typeMatch };
 
 struct ValidationInstance { key: MonoKey, function: FullFunction };
 impl Clone for ValidationInstance { };

@@ -1,10 +1,11 @@
-module MirPass (programData, runPassWith, runMonoOwnershipPassWith) where
+module MirPass (programData, runPassWith, validationMonoRequest, runMonoOwnershipPassWith) where
 
 import Data.Char (isSpace)
 import Data.List (isPrefixOf)
 import qualified Data.Set as Set
 import System.Exit (ExitCode (..))
 import Mir (Lowered (..), Program)
+import MirCopiesNameProfile (nameProfilePrefix)
 import MirData (readLowered, readProgram, writeLowered)
 import MirOwnershipData (restoreOwnership)
 import Native (runWithInputFull)
@@ -12,6 +13,9 @@ import Utils
 
 programData :: Program -> Result String String
 programData program = writeLowered (Lowered program Set.empty Set.empty Set.empty Set.empty Set.empty Set.empty [])
+
+validationMonoRequest :: String -> String
+validationMonoRequest input = "pass validation-mono\nprogram " ++ show (length (lines input)) ++ "\n" ++ input ++ nameProfilePrefix [input]
 
 runPassWith :: IO (Result FilePath String) -> String -> String -> IO (Result Program String)
 runPassWith tool label input = do

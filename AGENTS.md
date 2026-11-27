@@ -113,8 +113,10 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     emitter's executable runs them when its input starts with `pass ownership`
     or `pass expand`. `mir/mono/` specializes native generic functions over
     the complete `mir/full/` MIR3 codec; the emitter dispatches `pass mono`.
-    The native seed contains this dispatcher; validation specialization in
-    `MirMono.monomorphizeForValidation` retains contracts and ghosts in Haskell.
+    The native seed contains this dispatcher. Compiled validation uses the
+    separate `pass validation-mono` over `mir/validationmono/` before proof
+    encoding. It retains contracts and ghosts; `MirMono.monomorphizeForValidation`
+    remains the pure reference.
     `mir/link/` uses the same complete MIR3 codec for `pass link`; the Haskell
     `Link` wrapper uses the pinned emitter seed to avoid cycling through stage 1.
     `TestLink` checks canonical MIR3 fingerprints and exact Link refusals.
