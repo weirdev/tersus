@@ -3,15 +3,15 @@ module TestTersus (main, allGroups) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.MVar (modifyMVar, modifyMVar_, newMVar)
-import Control.Exception (SomeException, displayException, mask, try)
+import Control.Exception (SomeException, displayException, evaluate, mask, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.List (foldl', isPrefixOf)
 import GHC.Clock (getMonotonicTime)
-import Native (availableProcessors, readProcessOutput)
+import Native (availableProcessors, readProcessOutput, withSpawnedProcess)
 import System.Environment (getArgs, getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..), exitFailure)
-import System.IO (BufferMode (LineBuffering), hPutStr, hSetBuffering, stderr, stdout)
-import System.Process (CreateProcess (..), proc)
+import System.IO (BufferMode (LineBuffering), hClose, hGetContents, hPutStr, hSetBuffering, stderr, stdout)
+import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess)
 import System.Posix.Process (ProcessTimes (..), getParentProcessID, getProcessID, getProcessTimes)
 import System.Posix.Unistd (SysVar (..), getSysVar)
 import Foreign.C.Types (CInt (..), CLong)
@@ -318,8 +318,10 @@ runInParallel jobs names = do
                         putStrLn ("[START] " ++ name)
                         -- (the compacting collector for the host's groups: the elaborator's holds 2 GiB of its program and
                         -- that program's validator data at once, which a copying collection took 8 GiB to hold)
-                        let arguments = [name, "--child", "+RTS"] ++ rtsOptions ++ ["-c" | "testHostValidation:" `isPrefixOf` name] ++ ["-RTS"]
-                        outcome <- try (readProcessOutput (proc self arguments){env = Just environment} "")
+                        let host = "testHostValidation:" `isPrefixOf` name
+                            arguments = [name, "--child", "+RTS"] ++ rtsOptions ++ ["-c" | host] ++ ["-RTS"]
+                            command = (proc self arguments){env = Just environment}
+                        outcome <- try (if host then readHostOutput command else readProcessOutput command "")
                         finished <- getMonotonicTime
                         putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))
                         pure (name, finished - started, outcome)
@@ -332,6 +334,19 @@ runInParallel jobs names = do
     -- (the results are taken in the order of the list, so the output has the order it has without the processes)
     outcomes <- forM slots $ \(_, done) -> takeMVar done >>= printOutcome
     pure (foldr combineSummaries (testSummary 0 0) (map fst outcomes), all snd outcomes)
+
+-- Host workers may time out; keep their diagnostics live without changing stdout summary accounting.
+readHostOutput :: CreateProcess -> IO (ExitCode, String, String)
+readHostOutput command =
+    withSpawnedProcess command{std_in = CreatePipe, std_out = CreatePipe, std_err = Inherit} $ \spawned ->
+        case spawned of
+            (Just input, Just output, Nothing, process) -> do
+                hClose input
+                text <- hGetContents output
+                _ <- evaluate (length text)
+                code <- waitForProcess process
+                pure (code, text, "")
+            _ -> ioError (userError "the host worker did not give its pipes")
 
 printOutcome :: (String, Double, Either SomeException (ExitCode, String, String)) -> IO (TestSummary, Bool)
 printOutcome (name, seconds, outcome) = do
