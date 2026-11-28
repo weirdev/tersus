@@ -2998,11 +2998,19 @@ reachesName functions caller from target = go Set.empty [from]
         | Set.member x seen = go seen xs
         | otherwise = go (Set.insert x seen) (maybe [] callNamesOf (Map.lookup x allFns) ++ xs)
 
-block :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Maybe (Bool, MirValue) -> Bool -> M.Function -> Map.Map M.BlockId Int -> Map.Map M.BlockId (Set.Set M.BlockId) -> (M.BlockId, M.BasicBlock) -> Build -> Maybe (MirValue, Build)
-block types invariants functions rules termInfo allowCalls fn predecessors regions (blockId@(M.BlockId n), M.BasicBlock stmts end) b0' = do
+data BlockAnalysis = BlockAnalysis
+    { blockAliasing :: Aliasing
+    , blockInvariantParents :: Map.Map M.Local (Set.Set M.Local)
+    , blockDefinedAtEntry :: Map.Map M.BlockId (Set.Set M.Local)
+    , blockLiveAfterStatements :: Map.Map M.BlockId [Set.Set M.Local]
+    , blockLiveAtEnd :: Map.Map M.BlockId (Set.Set M.Local)
+    }
+
+block :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Maybe (Bool, MirValue) -> Bool -> M.Function -> BlockAnalysis -> Map.Map M.BlockId Int -> Map.Map M.BlockId (Set.Set M.BlockId) -> (M.BlockId, M.BasicBlock) -> Build -> Maybe (MirValue, Build)
+block types invariants functions rules termInfo allowCalls fn analysis predecessors regions (blockId@(M.BlockId n), M.BasicBlock stmts end) b0' = do
     -- (the locals every path to a statement has assigned: a reference to an
     -- element is refreshed after a write of its root only where it exists)
-    let b0 = b0'{buildDefined = Just (Map.findWithDefault Set.empty blockId (definitelyAssigned alias fn))}
+    let b0 = b0'{buildDefined = Just (Map.findWithDefault Set.empty blockId (blockDefinedAtEntry analysis))}
         -- (whatever form an assignment has, the references into the local
         -- assigned are bound again; a call's destination likewise, at the call)
         addTracked (steps0, state0, c0, pe0) (index, s) = do
@@ -3152,9 +3160,10 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
     let (literalSteps, b3) = literalFacts (steps ++ extra ++ [ending]) b2
     pure (record "ExecutionBlock" [("id", MInt (toInteger n)), ("steps", MList (literalSteps ++ steps ++ extra)), ("end", ending)], b3)
   where
-    alias = aliasingOf (buildStorage b0') types functions fn
-    parentsOfLocals = invariantParents (buildStorage b0') alias types invariants functions fn
-    (liveAfterStatements, liveAtEnd) = validationLiveness (buildStorage b0') types functions fn
+    alias = blockAliasing analysis
+    parentsOfLocals = blockInvariantParents analysis
+    liveAfterStatements = blockLiveAfterStatements analysis
+    liveAtEnd = blockLiveAtEnd analysis
     -- (an operation that writes or gives through a reference observes, whatever is live after it, that reference,
     -- every place it may be to, the holders of a reference into those, and the values whose invariants speak of any
     -- of them: its own invariant checks cannot be skipped because none of these is used again)
@@ -3245,7 +3254,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                 M.AssignRef{} -> True
                 _ -> False
             -- (a reference bound before the loop is to the same place in every iteration)
-            loopDefined = Map.findWithDefault Set.empty blockId (definitelyAssigned alias fn)
+            loopDefined = Map.findWithDefault Set.empty blockId (blockDefinedAtEntry analysis)
             rebound = Map.elems (Map.fromList [(ref, view) | view@(ref, _, _) <- concatMap (viewsThrough alias) assigned, Set.member ref loopDefined])
             -- (a holder only made out of date keeps its shape from before the loop)
             direct = Set.fromList
@@ -3984,8 +3993,13 @@ encodeFunction physical storage types invariants functions (worldReaders, inputR
             _ -> pure ([], Nothing, withRequires)
         let predecessors = predecessorEdges fn
             regions = loopRegions fn
+            -- The facts describe the whole function. Recomputing them in each block repeats the dataflow passes.
+            alias = aliasingOf storage types functions fn
+            (liveAfter, liveEnd) = validationLiveness storage types functions fn
+            analysis = BlockAnalysis alias (invariantParents storage alias types invariants functions fn)
+                (definitelyAssigned alias fn) liveAfter liveEnd
             addBlock (blocks, b) entry = do
-                (v, b') <- block types invariants functions rules termInfo allowCalls fn predecessors regions entry b
+                (v, b') <- block types invariants functions rules termInfo allowCalls fn analysis predecessors regions entry b
                 pure (v : blocks, b')
         (blocksNewestFirst, b) <- foldM addBlock ([], withVariant) (Map.toList (M.fnBlocks fn))
         let blocks = reverse blocksNewestFirst
