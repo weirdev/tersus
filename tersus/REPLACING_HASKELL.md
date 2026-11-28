@@ -201,7 +201,8 @@ must also stay within the agreed performance budget against the same-host base.
 in `lib/mir/full/`. Linking and pruning use `lib/mir/link/`. The emitter accepts
 `pass mono`; the host adapter is `MirHousekeeping.monomorphizeWith`.
 The matching published seed runs this pass during cold bootstrap. The native
-Haskell binding and finisher are removed; validation specialization is retained.
+Haskell binding and finisher are removed; the separate validation pass
+preserves the proofs.
 
 The pass substitutes types and sizes, builds reachable instances and preserves
 implicit Drop instantiation. Canonical declaration and selector keys are
@@ -213,9 +214,11 @@ removed before completing erased declarations.
 `TestMirMono` checks canonical raw output, raw and actual pre-native-stage
 corpus inputs, metadata, refusals and mutation controls. The current
 `testHostValidation:emitter` group validates its functions.
-`monomorphizeForValidation` and its shared helpers, cached named-type map,
-contracts and ghost environments stay in Haskell. `MirCopies` still runs
-before native specialization at link time.
+Compiled validation specializes through `lib/mir/validationmono/` on the same
+producer as the compiled validator. The pure `monomorphizeForValidation`
+remains independent for reference validation and comparison, including
+logical and physical proof input bytes. `MirCopies` still runs before
+specialization at link time.
 
 ### 2. Elaboration and the package frontend
 
