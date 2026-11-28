@@ -40,9 +40,11 @@ testMirEmit =
     TestList
         "testMirEmit"
         [ TestCase "the four programs share the reader module of the mir package" sharedReader
-        , TestCase "field offsets borrow the type table instead of cloning it" borrowedTypeTable
-        , TestCase "hot emitter operations move Gen instead of cloning its history" threadedGen
-        , TestCase "type closure preserves ordered duplicate and dependency traversal" orderedTypeClosure
+        , TestList "linked emitter"
+            [ TestCase "type closure preserves ordered duplicate and dependency traversal" orderedTypeClosure
+            , TestCase "field offsets borrow the type table instead of cloning it" borrowedTypeTable
+            , TestCase "hot emitter operations move Gen instead of cloning its history" threadedGen
+            ]
         , TestCase "the IR of a loop, interpreted" (readFile "examples/loops.tersus" >>= interpretedIr)
         , TestParallel
             "every example, natively"
@@ -87,10 +89,14 @@ runEmitter world compiled = case compiled of
     Error e -> Error e
     Ok program -> runProgramIn world program
 
--- The emitter linked and owned, made once in a process for the cases that look at its owned MIR
+-- The linked and owned checks share a snapshot and its decoded MIR (several GiB in a CI worker).
+{-# NOINLINE linkedEmitter #-}
+linkedEmitter :: Result Program String
+linkedEmitter = unsafePerformIO (linkedFromFile "lib/mir/emit/emit.tersus")
+
 {-# NOINLINE ownedEmitter #-}
 ownedEmitter :: Result Program String
-ownedEmitter = unsafePerformIO (linkedFromFile "lib/mir/emit/emit.tersus") `bindResult` insertOwnership
+ownedEmitter = linkedEmitter `bindResult` insertOwnership
 
 -- The emitter executable (TestMirReader.programExecutable, kept on disk for the run), looked up once in a process: the
 -- cases of a sweep would otherwise each hash its package again (TestHarness.memoizedTestExecutable keeps no failed build
@@ -133,9 +139,8 @@ threadedGen = do
                 if null snapshots && null copies then Nothing else Just ("hot emitter operations clone Gen: " ++ show (snapshots ++ copies))
 
 orderedTypeClosure :: IO TestResult
-orderedTypeClosure = do
-    loaded <- linkedFromFile "lib/mir/emit/emit.tersus"
-    pure $ case loaded of
+orderedTypeClosure =
+    pure $ case linkedEmitter of
         Error e -> Just e
         Ok program -> firstTypeClosureProblem
             [ testAssertEq (Eval.runNamedFunction program "closeTypes" [Eval.MList declarations, Eval.MList roots]) (Ok (Just (Eval.MList expected)))

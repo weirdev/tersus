@@ -10,7 +10,6 @@ module TestScheduling
     , ciShardCount
     , runnerSpan
     , groupWeight
-    , isSelfHosted
     , estimatedPeakMiB
     , memoryBudgetMiB
     , admitGroup
@@ -131,18 +130,16 @@ assignShards count names
         [(name, normalShards !! (index - 1))
             | (name, index) <- assignShards (length normalShards) (filter (\name -> name `notElem` map fst isolated) names)]
         ++ isolated
-    | otherwise = [(name, index) | (index, assigned) <- zip [1 ..] (foldl' place (replicate (min count (length names)) []) units), name <- assigned]
+    | otherwise = [(name, index) | (index, assigned) <- zip [1 ..] (foldl' place (replicate (min count (length names)) []) ordered), name <- assigned]
   where
     isolated = [(name, index) | (name, index) <- zip bootstrapGroups [count - 3 ..], name `elem` names]
     normalShards = [index | index <- [1 .. count], index `notElem` map snd isolated]
-    selfHosted = filter isSelfHosted names
-    -- (longest first, each to the runner it lengthens least, as the harness would run it there: memory decides what
-    -- runs beside what as much as the workers do; ties go to the runner with less work, then to the first)
-    units = sortBy (comparing (negate . sum . map groupWeight)) ([selfHosted | not (null selfHosted)] ++ [[name] | name <- names, not (isSelfHosted name)])
-    place shards unit =
-        let cost (index, assigned) = (runnerSpan (assigned ++ unit), sum (map groupWeight assigned), index :: Int)
+    -- Longest first, then place where memory admission leaves the earliest finish.
+    ordered = launchOrder id names
+    place shards name =
+        let cost (index, assigned) = (runnerSpan (assigned ++ [name]), sum (map groupWeight assigned), index :: Int)
             target = (\(_, _, index) -> index) (minimum (map cost (zip [1 ..] shards)))
-         in [if index == target then assigned ++ unit else assigned | (index, assigned) <- zip [1 ..] shards]
+         in [if index == target then assigned ++ [name] else assigned | (index, assigned) <- zip [1 ..] shards]
 
 -- The worker processes of a CI runner (.github/workflows/ci.yml: -j 4)
 ciWorkers :: Int
@@ -167,12 +164,13 @@ admissionTrace = go 0 [] . launchOrder id
 runnerSpan :: [String] -> Int
 runnerSpan names = maximum (0 : [start + groupWeight name | (start, _, _, name) <- admissionTrace names])
 
+-- Rebuilds its validator in each process rather than reading the old, much larger decoded cache entry.
+-- Recent CI batches topped out at 2.3 GiB in the worker; charge 4.5 GiB for cold and subprocess headroom.
 isSelfHosted :: String -> Bool
 isSelfHosted = isPrefixOf "testMirSelfHosted:"
 
--- The median processor time of each group over recent CI runs, in seconds (its [CPU] line: what its process and the
--- processes it waited for used; dev/ci_weights.py prints these rows from CI logs). A group that builds one of the
--- runner's shared tools is charged for it.
+-- Material timing changes use the median of min(CPU, wall) from recent CI logs (dev/ci_weights.py).
+-- The rebatched emitter rows estimate one shared link/ownership preparation and per-worker native startup.
 groupWeight :: String -> Int
 groupWeight name = Map.findWithDefault 1 name weightTable
 
@@ -183,21 +181,21 @@ weightTable = Map.fromList measuredWeights
 measuredWeights :: [(String, Int)]
 measuredWeights =
     [ ("testArrays", 50)
-    , ("testAstData:1/4", 242)
-    , ("testAstData:2/4", 477)
-    , ("testAstData:3/4", 28)
+    , ("testAstData:1/4", 34)
+    , ("testAstData:2/4", 175)
+    , ("testAstData:3/4", 296)
     , ("testAstData:4/4", 43)
-    , ("testAstReader:1/4", 425)
-    , ("testAstReader:2/4", 72)
-    , ("testAstReader:3/4", 137)
-    , ("testAstReader:4/4", 73)
+    , ("testAstReader:1/4", 128)
+    , ("testAstReader:2/4", 18)
+    , ("testAstReader:3/4", 52)
+    , ("testAstReader:4/4", 433)
     , ("testBootstrap", 695)
-    , ("testBorrow", 75)
+    , ("testBorrow", 142)
     , ("testBox", 25)
     , ("testBuiltinRegistry", 1)
     , ("testBytes", 9)
     , ("testCallsAndReturnJoin", 8)
-    , ("testCallsUseContracts", 33)
+    , ("testCallsUseContracts", 81)
     , ("testCfgValidation", 32)
     , ("testCli", 17)
     , ("testClosures", 108)
@@ -206,9 +204,9 @@ measuredWeights =
     , ("testCopies", 55)
     , ("testCrashRegression", 3)
     , ("testCrlf", 1)
-    , ("testDataCodec", 196)
+    , ("testDataCodec", 465)
     , ("testDeref", 7)
-    , ("testDifferential", 300)
+    , ("testDifferential", 927)
     , ("testEnumCast", 9)
     , ("testEnums", 16)
     , ("testEq", 10)
@@ -216,6 +214,7 @@ measuredWeights =
     , ("testErgonomics", 112)
     , ("testExamples", 40)
     , ("testFirstLast", 4)
+    , ("testFncReview", 339)
     , ("testForLoops", 16)
     , ("testForallInstantiation", 4)
     , ("testForallLoops", 5)
@@ -240,69 +239,72 @@ measuredWeights =
     , ("testIfJoin", 17)
     , ("testInferredInvariants", 16)
     , ("testIntRange", 3)
-    , ("testLibModules", 33)
+    , ("testLibModules", 107)
     , ("testLinearArithmetic", 21)
-    , ("testLink", 350)
-    , ("testLinkNative", 260)
+    , ("testLink", 764)
+    , ("testLinkNative", 450)
     , ("testListProofs", 7)
     , ("testLists", 18)
     , ("testMir", 6)
     , ("testMirCopies", 1)
-    , ("testMirData", 60)
-    , ("testMirEmit:1/4", 59)
-    , ("testMirEmit:2/4", 43)
-    , ("testMirEmit:3/4", 148)
-    , ("testMirEmit:4/4", 59)
-    , ("testMirEmitPrograms", 147)
-    , ("testMirEmitRecords", 125)
-    , ("testMirErase", 85)
+    , ("testMirData", 189)
+    , ("testMirEmit:1/4", 540)
+    , ("testMirEmit:2/4", 600)
+    , ("testMirEmit:3/4", 330)
+    , ("testMirEmit:4/4", 330)
+    , ("testMirEmitPrograms", 653)
+    , ("testMirEmitRecords", 472)
+    , ("testMirErase", 175)
     , ("testMirEvalLists", 6)
     , ("testMirLowered:1/4", 36)
-    , ("testMirLowered:2/4", 312)
-    , ("testMirLowered:3/4", 129)
-    , ("testMirLowered:4/4", 35)
-    , ("testMirOwnership", 130)
-    , ("testMirReader", 50)
-    , ("testMirSelfHosted:1/4", 65)
-    , ("testMirSelfHosted:2/4", 61)
-    , ("testMirSelfHosted:3/4", 206)
-    , ("testMirSelfHosted:4/4", 69)
-    , ("testMirSupport", 57)
-    , ("testMirVerify:1/4", 82)
-    , ("testMirVerify:2/4", 30)
-    , ("testMirVerify:3/4", 71)
-    , ("testMirVerify:4/4", 27)
+    , ("testMirLowered:2/4", 460)
+    , ("testMirLowered:3/4", 382)
+    , ("testMirLowered:4/4", 69)
+    , ("testMirMono", 365)
+    , ("testMirMonoOwnership", 71)
+    , ("testMirOwnership", 292)
+    , ("testMirPacks", 283)
+    , ("testMirReader", 270)
+    , ("testMirSelfHosted:1/4", 334)
+    , ("testMirSelfHosted:2/4", 242)
+    , ("testMirSelfHosted:3/4", 347)
+    , ("testMirSelfHosted:4/4", 401)
+    , ("testMirSupport", 783)
+    , ("testMirVerify:1/4", 141)
+    , ("testMirVerify:2/4", 105)
+    , ("testMirVerify:3/4", 200)
+    , ("testMirVerify:4/4", 112)
     , ("testMirVerifyPrograms", 263)
-    , ("testModules:1/4", 255)
-    , ("testModules:2/4", 160)
-    , ("testModules:3/4", 95)
-    , ("testModules:4/4", 70)
+    , ("testModules:1/4", 346)
+    , ("testModules:2/4", 100)
+    , ("testModules:3/4", 179)
+    , ("testModules:4/4", 107)
     , ("testModulo", 12)
     , ("testMulDivNegative", 7)
-    , ("testNative:1/4", 62)
-    , ("testNative:2/4", 74)
-    , ("testNative:3/4", 65)
-    , ("testNative:4/4", 62)
+    , ("testNative:1/4", 247)
+    , ("testNative:2/4", 234)
+    , ("testNative:3/4", 230)
+    , ("testNative:4/4", 183)
     , ("testNativeErgonomics", 88)
-    , ("testNativeStorageModules", 209)
-    , ("testOwnership", 45)
-    , ("testOwnershipCodec", 232)
-    , ("testOwnershipInterpreted", 26)
+    , ("testNativeStorageModules", 663)
+    , ("testOwnership", 262)
+    , ("testOwnershipCodec", 351)
+    , ("testOwnershipInterpreted", 308)
     , ("testOwnershipMetadata", 1)
-    , ("testParity:mirReader", 366)
-    , ("testParity:validation", 535)
+    , ("testParity:mirReader", 201)
+    , ("testParity:validation", 1090)
     , ("testParse", 1)
     , ("testParseEval", 1)
     , ("testParseVal", 3)
     , ("testParseValFail", 1)
-    , ("testParser:1/4", 220)
-    , ("testParser:2/4", 386)
-    , ("testParser:3/4", 472)
-    , ("testParser:4/4", 122)
+    , ("testParser:1/4", 270)
+    , ("testParser:2/4", 213)
+    , ("testParser:3/4", 219)
+    , ("testParser:4/4", 48)
     , ("testParserBootstrap:1/2", 659)
     , ("testParserBootstrap:2/2", 612)
     , ("testParserUnicode", 12)
-    , ("testPhase1Cache", 316)
+    , ("testPhase1Cache", 122)
     , ("testPhase1Packages", 21)
     , ("testPhase2Packages", 30)
     , ("testPipeline", 7)
@@ -315,86 +317,97 @@ measuredWeights =
     , ("testSequence", 42)
     , ("testSharedCache:1/4", 9)
     , ("testSharedCache:2/4", 6)
-    , ("testSharedCache:3/4", 466)
-    , ("testSharedCache:4/4", 221)
+    , ("testSharedCache:3/4", 252)
+    , ("testSharedCache:4/4", 590)
     , ("testSharedCacheProbe", 1)
     , ("testSolverCache", 4)
-    , ("testStdGraph", 210)
-    , ("testStrings", 66)
+    , ("testStdGraph", 16)
+    , ("testStrings", 141)
     , ("testStructs", 12)
     , ("testTermination", 14)
-    , ("testThreads", 20)
+    , ("testThreads", 80)
     , ("testTraits", 62)
     , ("testTypeCheck", 3)
     , ("testUserRewriteValidation", 2)
     , ("testValidateWithExpectedMatch", 1)
     , ("testValidateWithExpectedMismatch", 1)
     , ("testValidationCache", 17)
-    , ("testValidationFail", 1)
-    , ("testVariadic", 71)
+    , ("testValidationFail", 38)
+    , ("testVariadic", 188)
     , ("testVerdictLocks", 1)
     ]
 
 -- The budget leaves the OS and runner of the 16 GB CI machine about 3.6 GiB.
--- The most each group's process reached on CI, from its [PEAK] lines with a tenth added (dev/ci_weights.py --peaks
--- prints these rows); the self-hosted batches share one cached program, about 9.5 GiB loaded. Estimates for admission,
--- not a limit the processes are held to: groups admitted at the 1024 MiB default that each took 3 to 6 GiB ran
--- together and the runner was shut down.
+-- Use observed process peaks plus headroom (dev/ci_weights.py --peaks). These are admission estimates, not limits.
 estimatedPeakMiB :: String -> Int
 estimatedPeakMiB name
-    | isSelfHosted name = 9728
+    | isSelfHosted name = 4608
     | otherwise = Map.findWithDefault 1024 name peakTable
 
 peakTable :: Map.Map String Int
 peakTable = Map.fromList measuredPeaksMiB
 
--- Whoever wins the shared MIR probe cache miss can reach 2,593 MiB; account for it in every participating group.
+-- Any of the four shared MIR probes can own the cold build; charge it in each.
 measuredPeaksMiB :: [(String, Int)]
 measuredPeaksMiB =
-    [ ("testAstData:1/4", 3328)
-    , ("testAstData:2/4", 4352)
-    , ("testAstReader:1/4", 3584)
-    , ("testAstReader:2/4", 3072)
-    , ("testAstReader:3/4", 3072)
-    , ("testAstReader:4/4", 1536)
-    , ("testDataCodec", 2816)
-    , ("testDifferential", 4096)
+    [ ("testAstData:2/4", 1280)
+    , ("testAstData:3/4", 2304)
+    , ("testAstReader:1/4", 2304)
+    , ("testAstReader:2/4", 2816)
+    , ("testAstReader:3/4", 4608)
+    , ("testAstReader:4/4", 2560)
+    , ("testBorrow", 1536)
+    , ("testCallsUseContracts", 1792)
+    , ("testClosures", 1280)
+    , ("testControlFlow", 1280)
+    , ("testDataCodec", 2304)
+    , ("testDifferential", 11520)
+    , ("testErgonomics", 1536)
+    , ("testFncReview", 4608)
     , ("testFrontendBootstrap", 6912)
+    , ("testHeldReferences", 1280)
     , ("testHostValidation:elaborator", 8704)
     , ("testHostValidation:emitter", 7168)
     , ("testHostValidation:parser", 2048)
-    , ("testMirCopiesFused", 3072)
-    , ("testMirCopiesParity", 3072)
-    , ("testMirCopyKeys", 3072)
-    , ("testMirEmit:2/4", 6400)
-    , ("testMirEmit:3/4", 9728)
-    , ("testMirEmit:4/4", 9728)
-    , ("testMirEmitPrograms", 2560)
-    , ("testMirEmitRecords", 5632)
-    , ("testMirErase", 3072)
-    , ("testMirLowered:2/4", 5888)
-    , ("testMirLowered:3/4", 4352)
-    , ("testMirLowered:4/4", 2816)
-    , ("testMirOwnership", 4096)
-    , ("testMirPacks", 3072)
-    , ("testMirSelfHosted:1/4", 9984)
-    , ("testMirSelfHosted:2/4", 9984)
-    , ("testMirSelfHosted:3/4", 7936)
-    , ("testMirSelfHosted:4/4", 9984)
-    , ("testMirSupport", 3840)
-    , ("testMirVerify:1/4", 3328)
-    , ("testMirVerify:2/4", 3328)
-    , ("testMirVerify:3/4", 2816)
-    , ("testMirVerify:4/4", 1280)
-    , ("testMirVerifyPrograms", 2304)
-    , ("testModules:1/4", 3328)
-    , ("testModules:2/4", 4608)
-    , ("testModules:3/4", 1536)
-    , ("testModules:4/4", 1280)
-    , ("testNative:2/4", 2304)
-    , ("testNativeStorageModules", 2816)
-    , ("testOwnership", 3584)
-    , ("testOwnershipCodec", 2816)
+    , ("testLibModules", 1280)
+    , ("testLink", 5120)
+    , ("testLinkNative", 5120)
+    , ("testMirCopiesFused", 4608)
+    , ("testMirCopiesParity", 4608)
+    , ("testMirCopyKeys", 4608)
+    , ("testMirData", 1536)
+    , ("testMirEmit:1/4", 9216)
+    , ("testMirEmit:2/4", 9216)
+    , ("testMirEmit:3/4", 9216)
+    , ("testMirEmit:4/4", 9216)
+    , ("testMirEmitPrograms", 8704)
+    , ("testMirEmitRecords", 9216)
+    , ("testMirErase", 1536)
+    , ("testMirLowered:2/4", 4096)
+    , ("testMirLowered:3/4", 1536)
+    , ("testMirMono", 9472)
+    , ("testMirMonoOwnership", 1280)
+    , ("testMirOwnership", 1280)
+    , ("testMirPacks", 4608)
+    , ("testMirReader", 1536)
+    , ("testMirSupport", 8448)
+    , ("testMirVerify:1/4", 1536)
+    , ("testMirVerify:2/4", 3840)
+    , ("testMirVerify:3/4", 1536)
+    , ("testMirVerify:4/4", 3840)
+    , ("testMirVerifyPrograms", 1536)
+    , ("testModules:1/4", 2048)
+    , ("testModules:2/4", 2048)
+    , ("testModules:3/4", 1280)
+    , ("testNative:1/4", 1280)
+    , ("testNative:2/4", 1280)
+    , ("testNative:3/4", 1280)
+    , ("testNative:4/4", 1280)
+    , ("testNativeErgonomics", 1280)
+    , ("testNativeStorageModules", 8704)
+    , ("testOwnership", 2048)
+    , ("testOwnershipCodec", 2048)
+    , ("testOwnershipInterpreted", 8704)
     , ("testParity:mirReader", 1280)
     , ("testParity:validation", 1792)
     , ("testParser:1/4", 6144)
@@ -403,9 +416,11 @@ measuredPeaksMiB =
     , ("testParser:4/4", 4352)
     , ("testParserBootstrap:2/2", 4352)
     , ("testPhase1Cache", 4608)
+    , ("testPrettyProofs", 1280)
     , ("testSharedCache:3/4", 8192)
-    , ("testSharedCache:4/4", 4096)
-    , ("testStructs", 2304)
+    , ("testSharedCache:4/4", 2304)
+    , ("testThreads", 1280)
+    , ("testVariadic", 1280)
     ]
 
 memoryBudgetMiB :: Int
@@ -421,13 +436,9 @@ admitGroup budget estimate used queue = case break fits queue of
     fits item = used == 0 || used + estimate item <= budget
 
 -- Longest first: a runner is done when its last group is, so the groups that take minutes start before the short ones.
--- The self-hosted batches are admitted one at a time (estimatedPeakMiB), so the chain they make starts before anything.
+-- Self-hosted batches build independently and no longer need a separate launch priority.
 launchOrder :: (a -> String) -> [a] -> [a]
-launchOrder name = sortBy (comparing (\item -> negate (launchWeight (name item))))
-  where
-    launchWeight group
-        | isSelfHosted group = maxBound - 1000000 + groupWeight group
-        | otherwise = groupWeight group
+launchOrder name = sortBy (comparing (negate . groupWeight . name))
 
 groupName :: Test -> String
 groupName (TestCase name _) = name
@@ -436,8 +447,8 @@ groupName (TestParallel name _) = name
 
 leafTests :: Test -> [Test]
 leafTests test@TestCase{} = [test]
--- These cases overwrite and execute the same memory_limit file, so they must stay in one process.
-leafTests test@(TestList "memory" _) = [test]
+-- Groups that share an expensive fixture or overwrite the same native test file must stay in one process.
+leafTests test@(TestList name _) | name `elem` ["memory", "linked emitter"] = [test]
 leafTests (TestList name tests) = [TestList name [leaf] | test <- tests, leaf <- leafTests test]
 leafTests (TestParallel name tests) = [TestParallel name [leaf] | test <- tests, leaf <- leafTests test]
 
@@ -471,6 +482,7 @@ splitTestGroups count original
     unitWeight :: Test -> Int
     unitWeight test = case concat (leafPaths test) of
         path | any (`elem` path) ["whole corpus parity", "whole parsed and elaborated source corpus", "whole corpus native round trip", "the text protocol loses nothing over the corpus"] -> 60
+        path | "linked emitter" `elem` path -> 60
         path | "validator package keeps bare helpers and reference calls never run driver main" `elem` path -> 250
         path | "late top-level definitions consume expression types once" `elem` path && last path == "0" -> 110
         path | "native-module-loader" `elem` path && "lib/parser/parser.tersus" `elem` path -> 85
@@ -712,26 +724,25 @@ testScheduling names batches = TestList "testScheduling"
              ("MIR contracts", 60), ("MIR arithmetic", 22), ("MIR sequences", 32), ("MIR data", 21),
              ("MIR list updates", 19), ("MIR branches", 14), ("MIR loops", 22), ("bridges", 19),
              ("join hull", 35), ("loop candidate provenance", 7), ("goal slices", 17)]
-    , testCase "self-hosted cache-sharing batches belong to one shard for every count" $
-        testAssertTrue (all (\count ->
-            length (unique [index | (name, index) <- assignShards count names, isSelfHosted name]) == 1)
-            [1 .. length names + 1])
+    , testCase "self-hosted batches can use separate CI runners" $
+        let assigned = assignShards ciShardCount suite
+         in testAssertTrue (length (unique [index | (name, index) <- assigned, isSelfHosted name]) > 1)
     , testCase "other original groups remain individually shardable" $
         testAssertEq (map snd (assignShards 4 ["testNative:1/4", "testNative:2/4", "testNative:3/4", "testNative:4/4"]))
             [1,2,3,4]
-    , testCase "a runner's span counts the self-hosted batches one after another and what memory keeps from running beside them" $
+    , testCase "independent self-hosted batches can overlap within the memory budget" $
         let selfHosted = filter isSelfHosted names
-            chain = sum (map groupWeight selfHosted)
-         in testAssertEq (runnerSpan selfHosted, runnerSpan (selfHosted ++ ["testParser:3/4"]), runnerSpan (selfHosted ++ ["testCli"]))
-            (chain, chain + groupWeight "testParser:3/4", max chain (groupWeight "testCli"))
+         in testAssertTrue (runnerSpan selfHosted < sum (map groupWeight selfHosted))
     , testCase "fixed native memory_limit users stay ordered in one batch" $
-        testAssertTrue (all memorySerial batches)
+        testAssertTrue (all (sameBatch "memory") batches)
+    , testCase "linked emitter checks share one worker and stay in order" $
+        testAssertTrue (all (sameBatch "linked emitter") batches
+            && length [path | (original, _) <- batches, path <- leafPaths original, "linked emitter" `elem` path] == 3)
     , testCase "small and empty trees never create empty batches" $
         testAssertTrue (null (splitTestGroups 4 (TestList "empty" []))
             && map groupName (splitTestGroups 4 (testCase "single" Nothing)) == ["single:1/1"])
     , testCase "every MIR probe group can be charged as the cold build owner" $
-        testAssertEq (map estimatedPeakMiB ["testMirPacks", "testMirCopyKeys", "testMirCopiesParity", "testMirCopiesFused"])
-            (replicate 4 3072)
+        testAssertTrue (all ((>= 4608) . estimatedPeakMiB) ["testMirPacks", "testMirCopyKeys", "testMirCopiesParity", "testMirCopiesFused"])
     , testCase "every CI shard's groups launch once, with estimated memory within the budget whenever two run" $
         testAssertTrue (all (\index -> case selectGroupNames (Arguments Nothing [] False (Just (index, ciShardCount))) names of
             Right shard -> let trace = admissionTrace shard
@@ -750,17 +761,16 @@ testScheduling names batches = TestList "testScheduling"
         testAssertTrue (any isOptIn names && all (\count -> all (\index ->
             fmap (any isOptIn) (selectGroupNames (Arguments Nothing [] False (Just (index, count))) names) == Right False)
             [1 .. count]) [1, 3, 7])
-    , testCase "the groups running at the shard 3 shutdown are not admitted together; a smaller group fills in instead" $
-        testAssertEq (admitWhileRoom ["testMirSelfHosted:3/4", "testParser:3/4", "testParity:validation", "testNative:2/4", "testCli"])
-            ["testMirSelfHosted:3/4", "testParity:validation"]
-    , testCase "a group estimated over the budget runs alone, and launch order is the self-hosted chain, then longest work first, with stable ties" $
+    , testCase "a memory-heavy emitter check admits a small filler, not another large MIR group" $
+        testAssertEq (admitWhileRoom ["testMirEmit:1/4", "testMirSupport", "testCli"]) ["testMirEmit:1/4", "testCli"]
+    , testCase "an oversized group runs alone, and launch order is longest work first with stable ties" $
         testAssertEq
             ( admitGroup 1000 snd 0 [("big", 4000 :: Int), ("small", 10)]
-            , admitGroup 1000 snd 4000 [("small", 10 :: Int)]
-            , launchOrder id ["testCli", "testMirSelfHosted:3/4", "newA", "testParser:3/4"] )
+            , admitGroup 1000 snd 4000 [("big", 4000 :: Int), ("small", 10)]
+            , launchOrder id ["newA", "testCli", "newB"] )
             ( Just (("big", 4000), [("small", 10)])
             , Nothing
-            , ["testMirSelfHosted:3/4", "testParser:3/4", "testCli", "newA"] )
+            , ["testCli", "newA", "newB"] )
     ]
   where
     admitWhileRoom = go 0
@@ -792,9 +802,9 @@ testScheduling names batches = TestList "testScheduling"
         selectGroupNames (Arguments Nothing [groupName original] False (Just (index, 4))) names
             == Right [groupName batch | batch <- split,
                 lookup (groupName batch) (assignShards 4 suite) == Just index]
-    memorySerial (original, split) =
-        let originalPaths = filter (elem "memory") (leafPaths original)
-            holders = [filter (elem "memory") (map (drop 1) (leafPaths batch)) | batch <- split]
+    sameBatch label (original, split) =
+        let originalPaths = filter (elem label) (leafPaths original)
+            holders = [filter (elem label) (map (drop 1) (leafPaths batch)) | batch <- split]
          in null originalPaths || filter (not . null) holders == [originalPaths]
     unique :: Eq a => [a] -> [a]
     unique = foldl' (\seen name -> if name `elem` seen then seen else name : seen) []

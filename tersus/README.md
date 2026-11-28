@@ -17,12 +17,12 @@ groups than processes). Native, MIR emitter, MIR verifier, self-hosted
 validator, shared cache and lowered MIR tests are each split into four batches. Original names such as
 `testNative` select all four; `testNative:2/4` selects just that batch.
 `--shard k/n` intersects these selections with the full-suite shard assignment.
-All original leaf actions and prefix labels are retained. Native memory-limit
-cases stay together because they execute one shared file. Self-hosted query
-batches stay on one shard. Each batch builds the interpreted validator in its
-own process to preserve sharing that the disk cache does not retain. Other
-batches remain individually shardable. The bootstrap test still runs as a
-single group with its own cold cache.
+Every original leaf action is retained. Native memory-limit cases stay together
+because they execute one shared file. The linked emitter checks share a single
+worker and MIR snapshot. Self-hosted query batches are independently shardable;
+each builds its interpreted validator in process to preserve sharing that the
+disk cache does not retain. The bootstrap test still runs as a single group with
+its own cold cache.
 
 Package test compilations use a lossless generic binary cache, retaining every
 contract, proof, ghost, invariant and generic field. Keys include the selected
