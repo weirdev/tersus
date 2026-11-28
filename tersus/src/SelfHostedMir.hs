@@ -2986,8 +2986,17 @@ indirectCycle fs main conversions = find inIndirectCycle (Map.keys allFns)
 callNamesOf :: M.Function -> [Name]
 callNamesOf f = [n | blk <- Map.elems (M.fnBlocks f), M.Call (M.Const (M.CFn n)) _ _ _ <- [M.blockTerminator blk]]
 
--- Whether starting from `from` a call chain reaches `target`, in the call
--- graph over the program's functions plus the caller itself.
+-- For a direct edge, the callee returns to its caller exactly when both
+-- are in the same cyclic component. Compute this once for the program.
+directRecursion :: Map.Map Name M.Function -> Map.Map Name (Set.Set Name)
+directRecursion functions = Map.fromList
+    [(name, component) | CyclicSCC names <- stronglyConnComp vertices,
+        let component = Set.fromList names, name <- names]
+  where
+    vertices = [(name, name, callNamesOf fn) | (name, fn) <- Map.toList functions]
+
+-- Main and synthetic conversion witnesses are not in the function table.
+-- Check calls from it in the graph with that witness as the caller.
 reachesName :: Map.Map Name M.Function -> M.Function -> Name -> Name -> Bool
 reachesName functions caller from target = go Set.empty [from]
   where
@@ -3004,6 +3013,7 @@ data BlockAnalysis = BlockAnalysis
     , blockDefinedAtEntry :: Map.Map M.BlockId (Set.Set M.Local)
     , blockLiveAfterStatements :: Map.Map M.BlockId [Set.Set M.Local]
     , blockLiveAtEnd :: Map.Map M.BlockId (Set.Set M.Local)
+    , blockCallsRecursively :: Name -> Bool
     }
 
 block :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Maybe (Bool, MirValue) -> Bool -> M.Function -> BlockAnalysis -> Map.Map M.BlockId Int -> Map.Map M.BlockId (Set.Set M.BlockId) -> (M.BlockId, M.BasicBlock) -> Build -> Maybe (MirValue, Build)
@@ -3186,7 +3196,7 @@ block types invariants functions rules termInfo allowCalls fn analysis predecess
         Nothing -> live `Set.union` Set.fromList [top | ref <- Set.toList live, let (top, _) = resolveRef (aliasBorrows alias) ref]
     callProof calleeOp args dest b = case calleeOp of
         M.Const (M.CFn name) -> case Map.lookup name functions of
-            Just callee | not ("builtin::" `isPrefixOf` name) -> directCall types invariants rules fn callee args dest termInfo (reachesName functions fn name (M.fnName fn)) b
+            Just callee | not ("builtin::" `isPrefixOf` name) -> directCall types invariants rules fn callee args dest termInfo (blockCallsRecursively analysis name) b
             _ -> do
                 (cs, next) <- builtinCall (stripBuiltin name) args dest b
                 pure (cs, [], [], next)
@@ -3957,8 +3967,8 @@ genericClauses rules assumeMode env0 clauses b0 next0 = do
         (more, b') <- contractSteps rules True env [ProofAssert proof] b
         pure (more : chunks, b', env, next)
 
-encodeFunction :: Bool -> Storage -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> (Set.Set Name, Set.Set Name) -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
-encodeFunction physical storage types invariants functions (worldReaders, inputReaders) rules allowCalls fn
+encodeFunction :: Bool -> Storage -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> (Set.Set Name, Set.Set Name) -> Rules -> Bool -> (Name -> Bool) -> M.Function -> Maybe (MirValue, MirValue, Integer)
+encodeFunction physical storage types invariants functions (worldReaders, inputReaders) rules allowCalls recurses fn
     | any (\(M.Local n) -> n < 0) (Map.keys (M.fnLocals fn)) = Nothing
     | length (M.fnParams fn) /= length (nub (M.fnParams fn)) = Nothing
     | M.Local 0 `elem` M.fnParams fn = Nothing
@@ -3981,7 +3991,7 @@ encodeFunction physical storage types invariants functions (worldReaders, inputR
         -- which the output contract may name)
         let (entryChunks, withRequires) = foldl (defineLocal False (M.specEnv spec)) ([], withRequires0) (contractDefinitions (M.specRequires spec))
             requires = requires0 ++ concat (reverse entryChunks)
-        let recursive = any (\name -> reachesName functions fn name (M.fnName fn)) (callNamesOf fn)
+        let recursive = any recurses (callNamesOf fn)
         (variantSteps, termInfo, withVariant) <- case M.specTermination spec of
             Just (Counting expr) -> do
                 (steps, variantRef, b1) <- exprOperand (M.specEnv spec) expr withRequires
@@ -3997,7 +4007,7 @@ encodeFunction physical storage types invariants functions (worldReaders, inputR
             alias = aliasingOf storage types functions fn
             (liveAfter, liveEnd) = validationLiveness storage types functions fn
             analysis = BlockAnalysis alias (invariantParents storage alias types invariants functions fn)
-                (definitelyAssigned alias fn) liveAfter liveEnd
+                (definitelyAssigned alias fn) liveAfter liveEnd recurses
             addBlock (blocks, b) entry = do
                 (v, b') <- block types invariants functions rules termInfo allowCalls fn analysis predecessors regions entry b
                 pure (v : blocks, b')
@@ -4187,7 +4197,11 @@ encodeMono physical program
             types = M.progTypes program
         rules' <- maybe (Left "an axiom or proof rule") Right (collectRules program)
         let effects = (M.readersOfInput program, inputReadersOf functions)
-            encodeOne fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v)) (encodeFunction physical (M.progStorage program) types invariants functions effects rules' True fn)
+            recursion = directRecursion functions
+            knownCaller fn name = Set.member name (Map.findWithDefault Set.empty (M.fnName fn) recursion)
+            extraCaller fn name = reachesName functions fn name (M.fnName fn)
+            encodeOne calls fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v))
+                (encodeFunction physical (M.progStorage program) types invariants functions effects rules' True (calls fn) fn)
         conversions <- fmap (Set.toAscList . Set.fromList . concat) (traverse fnConversions allFunctions)
         case indirectCycle functions (M.progMain program) conversions of
             Just name -> Left ("potential recursion through a function value in " ++ name)
@@ -4198,9 +4212,9 @@ encodeMono physical program
             _ -> maybe (Left ("an unsupported function conversion: " ++ show (conversionName coercion))) Right
                 (conversionWitness (M.progStorage program) types functions index coercion)) (zip [1 ..] conversions)
         -- Bounded bodies and their check functions are validated generically, not again in every copy.
-        checked <- traverse encodeOne [fn | fn <- Map.elems functions, not (externFunction fn), not ("builtin::" `isPrefixOf` M.fnName fn), validated fn]
-        checkedConversions <- traverse encodeOne witnesses
-        main <- encodeOne (M.progMain program)
+        checked <- traverse (encodeOne knownCaller) [fn | fn <- Map.elems functions, not (externFunction fn), not ("builtin::" `isPrefixOf` M.fnName fn), validated fn]
+        checkedConversions <- traverse (encodeOne extraCaller) witnesses
+        main <- encodeOne extraCaller (M.progMain program)
         let ruleEntries = [("rule " ++ name, v) | entry@(name, _) <- Map.toList rules', Just v <- [encodeRule rules' entry]]
         pure (checked ++ checkedConversions ++ ruleEntries ++ [main])
   where
