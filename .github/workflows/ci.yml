@@ -1,9 +1,8 @@
-name: CI
+name: Host validation profile
 
 on:
   push:
-    branches: [master]
-  pull_request:
+    branches: [ci-host-profile-nov28]
 
 permissions:
   contents: read
@@ -20,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        shard: [host, host-emitter, host-elaborator]
         include:
           - shard: host
             label: Host validation (parser, AST reader, MIR tools)
@@ -31,10 +30,6 @@ jobs:
           - shard: host-elaborator
             label: Host validation (elaborator)
             test-groups: testHostValidation:elaborator
-          - shard: certify
-            label: Certify the emitter association
-          - shard: association
-            label: Verify ordinary emitter selection
     # Keep the failure bound independent of the measured turnaround target.
     timeout-minutes: 60
     defaults:
@@ -110,8 +105,7 @@ jobs:
 
       # On master the host runner proves every function itself, so the verdicts it saves, which pull requests start
       # from, were given by master's own code.
-      - name: Forget the restored verdicts on master
-        if: ${{ startsWith(matrix.shard, 'host') && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+      - name: Forget restored verdicts for the cold profile
         run: rm -rf ~/.cache/tersus/verdicts-*
 
       # Stack's GHC 9.6.5 links with -fuse-ld=gold, and the ubuntu-26.04 runner image has no ld.gold, so gcc
