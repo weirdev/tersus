@@ -206,7 +206,7 @@ boxedWrapperCopy nested receiver result = do
     pure $ compiled `bindResult` \program -> ownedOfProgram program `bindResult` \owned ->
         if insertedCopy owned then Ok (program, owned) else Error ("ownership did not insert a copy of " ++ owner)
   where
-    owner = "app$main$" ++ (if nested then "Shelf" else "Callback")
+    owner = if nested then "Shelf" else "Callback"
     insertedCopy program = or
         [ M.localType decl == TNamed owner []
         | f <- M.progMain program : Map.elems (M.progFunctions program), block <- Map.elems (M.fnBlocks f)
