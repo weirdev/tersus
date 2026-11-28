@@ -281,11 +281,10 @@ Work from `tersus/`.
   shard (`TestScheduling.optInGroups`), as does `testElaborateMutant` (an
   elaborator whose unification is broken, which the differential against the
   compiler's elaborator has to catch; it builds an elaborator of its own). CI
-  runs `testHostValidation` on a runner of its own (`host` in the matrix), whose
-  cache keeps the verdicts, so a pull request proves again only the functions
-  whose data changed (a function's data holds the contracts of what it calls;
-  the verdicts are kept under the build of the validator, so a change to the
-  validator proves everything again); on master it proves every function.
+  runs `testHostValidation` in three lanes: elaborator, emitter, and the other
+  tools. A pull request reuses verdicts for unchanged functions (a function's
+  data holds the contracts of what it calls; a new validator invalidates its
+  verdict namespace). A push to master proves every function again.
   The required aggregate check requires every runner to pass.
 - `ghci` then `:load Pipeline`: quick interactive workflow noted in
   `tersus/README.md`.

@@ -15,13 +15,26 @@ concurrency:
 
 jobs:
   haskell:
-    # (`host` runs testHostValidation; see tersus/README.md)
-    name: ${{ matrix.shard == 'host' && 'Host validation' || format('Haskell build and tests ({0}/10)', matrix.shard) }}
+    name: ${{ matrix.label || format('Haskell build and tests ({0}/10)', matrix.shard) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, host]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        include:
+          - shard: host
+            label: Host validation (parser, AST reader, MIR tools)
+            test-groups: testHostValidation:parser testHostValidation:astReader testHostValidation:mirReader testHostValidation:mirVerify testHostValidation:mirErase
+          - shard: host-emitter
+            label: Host validation (emitter)
+            test-groups: testHostValidation:emitter
+          - shard: host-elaborator
+            label: Host validation (elaborator)
+            test-groups: testHostValidation:elaborator
+          - shard: certify
+            label: Certify the emitter association
+          - shard: association
+            label: Verify ordinary emitter selection
     # Keep the failure bound independent of the measured turnaround target.
     timeout-minutes: 60
     defaults:
@@ -98,7 +111,7 @@ jobs:
       # On master the host runner proves every function itself, so the verdicts it saves, which pull requests start
       # from, were given by master's own code.
       - name: Forget the restored verdicts on master
-        if: ${{ matrix.shard == 'host' && github.event_name == 'push' }}
+        if: ${{ startsWith(matrix.shard, 'host') && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
         run: rm -rf ~/.cache/tersus/verdicts-*
 
       # Stack's GHC 9.6.5 links with -fuse-ld=gold, and the ubuntu-26.04 runner image has no ld.gold, so gcc
@@ -114,15 +127,15 @@ jobs:
       # `stack test --test-arguments='-j 1'` runs the groups one at a time when a failure needs a quiet log.
       # It loads examples/ relative to the package directory, so run from tersus/.
       - name: Test
+        if: ${{ matrix.shard != 'certify' && matrix.shard != 'association' }}
         env:
-          # Keep threaded collector options on the test executable, not Stack's tool subprocesses.
           GHCRTS: -A16m
           TERSUS_TEST_RTS_STATS: '1'
+          TEST_GROUPS: ${{ matrix.test-groups || format('--shard {0}/10', matrix.shard) }}
+          HOST_RTS: ${{ startsWith(matrix.shard, 'host') && '-c' || '' }}
         run: |
           python3 dev/ci_resources.py
-          # (a host run takes about 20 minutes with no verdicts cached; one that hangs leaves what it was waiting on)
-          if [ '${{ matrix.shard }}' = host ]; then (sleep 1800; echo '[HANG DUMP]'; ps -eo pid,ppid,stat,etime,wchan:30,rss,args --forest | grep -v ' \[' | cut -c1-240; for pid in $(pgrep -f tersus); do echo "== $pid"; sudo cat /proc/$pid/stack; ls -l /proc/$pid/fd | cut -c40-; done) & fi
-          python3 dev/ci_resources.py -- /usr/bin/time -v stack test --test-arguments='-j 4 ${{ matrix.shard == 'host' && 'testHostValidation' || format('--shard {0}/10', matrix.shard) }} +RTS -N2 -qg ${{ matrix.shard == 'host' && '-c' || '' }} -RTS'
+          python3 dev/ci_resources.py -- /usr/bin/time -v stack test --test-arguments="-j 4 $TEST_GROUPS +RTS -N2 -qg $HOST_RTS -RTS"
 
       # (the package has two executables and `stack run` without a target runs the first of them, which is `parity`, so
       # every check below names the command line one; without that these steps ran the parity harness instead)
@@ -131,52 +144,64 @@ jobs:
         if: ${{ matrix.shard == 8 }}
         run: stack run tersus-exe -- run examples/frame_facts.tersus
 
-      - name: Verify ordinary build emitter association
-        if: ${{ matrix.shard == 8 }}
+      - name: Certify the current emitter pin
+        if: ${{ matrix.shard == 'certify' }}
         run: |
           set -euo pipefail
+          unset TERSUS_TEST_APPROVED_BUILD_IDENTITY TERSUS_EMITTER_BUILD_MANIFEST
+          stack exec -- emitter-seed profile > "$RUNNER_TEMP/emitter-profile.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/emitter-source.txt"
+          time stack exec -- emitter-seed certify "$RUNNER_TEMP/emitter-certified.ll" "$RUNNER_TEMP/emitter-certified.pin" +RTS -A64m -qg -N2 -RTS
+
+      - name: Verify ordinary build emitter selection
+        if: ${{ matrix.shard == 'association' }}
+        run: |
+          set -euo pipefail
+          unset TERSUS_TEST_APPROVED_BUILD_IDENTITY TERSUS_EMITTER_BUILD_MANIFEST
           original="$RUNNER_TEMP/emitter-original.pin"
           cp bootstrap/emitter.sha256 "$original"
           trap 'cp "$original" bootstrap/emitter.sha256' EXIT
-          unset TERSUS_TEST_APPROVED_BUILD_IDENTITY TERSUS_EMITTER_BUILD_MANIFEST
-          # Derived tools must be absent so each check has to select its own emitter.
+          # This candidate is a test fixture, never the artifact adopted on master.
+          stack exec -- emitter-seed candidate-pin > "$RUNNER_TEMP/emitter-candidate.pin"
+          cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
           prime_seed_cache() {
-            local source="$1" dest="$2/tersus" file name
+            local file name dest="$1/tersus"
             mkdir -p "$dest"
-            for file in "$source"/{seed-,parser-seed-,frontend-seed-}*; do
+            for file in "$cache_home/tersus"/{seed-,parser-seed-,frontend-seed-}*; do
               name=${file##*/}
               if [[ $name =~ ^(seed|parser-seed|frontend-seed)-[0-9a-f]{16}$ && -f $file && ! -L $file && -x $file ]]; then
                 cp -p -- "$file" "$dest/"
               fi
             done
           }
-          prime_seed_cache "${XDG_CACHE_HOME:-$HOME/.cache}/tersus" "$RUNNER_TEMP/emitter-gen"
-          export XDG_CACHE_HOME="$RUNNER_TEMP/emitter-gen"
-          stack run emitter-seed -- profile > "$RUNNER_TEMP/emitter-profile.txt"
-          git rev-parse HEAD > "$RUNNER_TEMP/emitter-source.txt"
-          stack run emitter-seed -- certify "$RUNNER_TEMP/emitter-certified.ll" "$RUNNER_TEMP/emitter-certified.pin"
-          cp "$RUNNER_TEMP/emitter-certified.pin" bootstrap/emitter.sha256
+
+          # A stale or absent association already exercises the source route.
+          if cmp -s "$original" "$RUNNER_TEMP/emitter-candidate.pin"; then
+            printf '%s %064d\n' "$(cut -d' ' -f1 "$original")" 0 > bootstrap/emitter.sha256
+            stack build --test --no-run-tests
+          fi
+          source_home="$RUNNER_TEMP/emitter-source"
+          prime_seed_cache "$source_home"
+          time XDG_CACHE_HOME="$source_home" stack exec -- tersus-exe llvm examples/loops.tersus > "$RUNNER_TEMP/emitter-source.ll"
+          test -n "$(compgen -G "$source_home/tersus/emitter-*")"
+
+          cp "$RUNNER_TEMP/emitter-candidate.pin" bootstrap/emitter.sha256
           stack build --test --no-run-tests
-          prime_seed_cache "$XDG_CACHE_HOME/tersus" "$RUNNER_TEMP/emitter-known"
-          XDG_CACHE_HOME="$RUNNER_TEMP/emitter-known" stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/emitter-known.ll"
-          test -n "$(compgen -G "$RUNNER_TEMP/emitter-known/tersus/seed-*")"
-          test -z "$(compgen -G "$RUNNER_TEMP/emitter-known/tersus/emitter-*")"
-          XDG_CACHE_HOME="$RUNNER_TEMP/emitter-known" stack test --test-arguments='-j 1 testVerdictLocks +RTS -N1 -qg -RTS' | tee "$RUNNER_TEMP/validator-operation-pin.log"
+          known_home="$RUNNER_TEMP/emitter-known"
+          prime_seed_cache "$known_home"
+          time XDG_CACHE_HOME="$known_home" stack exec -- tersus-exe llvm examples/loops.tersus > "$RUNNER_TEMP/emitter-known.ll"
+          test -n "$(compgen -G "$known_home/tersus/seed-*")"
+          test -z "$(compgen -G "$known_home/tersus/emitter-*")"
+          XDG_CACHE_HOME="$known_home" stack test --test-arguments='-j 1 testVerdictLocks +RTS -N1 -qg -RTS' | tee "$RUNNER_TEMP/validator-operation-pin.log"
           grep -Fx '[VALIDATOR_OPERATION_MODE] PIN' "$RUNNER_TEMP/validator-operation-pin.log"
-          stack run emitter-seed -- emit "$RUNNER_TEMP/emitter-forced-source.ll"
-          cmp "$RUNNER_TEMP/emitter-certified.ll" "$RUNNER_TEMP/emitter-forced-source.ll"
-          test -n "$(compgen -G "$RUNNER_TEMP/emitter-gen/tersus/emitter-*")"
-          printf '%s %064d\n' "$(cut -d' ' -f1 bootstrap/emitter.sha256)" 0 > bootstrap/emitter.sha256
-          stack build --test --no-run-tests
-          prime_seed_cache "$XDG_CACHE_HOME/tersus" "$RUNNER_TEMP/emitter-mismatch"
-          XDG_CACHE_HOME="$RUNNER_TEMP/emitter-mismatch" stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/emitter-mismatch.ll"
-          test -n "$(compgen -G "$RUNNER_TEMP/emitter-mismatch/tersus/emitter-*")"
-          cmp "$RUNNER_TEMP/emitter-known.ll" "$RUNNER_TEMP/emitter-mismatch.ll"
-          cp "$original" bootstrap/emitter.sha256
-          stack build --test --no-run-tests
+          cmp "$RUNNER_TEMP/emitter-known.ll" "$RUNNER_TEMP/emitter-source.ll"
+
+          # A matching pin must not change the explicit source route used by regeneration.
+          source_exe=$(XDG_CACHE_HOME="$source_home" stack exec -- emitter-seed source-executable)
+          [[ $source_exe == "$source_home/tersus/emitter-"* && -x $source_exe ]]
 
       - name: Retain verified ordinary emitter association
-        if: ${{ success() && matrix.shard == 8 }}
+        if: ${{ success() && matrix.shard == 'certify' }}
         uses: actions/upload-artifact@v4
         with:
           name: ordinary-emitter-association-${{ github.sha }}

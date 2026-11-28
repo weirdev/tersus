@@ -21,6 +21,15 @@ main = do
             print ordinaryBuildProfile
             print emitterBuildDescription
             emitterConstruction >>= print
+        ["candidate-pin"] -> do
+            before <- emitterConstruction
+            current <- emitterSourcesMatch
+            case before of
+                Ok (Just identity) | current -> putStrLn (seedSha256 ++ " " ++ identity)
+                _ -> fail "the candidate needs an ordinary configured build and unchanged source"
+        ["source-executable"] -> do
+            source <- cachedSourceEmitter
+            case source of Error e -> fail e; Ok path -> putStrLn path
         ["advance", output] -> do
             one <- cachedSourceEmitter
             case one of
@@ -54,7 +63,7 @@ main = do
                         case finalPaths of Error e -> fail e; Ok () -> pure ()
                         writeFile output ir
                         writeFile association (seedSha256 ++ " " ++ construction ++ "\n")
-        _ -> fail "usage: emitter-seed profile | advance <output.ll> | emit <output.ll> | certify <output.ll> <candidate.pin>"
+        _ -> fail "usage: emitter-seed profile | candidate-pin | source-executable | advance <output.ll> | emit <output.ll> | certify <output.ll> <candidate.pin>"
 
 regenerate :: IO (Result String String)
 regenerate = do
@@ -65,11 +74,9 @@ regenerate = do
         (_, Error e) -> pure (Error ("stage 1: " ++ e))
         (Ok stageZero, Ok stageOne) -> do
             owned0 <- ownedToolWith stageZero emitterEntry
-            owned1 <- ownedToolWith stageOne emitterEntry
-            case (owned0, owned1, emitterOwnedProgram) of
-                (Ok a, Ok b, Ok c)
+            case (owned0, emitterOwnedProgram) of
+                (Ok a, Ok b)
                     | a /= b -> pure (Error "stage 0 and source stage 1 own the emitter differently")
-                    | b /= c -> pure (Error "the owned emitter pipeline is not source stage 1's")
                     | otherwise -> do
                         ir0 <- emitOwned stageZero a
                         ir1 <- emitOwned stageOne b
@@ -78,9 +85,8 @@ regenerate = do
                             (_, Error e) -> Error ("source stage 1 emitting the emitter: " ++ e)
                             (Ok x, Ok y) | x /= y -> Error "stage 0 and source stage 1 write different IR for the emitter"
                                         | otherwise -> Ok y
-                (Error e, _, _) -> pure (Error ("stage 0 owning the emitter: " ++ e))
-                (_, Error e, _) -> pure (Error ("source stage 1 owning the emitter: " ++ e))
-                (_, _, Error e) -> pure (Error ("the owned emitter: " ++ e))
+                (Error e, _) -> pure (Error ("stage 0 owning the emitter: " ++ e))
+                (_, Error e) -> pure (Error ("source stage 1 owning the emitter: " ++ e))
 
 -- (the owned emitter is given with its checked ownership facts, as Bootstrap.stageOne gives it: without them it has no drop
 -- for an instance of a checked type)

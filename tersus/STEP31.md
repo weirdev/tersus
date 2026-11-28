@@ -121,10 +121,10 @@ whatever the pin says.
 `stack run emitter-seed -- certify <output.ll> <candidate.pin>` writes that
 record: it regenerates the seed, requires the result to be the pinned digest,
 and refuses unless the build has a profile and its source did not change while
-it ran. CI runs it on runner 8 for every commit; on a push to master, the
-`adopt-association` job commits that record when it differs from the pin, so
-the association follows master's source. The job gives way when master has
-moved on, since the newer commit's own run adopts its association.
+it ran. CI certifies on a dedicated runner, in parallel with the ordinary build's
+seed and source selection checks. Only certification supplies the artifact that
+`adopt-association` commits on master, after all jobs pass. The job gives way
+when master has moved on, since the newer commit's own run adopts its association.
 
 ## What gets rewritten
 
