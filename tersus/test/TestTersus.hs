@@ -53,6 +53,7 @@ import TestMirPacks (testMirPacks)
 import TestMirOwnership
 import TestMirMono
 import TestMirMonoOwnership
+import TestMirValidationMono
 import TestMirEval
 import TestMirReader
 import TestMirVerify
@@ -226,6 +227,7 @@ originalGroups =
     , testMirOwnership
     , testMirMono
     , testMirMonoOwnership
+    , testMirValidationMono
     , testOwnershipMetadata
     , testOwnershipInterpreted
     , testMirEvalLists

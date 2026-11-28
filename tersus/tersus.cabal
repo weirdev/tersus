@@ -54,6 +54,9 @@ extra-source-files:
     dev/mir-copies/probe.tersus
     dev/mir-copies-fused/audit.tersus
     dev/mir-copies-fused/driver.tersus
+    dev/mir-validation-mono/driver.tersus
+    dev/mir-validation-mono/mono.tersus
+    dev/mir-validation-mono/types.tersus
     lib/mir/link/fused.tersus
     lib/mir/link/profile.tersus
     lib/mir/instances/complete.tersus
@@ -410,6 +413,7 @@ test-suite tersus-test
       TestMirPacks
       TestMirReader
       TestMirSupport
+      TestMirValidationMono
       TestMirVerify
       TestModules
       TestNative

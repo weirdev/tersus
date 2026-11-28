@@ -1,0 +1,432 @@
+import data::codec::codec { Token };
+import mir::full::full { FullBlock, FullFunction, FullProgram, FullRecord };
+import mir::full::environments { baseIndex, replaceEnvBase };
+import mir::full::read { fieldsEnd };
+import mir::full::records { EnvEntry, entryAt, envEntries, envStart, orderEntries };
+import mir::full::tokens { appendTokens, decimalText, intToken, name, namesEnd, numberAt, operandEnd, sliceTokens, textAt, tokenLine, typeEnd, word, wordIs };
+import mir::full::write { sortFunctions };
+import mir::instances::complete { completeInstancesWith, namedInLocals };
+import mir::instances::names { InstanceNameClasses, instanceNameAt };
+import mir::mono::functions { MonoKey, MonoCall, MonoRedirect, monoArgumentType, monoFunctionIndex, monoKept, monoLocal, monoRenameLine, monoReturn, monoSection, monoSectionTokens };
+import mir::mono::tokens { MonoBinding, monoBind, monoLookup, monoSubstitute };
+import mir::mono::types { monoFields };
+import validationmonoprobe::types { compareKeys, instanceLabel, matchSizes, namedTypes, symbolic, typeMatch };
+
+struct ValidationInstance { key: MonoKey, function: FullFunction };
+impl Clone for ValidationInstance { };
+struct ValidationRole { owner: String, role: Int, key: MonoKey };
+impl Clone for ValidationRole { };
+struct Work { seen: HashSet<String>, copies: List<ValidationInstance> };
+
+fn emptyIntMap() -> HashMap<String, Int> ~ { return HashMap::new(); };
+fn emptyRoleMap() -> HashMap<String, List<ValidationRole>> ~ { return HashMap::new(); };
+
+fn headerTail(header: &List<Token>) -> List<Token> ~ {
+    at = 5 + numberAt(header, 3);
+    if wordIs(header, at, "some") { at = typeEnd(header, at + 1); }
+    else { at = at + 1; };
+    return sliceTokens(header, at, size(header));
+};
+
+fn generic(f: &FullFunction) -> Bool ~ {
+    tail = headerTail(&f.header);
+    return size(monoSection(&tail, "sizeparams")) != 0 || size(monoSection(&tail, "typeparams")) != 0;
+};
+
+fn localType(row: &List<Token>) -> List<Token> ~ {
+    at = 3; if wordIs(row, 2, "some") { at = 4; };
+    return sliceTokens(row, at, size(row));
+};
+
+fn collectLocals(classes: &InstanceNameClasses, f: &FullFunction, named: List<MonoBinding>) -> List<MonoBinding> ~ {
+    for row in &f.locals { named = namedTypes(classes, localType(&row.tokens), 0, named); };
+    return named;
+};
+
+fn collectFields(classes: &InstanceNameClasses, row: &List<Token>, at: Int, named: List<MonoBinding>) -> List<MonoBinding> ~ {
+    for field in monoFields(row, at + 1, numberAt(row, at)) { named = namedTypes(classes, &field.tokens, 0, named); };
+    return named;
+};
+
+fn originalNames(classes: &InstanceNameClasses, p: &FullProgram) -> HashMap<String, List<Token>> ~ {
+    named = collectLocals(classes, &p.entry, []);
+    for f in &p.functions { named = collectLocals(classes, f, named); };
+    named = namedTypes(classes, monoReturn(&p.entry), 0, named);
+    for f in &p.functions { named = namedTypes(classes, monoReturn(f), 0, named); };
+    for d in &p.types { if wordIs(&d.tokens, 0, "struct") { named = collectFields(classes, &d.tokens, 2, named); }; };
+    for d in &p.types {
+        if wordIs(&d.tokens, 0, "enum") {
+            at = 3; n = numberAt(&d.tokens, 2);
+            if n >= 0 {
+                for i in 0..n { named = collectFields(classes, &d.tokens, at + 1, named); at = fieldsEnd(&d.tokens, at + 1); };
+            };
+        };
+    };
+    for d in &p.generics { named = collectFields(classes, &d.tokens, namesEnd(&d.tokens, 2), named); };
+    result = HashMap::new();
+    for b in &named { result = result.insert(clone(b.name), clone(b.tokens)); };
+    return result;
+};
+
+fn callTypes(caller: &FullFunction, target: &FullFunction, args: &List<List<Token>>, dest: &String, parameters: &List<String>) -> List<List<Token>> ~ {
+    found = []; params = monoSection(&target.header, "params");
+    for i in 0..size(params) {
+        if i < size(args) { found = typeMatch(found, monoLocal(target, get(&params, i)), monoArgumentType(caller, get(args, i))); };
+    };
+    found = typeMatch(found, monoReturn(target), monoLocal(caller, dest));
+    types = [];
+    for parameter in parameters {
+        ty = monoLookup(&found, parameter);
+        if size(ty) = 0 { ty = [word("int")]; };
+        types = push(types, ty);
+    };
+    return types;
+};
+
+fn redirectCall(classes: &InstanceNameClasses, caller: &FullFunction, originals: &List<FullFunction>, line: &List<Token>) -> MonoCall ~ {
+    unchanged = MonoCall { line: clone(line), needs: [] };
+    if !wordIs(line, 0, "call") || !wordIs(line, 1, "const") || !wordIs(line, 2, "fn") { return unchanged; };
+    callee = textAt(line, 3); idx = monoFunctionIndex(originals, &callee);
+    if idx < 0 || idx >= size(originals) { return unchanged; };
+    target = get(originals, idx); tail = headerTail(&target.header);
+    typeParams = monoSection(&tail, "typeparams"); ns = size(monoSection(&tail, "sizeparams"));
+    if ns = 0 && size(typeParams) = 0 { return unchanged; };
+    count = numberAt(line, 4);
+    if count < 0 { return unchanged; };
+    kept = count - ns;
+    if kept < 0 { kept = 0; };
+    args = []; sizes = []; at = 5;
+    for i in 0..count {
+        end = operandEnd(line, at);
+        if i < kept { args = push(args, sliceTokens(line, at, end)); }
+        else {
+            if !wordIs(line, at, "const") || !wordIs(line, at + 1, "int") { return unchanged; };
+            sizes = push(sizes, decimalText(textAt(line, at + 2)));
+        };
+        at = end;
+    };
+    key = MonoKey { name: callee, types: callTypes(caller, target, &args, textAt(line, at), &typeParams), sizes: sizes };
+    out = [word("call"), word("const"), word("fn"), name(instanceLabel(classes, &key)), intToken(kept)];
+    for a in &args { out = appendTokens(out, a); };
+    out = appendTokens(out, sliceTokens(line, at, size(line)));
+    return MonoCall { line: out, needs: [key] };
+};
+
+fn redirect(classes: &InstanceNameClasses, f: FullFunction, originals: &List<FullFunction>) -> MonoRedirect ~ {
+    blocks = []; needs = [];
+    for b in &f.blocks {
+        n = size(b.lines);
+        if n = 0 { blocks = push(blocks, clone(b)); }
+        else {
+            result = redirectCall(classes, &f, originals, last(&b.lines));
+            for k in &result.needs { needs = push(needs, clone(k)); };
+            rows = set(clone(b.lines), n - 1, result.line);
+            blocks = push(blocks, FullBlock { lines: rows, ..clone(b) });
+        };
+    };
+    return MonoRedirect { function: FullFunction { blocks: blocks, ..f }, needs: needs };
+};
+
+fn rewritableEnvBases(shared: &List<List<Token>>) -> List<List<EnvEntry>> ~ {
+    index = [];
+    for table in shared {
+        entries = []; at = 2; n = numberAt(table, 1);
+        if n >= 0 {
+            for i in 0..n {
+                end = operandEnd(table, at + 1);
+                if !wordIs(table, at + 1, "const") || !wordIs(table, at + 2, "fn") {
+                    entries = push(entries, EnvEntry { name: textAt(table, at), value: sliceTokens(table, at + 1, end) });
+                };
+                at = end;
+            };
+        };
+        index = push(index, entries);
+    };
+    return index;
+};
+
+fn renameEnv(ts: &List<Token>, values: &List<MonoBinding>, names: &List<MonoBinding>, shared: &List<List<EnvEntry>>) -> List<Token> ~ {
+    at = envStart(ts); entries = [];
+    if at < 0 || at >= size(ts) { return clone(ts); };
+    own = envEntries(ts, at);
+    for e in &own {
+        entries = push(entries, EnvEntry { name: clone(e.name), value: monoRenameLine(&e.value, values, names) });
+    };
+    id = baseIndex(ts);
+    if id >= 0 && id < size(shared) {
+        for e in get(shared, id) {
+            if entryAt(&own, &e.name) < 0 {
+                value = monoRenameLine(&e.value, values, names);
+                if value != e.value { entries = push(entries, EnvEntry { name: clone(e.name), value: value }); };
+            };
+        };
+    };
+    return replaceEnvBase(ts, clone(get(ts, at)), orderEntries(entries));
+};
+
+fn specializedHeader(f: &FullFunction, label: String, kept: &List<String>, removed: &List<String>, sizes: &List<MonoBinding>, types: &List<MonoBinding>) -> List<Token> ~ {
+    header = push(sliceTokens(&f.header, 0, 1), name(label));
+    header = appendTokens(header, monoSectionTokens("params", kept, false));
+    header = push(header, word("returns")); ret = monoReturn(f);
+    if size(ret) = 0 { header = push(header, word("none")); }
+    else { header = appendTokens(push(header, word("some")), monoSubstitute(&ret, sizes, types)); };
+    header = appendTokens(header, [word("sizeparams"), intToken(0), word("typeparams"), intToken(0)]);
+    tail = headerTail(&f.header);
+    header = appendTokens(header, monoSectionTokens("borrowed", monoKept(monoSection(&tail, "borrowed"), removed), false));
+    updated = monoKept(monoSection(&tail, "mutborrowed"), removed); origins = monoKept(monoSection(&tail, "from"), removed);
+    if size(updated) > 0 || size(origins) > 0 {
+        header = appendTokens(header, monoSectionTokens("mutborrowed", &updated, false));
+        header = appendTokens(header, monoSectionTokens("from", &origins, false));
+    };
+    return header;
+};
+
+fn instantiate(classes: &InstanceNameClasses, f: FullFunction, key: &MonoKey, shared: &List<List<EnvEntry>>) -> FullFunction ~ {
+    tail = headerTail(&f.header);
+    params = monoSection(&f.header, "params"); typeParams = monoSection(&tail, "typeparams"); sizeParams = monoSection(&tail, "sizeparams");
+    kept = []; removed = []; types = []; sizes = []; values = [];
+    for i in 0..size(params) {
+        if i < size(params) - size(sizeParams) { kept = push(kept, clone(get(&params, i))); }
+        else { removed = push(removed, clone(get(&params, i))); };
+    };
+    for i in 0..size(typeParams) {
+        if i < size(key.types) { types = push(types, MonoBinding { name: clone(get(&typeParams, i)), tokens: clone(get(&key.types, i)) }); };
+    };
+    for i in 0..size(key.sizes) {
+        s = get(&key.sizes, i);
+        if i < size(sizeParams) { sizes = push(sizes, MonoBinding { name: clone(get(&sizeParams, i)), tokens: [word("c"), word(clone(s))] }); };
+        if i < size(removed) { values = push(values, MonoBinding { name: clone(get(&removed, i)), tokens: [word("const"), word("int"), word(clone(s))] }); };
+    };
+    named = namedTypes(classes, monoReturn(&f), 0, collectLocals(classes, &f, []));
+    renames = [];
+    for b in &named {
+        ty = monoSubstitute(&b.tokens, &sizes, &types);
+        renames = push(renames, MonoBinding { name: clone(b.name), tokens: [name(instanceNameAt(classes, &ty, 0))] });
+    };
+    // Haskell's renames and hidden-local values are last-wins maps.
+    names = []; i = size(renames);
+    while i > 0 [{ affirm i <= size(renames); }] ~ { i = i - 1; b = get(&renames, i); names = monoBind(names, clone(b.name), clone(b.tokens)); };
+    i = size(values); operands = [];
+    while i > 0 [{ affirm i <= size(values); }] ~ { i = i - 1; b = get(&values, i); operands = monoBind(operands, clone(b.name), clone(b.tokens)); };
+    locals = [];
+    for row in &f.locals {
+        if size(monoKept([clone(row.name)], &removed)) > 0 { locals = push(locals, FullRecord { tokens: monoSubstitute(&row.tokens, &sizes, &types), ..clone(row) }); };
+    };
+    loops = [];
+    for row in &f.loops { loops = push(loops, FullRecord { tokens: renameEnv(&row.tokens, &operands, &names, shared), ..clone(row) }); };
+    blocks = [];
+    for b in &f.blocks {
+        rows = [];
+        for row in &b.lines {
+            if wordIs(row, 0, "ghost") { rows = push(rows, renameEnv(row, &operands, &names, shared)); }
+            else { rows = push(rows, monoRenameLine(row, &operands, &names)); };
+        };
+        blocks = push(blocks, FullBlock { lines: rows, ..clone(b) });
+    };
+    header = specializedHeader(&f, instanceLabel(classes, key), &kept, &removed, &sizes, &types);
+    return FullFunction { header: header, locals: locals, blocks: blocks, env: renameEnv(&f.env, &operands, &names, shared), loops: loops, ..f };
+};
+
+fn identity(key: &MonoKey) -> String ~ {
+    ts = [name(clone(key.name)), intToken(size(key.types))];
+    for t in &key.types { ts = appendTokens(ts, t); };
+    for s in &key.sizes { ts = push(ts, word(clone(s))); };
+    return tokenLine(&ts);
+};
+
+fn build(classes: &InstanceNameClasses, originals: &List<FullFunction>, pending: List<MonoKey>, work: Work, shared: &List<List<EnvEntry>>) -> Work ~ {
+    i = 0;
+    while i < size(pending) [{ affirm i >= 0; affirm i <= size(pending); }] ~ {
+        key = clone(get(&pending, i)); id = identity(&key);
+        if !work.seen.contains(&id) {
+            idx = monoFunctionIndex(originals, &key.name);
+            if idx >= 0 && idx < size(originals) {
+                copy = instantiate(classes, clone(get(originals, idx)), &key, shared);
+                rewritten = redirect(classes, copy, originals);
+                for k in &rewritten.needs { pending = push(pending, clone(k)); };
+                work = Work { seen: work.seen.insert(id), copies: push(work.copies, ValidationInstance { key: key, function: rewritten.function }) };
+            };
+        };
+        i = i + 1;
+    };
+    return work;
+};
+
+fn dropKey(originals: &List<FullFunction>, named: &HashMap<String, List<Token>>, label: &String) -> List<MonoKey> ~ {
+    baseEnd = label.find(toByte(60), 0);
+    template = "<".concat(label.slice(0, baseEnd)).concat(" as Drop>::drop");
+    idx = monoFunctionIndex(originals, &template);
+    if idx < 0 || idx >= size(originals) { return []; };
+    f = get(originals, idx); params = monoSection(&f.header, "params");
+    if size(params) = 0 { return []; };
+    self = monoLocal(f, get(&params, 0)); if size(self) = 0 { return []; };
+    actual = named.lookup(label, [word("named"), name(clone(label)), intToken(0)]);
+    bindings = typeMatch([], &self, &actual); types = [];
+    for t in monoSection(headerTail(&f.header), "typeparams") {
+        ty = monoLookup(&bindings, t); if size(ty) = 0 { return []; };
+        types = push(types, ty);
+    };
+    return [MonoKey { name: template, types: types, sizes: [] }];
+};
+
+fn roleKey(originals: &List<FullFunction>, fnIdx: &HashMap<String, Int>, owned: &FullRecord, role: Int, held: &HashMap<String, List<Token>>, named: &HashMap<String, List<Token>>) -> List<MonoKey> ~ {
+    fname = textAt(&owned.tokens, 4 + 2 * role);
+    if size(fname.bytes) = 0 { return []; };
+    idx = fnIdx.lookup(&fname, 0 - 1);
+    if idx < 0 || idx >= size(originals) { return []; };
+    f = get(originals, idx);
+    if !generic(f) { return []; };
+    params = monoSection(&f.header, "params");
+    if size(params) = 0 { return []; };
+    self = monoLocal(f, get(&params, 0)); if size(self) = 0 { return []; };
+    actual = held.lookup(&owned.name, []);
+    if size(actual) = 0 { actual = named.lookup(&owned.name, []); };
+    if size(actual) = 0 { actual = [word("named"), name(clone(owned.name)), intToken(0)]; };
+    bindings = typeMatch([], &self, &actual);
+    sizeBindings = matchSizes([], &self, &actual);
+    tail = headerTail(&f.header);
+    types = [];
+    for t in monoSection(&tail, "typeparams") {
+        ty = monoLookup(&bindings, t); if size(ty) = 0 { return []; };
+        types = push(types, ty);
+    };
+    sizes = [];
+    for s in monoSection(&tail, "sizeparams") {
+        k = monoLookup(&sizeBindings, s); if size(k) = 0 { return []; };
+        sizes = push(sizes, textAt(&k, 0));
+    };
+    return [MonoKey { name: fname, types: types, sizes: sizes }];
+};
+
+fn retarget(classes: &InstanceNameClasses, ownership: &List<FullRecord>, owners: &List<ValidationRole>) -> List<FullRecord> ~ {
+    byOwner = emptyRoleMap();
+    for o in owners {
+        cur = byOwner.lookup(&o.owner, []);
+        byOwner = byOwner.insert(clone(o.owner), push(cur, clone(o)));
+    };
+    out = [];
+    for r in ownership {
+        row = clone(r.tokens);
+        updates = byOwner.lookup(&r.name, []);
+        for o in &updates {
+            at = 4 + 2 * o.role;
+            if at >= 0 && at < size(row) { row = set(row, at, name(instanceLabel(classes, &o.key))); };
+        };
+        out = push(out, FullRecord { name: clone(r.name), tokens: row });
+    };
+    return out;
+};
+
+fn dropName(classes: &InstanceNameClasses, item: &ValidationInstance) -> String ~ {
+    label = clone(item.key.name);
+    if size(label.bytes) >= 15 && label.slice(size(label.bytes) - 15, size(label.bytes)) = " as Drop>::drop" {
+        params = monoSection(&item.function.header, "params");
+        if size(params) > 0 {
+            ty = monoLocal(&item.function, get(&params, 0));
+            if wordIs(&ty, 0, "named") { return "<".concat(instanceNameAt(classes, &ty, 0)).concat(" as Drop>::drop"); };
+        };
+    };
+    return textAt(&item.function.header, 1);
+};
+
+fn winners(classes: &InstanceNameClasses, plain: &List<FullFunction>, done: &List<ValidationInstance>, final: Bool) -> List<FullFunction> ~ {
+    indexes = HashMap::new();
+    for i in 0..size(done) {
+        item = get(done, i); label = textAt(&item.function.header, 1);
+        if final { label = dropName(classes, item); };
+        j = indexes.lookup(&label, 0 - 1);
+        keep = true;
+        if j >= 0 && j < size(done) { keep = compareKeys(&item.key, &get(done, j).key) > 0; };
+        if keep { indexes = indexes.insert(label, i); };
+    };
+    fs = [];
+    for f in plain { if !indexes.contains(textAt(&f.header, 1)) { fs = push(fs, clone(f)); }; };
+    for e in indexes.entries() {
+        i = e.value;
+        if i >= 0 && i < size(done) {
+            f = clone(get(done, i).function);
+            if final && size(f.header) > 1 { f = FullFunction { header: set(f.header, 1, name(clone(e.key))), ..f }; };
+            fs = push(fs, f);
+        };
+    };
+    return sortFunctions(fs);
+};
+
+fn completed(classes: &InstanceNameClasses, p: FullProgram, named: &HashMap<String, List<Token>>) -> FullProgram ~ {
+    p = completeInstancesWith(p, classes); types = [];
+    for d in &p.types { if !symbolic(named.lookup(&d.name, []), 0) { types = push(types, clone(d)); }; };
+    return FullProgram { types: types, ..p };
+};
+
+fn monomorphizeForValidation(classes: &InstanceNameClasses, p: FullProgram) -> FullProgram ~ {
+    anyGeneric = false;
+    for f in &p.functions { if generic(f) { anyGeneric = true; }; };
+    if !anyGeneric { return p; };
+    named = originalNames(classes, &p);
+    shared = rewritableEnvBases(&p.shared);
+    main = redirect(classes, clone(p.entry), &p.functions);
+    pending = main.needs; plain = [];
+    for f in &p.functions {
+        if !generic(f) {
+            redirected = redirect(classes, clone(f), &p.functions);
+            for k in &redirected.needs { pending = push(pending, clone(k)); };
+            plain = push(plain, redirected.function);
+        };
+    };
+    originals = p.functions;
+    checked = p.checked; ownership = clone(p.ownership);
+    base = FullProgram { entry: main.function, functions: [], ..p };
+    work = build(classes, &originals, pending, Work { seen: HashSet::new(), copies: [] }, &shared);
+    if checked {
+        fnIdx = emptyIntMap();
+        for i in 0..size(originals) {
+            f = get(&originals, i); n = textAt(&f.header, 1);
+            if !fnIdx.contains(&n) { fnIdx = fnIdx.insert(n, i); };
+        };
+        ownershipIdx = emptyIntMap();
+        for i in 0..size(ownership) {
+            n = clone(get(&ownership, i).name);
+            if !ownershipIdx.contains(&n) { ownershipIdx = ownershipIdx.insert(n, i); };
+        };
+        owners = []; roleDone = HashSet::new(); roleTags = ["0", "1", "2"];
+        round = 0;
+        while round < 5 [{ affirm round >= 0; affirm round <= 5; }] ~ {
+            current = completed(classes, FullProgram { functions: winners(classes, &plain, &work.copies, false), ..clone(base) }, &named);
+            held = originalNames(classes, &current);
+            pending = [];
+            for d in &current.types {
+                at = ownershipIdx.lookup(&d.name, 0 - 1);
+                if at >= 0 && at < size(ownership) {
+                    row = clone(get(&ownership, at));
+                    for role in 0..3 {
+                        rt = get(&roleTags, role);
+                        tag = clone(d.name).concat("\n").concat(&rt);
+                        if !roleDone.contains(&tag) {
+                            for key in roleKey(&originals, &fnIdx, &row, role, &held, &named) {
+                                roleDone = roleDone.insert(clone(tag));
+                                owners = push(owners, ValidationRole { owner: clone(d.name), role: role, key: clone(key) });
+                                if !work.seen.contains(identity(key)) { pending = push(pending, clone(key)); };
+                            };
+                        };
+                    };
+                };
+            };
+            if size(pending) = 0 || round = 4 { round = 5; }
+            else { work = build(classes, &originals, pending, work, &shared); round = round + 1; };
+        };
+        base = FullProgram { ownership: retarget(classes, &ownership, &owners), ..base };
+        return completed(classes, FullProgram { functions: winners(classes, &plain, &work.copies, false), ..base }, &named);
+    };
+    for round in 0..4 {
+        current = completed(classes, FullProgram { functions: winners(classes, &plain, &work.copies, false), ..clone(base) }, &named);
+        pending = [];
+        for d in &current.types {
+            for key in dropKey(&originals, &named, &d.name) {
+                if !work.seen.contains(identity(key)) { pending = push(pending, clone(key)); };
+            };
+        };
+        if size(pending) = 0 { return completed(classes, FullProgram { functions: winners(classes, &plain, &work.copies, true), ..base }, &named); };
+        work = build(classes, &originals, pending, work, &shared);
+    };
+    return completed(classes, FullProgram { functions: winners(classes, &plain, &work.copies, true), ..base }, &named);
+};
