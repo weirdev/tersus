@@ -16,6 +16,7 @@ module TestPipeline
 import TestStorage (pattern TList, pattern TBox)
 import Control.Exception (IOException, bracket, evaluate, finally, try)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, nub, sort, subsequences)
+import GHC.Clock (getMonotonicTime)
 import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
 import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, findExecutable, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.Environment (getExecutablePath, lookupEnv)
@@ -26,6 +27,8 @@ import Native (readProcessOutput)
 import CacheLock (openTempFileCloexec)
 import System.IO
 import System.Posix.IO (FdOption (CloseOnExec), closeFd, dup, dupTo, handleToFd, queryFdOption, stdInput)
+import System.Posix.Process (ProcessTimes (..), getProcessTimes)
+import System.Posix.Unistd (SysVar (ClockTick), getSysVar)
 import qualified Data.Map as Map
 import Cli
 import Modules (LoadResult (..))
@@ -36,7 +39,7 @@ import MirEval
 import MirHousekeeping (eraseGhosts, toolProgram, validationEntry, verifyProgram)
 import Pipeline
 import SelfHostedMir (encode, validateMirSubset, verdictProved)
-import PackageCompile (compileModulesLinked)
+import PackageCompile (compileModules, lowerCompiledPackage)
 import ValidatorNative (prepareTexts, validationRefusals)
 import TestParserFragments
 import StdLib
@@ -123,20 +126,50 @@ hostValidationGroups = [TestList ("testHostValidation:" ++ name) [testHostProgra
 
 testHostProgram :: FilePath -> Test
 testHostProgram path = TestCase path $ do
+    started <- getMonotonicTime
+    initial <- getProcessTimes
+    ticks <- getSysVar ClockTick
+    let millis scale first lastValue = toInteger (fromEnum lastValue - fromEnum first) * 1000 `div` scale
+        hostCpu now = millis ticks (userTime initial) (userTime now) + millis ticks (systemTime initial) (systemTime now)
+        childCpu now = millis ticks (childUserTime initial) (childUserTime now) + millis ticks (childSystemTime initial) (childSystemTime now)
+        phase label = do
+            elapsed <- subtract started <$> getMonotonicTime
+            cpu <- getProcessTimes
+            hPutStrLn stderr ("[HOST_PHASE] " ++ path ++ " " ++ label
+                ++ " wall_ms=" ++ show (round (elapsed * 1000) :: Integer)
+                ++ " host_cpu_ms=" ++ show (hostCpu cpu) ++ " child_cpu_ms=" ++ show (childCpu cpu))
+            hFlush stderr
+    phase "load"
     loaded <- if path == "lib/parser/parser.tersus"
         then pure (Modules.loadFromEntry (Modules.resolverFromFiles parserPackageFiles) path)
         else loadFromFilesystem path
     case loaded of
-        Right (PackageResult pkg) -> case compileModulesLinked (Modules.packageSnapshot pkg) of
-            Error err -> pure (Just ("does not compile: " ++ err))
-            Ok linked -> do
-                refused <- validationRefusals (oneMarkerEach linked)
-                pure $ case refused of
-                    Error err -> Just ("validation failed: " ++ err)
-                    Ok failures@(_ : _) -> Just ("functions that do not validate (" ++ show (length failures) ++ "):\n" ++ unlines failures)
-                    Ok [] -> case erasedModuleProgram linked `bindResult` runProgram of
-                        Error err -> Just ("Evaluation failed with error: " ++ err)
-                        Ok result -> testAssertEq (fmap fromMirValue result) (Just (VInt 1))
+        Right (PackageResult pkg) -> do
+            phase "compile"
+            case compileModules (Modules.packageSnapshot pkg) of
+                Error err -> pure (Just ("does not compile: " ++ err))
+                Ok compiled -> do
+                    phase "link"
+                    case lowerCompiledPackage compiled of
+                        Error err -> pure (Just ("does not compile: " ++ err))
+                        Ok linked -> do
+                            phase "validate"
+                            refused <- validationRefusals (oneMarkerEach linked)
+                            phase "validation-complete"
+                            case refused of
+                                Error err -> pure (Just ("validation failed: " ++ err))
+                                Ok failures@(_ : _) -> pure (Just ("functions that do not validate (" ++ show (length failures) ++ "):\n" ++ unlines failures))
+                                Ok [] -> do
+                                    phase "erase"
+                                    case erasedModuleProgram linked of
+                                        Error err -> pure (Just ("Evaluation failed with error: " ++ err))
+                                        Ok erased -> do
+                                            phase "run-empty-input"
+                                            result <- evaluate $ case runProgram erased of
+                                                Error err -> Just ("Evaluation failed with error: " ++ err)
+                                                Ok value -> testAssertEq (fmap fromMirValue value) (Just (VInt 1))
+                                            phase "complete"
+                                            pure result
         Right _ -> pure (Just "not a package")
         Left err -> pure (Just err)
 

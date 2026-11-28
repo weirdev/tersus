@@ -49,9 +49,11 @@ use. `TERSUS_TEST_RTS_STATS=1` adds GHC allocation/GC statistics only to group
 workers, not to command-line or probe processes they launch. These diagnostics
 do not select or skip any test groups.
 
-An eleventh CI runner (`host`) runs `testHostValidation`, which validates the
-compiler's own programs in full, one group per program, and fails on any
-function that no longer validates. The verdicts are kept per function under
+CI runs `testHostValidation` for the compiler's own programs in full, one group
+per program, and fails on any function that no longer validates. A worker logs
+`[HOST_PHASE]` with cumulative wall time and CPU time for the worker and its
+completed subprocesses, in milliseconds. The phase lines stay visible even if
+the worker times out. The verdicts are kept per function under
 the validator's build in `~/.cache/tersus`, which the runner restores and
 saves, so a pull request proves again only the functions whose data it
 changed (the programs are still compiled on every run); the runner drops the
