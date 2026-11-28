@@ -3,7 +3,11 @@
 -- The bridge from MIR to the validator written in Tersus
 -- (lib/validation/validation.tersus): encode is a data-only translation, and anything it
 -- does not fully model is reported as an Unmodeled verdict, never accepted.
-module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateByTersus, encode, encodeLibrary, encodePrepared, obligationNote, sourceContainerView) where
+module SelfHostedMir
+    ( Verdict (..), verdictProved, validateMirSubset, validateByTersus
+    , encode, encodeLibrary, encodePrepared, obligationNote, obligationNotePrepared
+    , sourceContainerView, validationView, retainValidationTemplates, needsValidationMono
+    ) where
 
 import Control.Monad (foldM, guard)
 import Data.Containers.ListUtils (nubOrd)
@@ -4093,8 +4097,14 @@ viewFor :: Bool -> M.Program -> M.Program
 viewFor physical program = if physical then program else sourceContainerView program
 
 obligationNote :: Bool -> M.Program -> Name -> Int -> Int -> Maybe String
-obligationNote physical program name blockId stepIndex = do
-    functions <- either (const Nothing) Just (encodeNoted physical program)
+obligationNote physical program = noteFrom (encodeNoted physical program)
+
+obligationNotePrepared :: Bool -> M.Program -> Name -> Int -> Int -> Maybe String
+obligationNotePrepared physical program = noteFrom (encodeMono physical program)
+
+noteFrom :: Either String [(Name, (MirValue, MirValue, Integer))] -> Name -> Int -> Int -> Maybe String
+noteFrom encoded name blockId stepIndex = do
+    functions <- either (const Nothing) Just encoded
     (blocks, _, _) <- lookup name functions
     blockList <- listItems blocks
     MData _ fields <- find (\b -> case b of MData _ fs -> lookup "id" fs == Just (MInt (toInteger blockId)); _ -> False) blockList
@@ -4119,11 +4129,16 @@ encodeNoted :: Bool -> M.Program -> Either String [(Name, (MirValue, MirValue, I
 -- makes them for native code after validation there; the validator
 -- written in Tersus is given the same copies, so a call of a generic
 -- function names the copy of it the call decides).
-encodeNoted physical raw
+encodeNoted physical raw = do
+    view <- validationView physical raw
+    encodeMono physical (retainValidationTemplates view (monomorphizeForValidation view))
+
+validationView :: Bool -> M.Program -> Either String M.Program
+validationView physical raw
     | any badBoxedSignature annotations = Left "a boxed closure has an unsupported signature"
     | otherwise = case verifyCaptureEffects raw of
         Error e -> Left e
-        Ok _ -> encodeMono physical withTemplates
+        Ok _ -> Right program0
   where
     program0 = viewFor physical raw
     annotations =
@@ -4146,7 +4161,14 @@ encodeNoted physical raw
         TAddr t -> badBoxedSignature t
         TUninit t -> badBoxedSignature t
         _ -> False
-    mono = monomorphizeForValidation program0
+
+needsValidationMono :: M.Program -> Bool
+needsValidationMono = any genericForValidation . M.progFunctions
+
+genericForValidation :: M.Function -> Bool
+genericForValidation f = not (null (M.fnTypeParams f) && null (M.fnSizeParams f))
+
+retainValidationTemplates :: M.Program -> M.Program -> M.Program
     -- A contract can name a generic function nothing calls (a method
     -- the contract measures by, like size): monomorphisation keeps
     -- only the copies a call decides, so the templates stay beside
@@ -4155,7 +4177,11 @@ encodeNoted physical raw
     -- A function generic only in sizes is checked as written, as the
     -- reference checks it (its sizes are values), whether or not a call
     -- makes a copy of it.
-    withTemplates = mono { M.progFunctions = Map.union (M.progFunctions mono) (Map.filter (\fn -> not (null (M.fnTypeParams fn)) || not (null (M.fnSizeParams fn))) (M.progFunctions program0)), M.progTypes = Map.union (M.progTypes mono) (M.progTypes program0) }
+retainValidationTemplates original mono = mono
+    { M.progFunctions = Map.union (M.progFunctions mono) (Map.filter genericForValidation (M.progFunctions original))
+    , M.progTypes = Map.union (M.progTypes mono) (M.progTypes original)
+    , M.progCaptureStorage = M.progCaptureStorage original
+    }
 
 encodeMono :: Bool -> M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
 encodeMono physical program
