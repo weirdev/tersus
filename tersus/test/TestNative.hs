@@ -213,15 +213,27 @@ boxedWrapperCopy nested receiver result = do
         , M.Assign d (M.CopyOf _) <- M.blockStatements block, Just decl <- [Map.lookup d (M.fnLocals f)]
         ]
     replacement = if nested then unlines
-        [ "values = #[Shelf { item: make(40) }];"
-        , "saved = get(values, 0);"
-        , "values = set(values, 0, Shelf { item: make(2) });"
-        , "a = &saved.item.run; b = &get(values, 0).item.run; return a(saved.item.seed) + b(get(values, 0).item.seed);"
+        [ "struct Slot { item: Shelf, tag: Int };"
+        , "fn keep(slot: &Slot) -> Int { return slot.tag; };"
+        , "fn replace(slot: Slot, next: Slot) -> Int {"
+        , "    saved = slot.item;"
+        , "    t = keep(&slot);"
+        , "    slot = next;"
+        , "    a = &saved.item.run; b = &slot.item.item.run;"
+        , "    return t + a(saved.item.seed) + b(slot.item.item.seed);"
+        , "};"
+        , "return replace(Slot { item: Shelf { item: make(40) }, tag: 0 }, Slot { item: Shelf { item: make(2) }, tag: 0 });"
         ] else unlines
-        [ "values = #[make(40)];"
-        , "saved = get(values, 0);"
-        , "values = set(values, 0, make(2));"
-        , "a = &saved.run; b = &get(values, 0).run; return a(saved.seed) + b(get(values, 0).seed);"
+        [ "struct Slot { item: Callback, tag: Int };"
+        , "fn keep(slot: &Slot) -> Int { return slot.tag; };"
+        , "fn replace(slot: Slot, next: Slot) -> Int {"
+        , "    saved = slot.item;"
+        , "    t = keep(&slot);"
+        , "    slot = next;"
+        , "    a = &saved.run; b = &slot.item.run;"
+        , "    return t + a(saved.seed) + b(slot.item.seed);"
+        , "};"
+        , "return replace(Slot { item: make(40), tag: 0 }, Slot { item: make(2), tag: 0 });"
         ]
 
 boxedWrapperBody :: String -> String -> String
