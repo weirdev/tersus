@@ -7,8 +7,6 @@ import Control.Monad (when)
 import Data.List (isInfixOf, isPrefixOf)
 import ElaboratorTool (noVerdict)
 import Native (buildExecutableFast, readProcessOutput)
-import Compile (parseSourceParts)
-import Pipeline (validateParts)
 import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode (..))
 import System.IO (hClose)
@@ -68,13 +66,11 @@ rejectedPrograms =
     w = "struct W { r: &mut Int }; "
 
 strictRejected :: String -> String -> TestResult
-strictRejected source expected = case parseSourceParts True source of
-    Error err -> Just ("unexpected parse failure: " ++ err)
-    Ok parts -> case validateParts parts of
-        Error err | noVerdict err -> Just ("the elaborator gave no verdict: " ++ err)
-        Error err | "Could not prove:" `isPrefixOf` err && expected `isInfixOf` err && not ("does not model yet" `isInfixOf` err) -> Nothing
-        Error err -> Just ("wrong rejection: " ++ err)
-        Ok _ -> Just "invalid program validated"
+strictRejected source expected = case validateSource source of
+    Error err | noVerdict err -> Just ("the elaborator gave no verdict: " ++ err)
+    Error err | "Could not prove:" `isPrefixOf` err && expected `isInfixOf` err && not ("does not model yet" `isInfixOf` err) -> Nothing
+    Error err -> Just ("wrong rejection: " ++ err)
+    Ok _ -> Just "invalid program validated"
 
 nativeResult :: String -> Integer -> IO TestResult
 nativeResult source expected = do

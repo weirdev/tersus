@@ -23,7 +23,8 @@ import Types
 import TestHarness
 import ElaboratorTool (Loader, nativeElaborator, nativeLoader, runElaboratorText, runLoader, sourceElaboratorExecutable)
 import LibPackage (LibPackage (..), compileLibPackageWith, libCatalog)
-import Compile (lowerPartsWith, lowerStatementsWith, parseSource, parseSourceParts, sourceRequest)
+import Compile (lowerStatementsWith)
+import qualified Modules
 import PackageData (ModuleId (..), Snapshot (..), resolverFromFiles)
 import qualified PackageCompile as Package
 import qualified Mir as M
@@ -272,20 +273,22 @@ nativeLoadRefusals = withSourceElaborator $ \exe -> case compileLibPackageWith (
   Ok pkg -> do
     -- (a program is read with the compiler libraries, from which the elaborator selects std's core for its List and Box)
     let source = "struct Cell { n: Int }; return 0;"
-        load = (sourceRequest LoadProgram False False (libCatalog pkg) source){lrProtocols = Just Map.empty}
+        snap = Modules.sourceSnapshot Modules.defaultLoadOptions source
+        load = (Modules.loadRequest LoadPackage snap){lrLibraries = libCatalog pkg, lrProtocols = Just Map.empty}
     valid <- runLoader exe load
     let positive = case valid of
-            Ok (LoadedProgram response@Accepted{}) -> testAssertTrue (acceptedOwnership response /= Nothing)
+            Ok (LoadedModules answers) | any (\(_, _, r) -> acceptedOwnership r /= Nothing) answers -> Nothing
             other -> Just ("valid version 2 load did not return checked facts: " ++ show other)
     -- (std's interfaces carry checked transport, which a version 1 request cannot read: it is refused before elaborating)
     legacyAnswer <- runLoader exe load{lrProtocols = Nothing}
     let refusedLegacy = case legacyAnswer of
-            Ok (LoadedProgram (NotModelled what)) -> testAssertTrue ("version 1 cannot consume checked ownership transport" `isInfixOf` what)
+            Ok (LoadedModules answers) | any (\(_, _, r) -> case r of NotModelled what -> "version 1 cannot consume checked ownership transport" `isInfixOf` what; _ -> False) answers -> Nothing
             other -> Just ("legacy load with std's checked libraries was not refused: " ++ show other)
-    -- (a version 1 request with no libraries is read as it was: elaborated, without checked facts)
-    plainAnswer <- runLoader exe (sourceRequest LoadProgram True False [] source){lrProtocols = Nothing}
+    -- (a version 1 noPrelude request with no libraries is read as it was: elaborated, without checked facts)
+    let plainSnap = Modules.sourceSnapshot Modules.defaultLoadOptions{Modules.noPrelude = True} source
+    plainAnswer <- runLoader exe (Modules.loadRequest LoadPackage plainSnap){lrProtocols = Nothing}
     let unchecked = case plainAnswer of
-            Ok (LoadedProgram response@Accepted{}) -> testAssertEq (acceptedOwnership response) Nothing
+            Ok (LoadedModules answers) | any (\(_, _, r) -> case r of Accepted{} -> acceptedOwnership r == Nothing; _ -> False) answers -> Nothing
             other -> Just ("legacy load without libraries did not elaborate: " ++ show other)
     results <- case writeLoadRequest load of
         Error e -> pure [Just e]
@@ -324,7 +327,7 @@ firstFailure (Nothing:rest) = firstFailure rest
 firstFailure (failure:_) = failure
 
 emptyLibraries :: Result LibPackage String
-emptyLibraries = Ok (LibPackage Map.empty Map.empty [] Map.empty)
+emptyLibraries = Ok (LibPackage Map.empty Map.empty Map.empty Map.empty [] Map.empty)
 
 compileFixture :: FilePath -> [(FilePath, String)] -> Loader -> Result Package.CompiledPackage String
 compileFixture entry files loader = Package.compileModulesUsing loader emptyLibraries (Snapshot (resolverFromFiles files) entry False)
@@ -413,8 +416,8 @@ nativePrivateSmoke = withSourceElaborator $ \exe -> pure $
 -- it before the copy step; the units are first changed by `change`
 consumerLinked :: Package.CompiledPackage -> Name -> ([(ModuleId, M.Program)] -> [(ModuleId, M.Program)]) -> Result M.Program String
 consumerLinked pkg callee change =
-    Package.packageLinkInputs pkg `bindResult` \(libUnits, units) ->
-        linkPrograms (libUnits ++ change [(m, if m == Package.compiledEntryModule pkg then withConsumer p else p) | (m, p) <- units])
+    Package.packageLinkInputs pkg `bindResult` \units ->
+        linkPrograms (change [(m, if m == Package.compiledEntryModule pkg then withConsumer p else p) | (m, p) <- units])
   where
     withConsumer p =
         let ty = case [M.localType d | d <- Map.elems (M.fnLocals (M.progMain p)), M.localName d == Just "x"] of t : _ -> t; [] -> TInt

@@ -105,8 +105,7 @@ sourceLoader rq
             Ok () -> withStageLoader sourceStage rq
     | otherwise = withStageLoader sourceStage rq
   where
-    needsTools (LoadPackageAssembly _) = True
-    needsTools kind = kind `elem` [LoadProgram, LoadProgramAssembly, LoadPackage]
+    needsTools kind = kind == LoadPackage
 
 {-# NOINLINE sourceToolsReady #-}
 sourceToolsReady :: MVar Bool

@@ -7,9 +7,9 @@ import qualified FieldPaths
 import qualified Types as T
 import AstData (readParsed, writeParsed)
 import MirData (readLowered, writeLowered)
-import Compile (elaborateParts, lowerSource, parseSourceParts)
+import Compile (lowerSource)
 import Mir (Lowered (..), Program (..))
-import Pipeline (validateParts, assumptionsOf, loadFromEntry, compileModules, assumptionsOfPackage)
+import Pipeline (assumptionsOf, loadFromEntry, compileModules, assumptionsOfPackage)
 import qualified Modules
 import TestHarness
 import TestParserFragments (parseExpression)
@@ -158,11 +158,9 @@ expect wanted got
     | otherwise = Just ("Expected " ++ show wanted ++ ", got " ++ show got)
 
 ergonomicsRejected :: String -> String -> TestResult
-ergonomicsRejected source expected = case parseSourceParts True source of
+ergonomicsRejected source expected = case validateSource source of
+    Ok _ -> Just ("Expected rejection containing: " ++ expected)
     Error err -> check err
-    Ok parts -> case validateParts parts of
-        Ok _ -> Just ("Expected rejection containing: " ++ expected)
-        Error err -> check err
   where
     check err
         | noVerdict err = Just ("the elaborator gave no verdict: " ++ err)
@@ -343,13 +341,13 @@ testErgonomics = TestList "testErgonomics"
         Left err -> Just err
         Right IfExpr{} -> Nothing
         Right expr -> Just ("expected IfExpr, got " ++ show expr)
-    , testCase "AST parsed and elaborated control-flow round trip" $ case parseSourceParts True "let x: Int = if true { let y = 1; y } else { 2 }; return x;" of
+    , testCase "AST parsed and elaborated control-flow round trip" $ let src = "let x: Int = if true { let y = 1; y } else { 2 }; return x;" in case parseStandalone src of
         Error err -> Just err
-        Ok (names, library, stmts) -> case writeParsed stmts of
+        Ok stmts -> case writeParsed stmts of
             Error err -> Just err
             Ok wire -> case readParsed wire of
                 Error err -> Just err
-                Ok parsed -> testAssertEq parsed stmts <> case elaborateParts (names, library, parsed) of
+                Ok parsed -> testAssertEq parsed stmts <> case elaborateSource src of
                     Error err -> Just err
                     Ok unit -> case writeLowered unit of
                         Error err -> Just err

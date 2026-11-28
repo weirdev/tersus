@@ -9,11 +9,11 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import Cli (Command (..), runSource)
-import Compile (elaborateStatements, sourceRequest)
+import Compile (elaborateStatements)
 import Differential (Unit (..), suiteUnits, toolPackages)
-import ElaborateRequest (LibraryAnswer (..), LoadKind (..), LoadRequest (..), LoadResponse (..), Response (..))
+import ElaborateRequest (LoadKind (..), LoadRequest (..), LoadResponse (..), Response (..))
 import ElaboratorTool (bootstrapLoader, sourceLoader)
-import LibPackage (libCatalog, libPackage)
+import LibPackage (LibPackage (..), libCatalog, libPackage, nativeStorageUnits)
 import Lowering (lowerAccepted)
 import Mir
 import MirHousekeeping (validationEntry)
@@ -389,23 +389,32 @@ unitLowerings unit = case unit of
 
 -- A single file as Compile.lowerSourceUsing asks for it; a refusal only where one is expected
 fileLowering :: String -> String -> Result [UnitLowering] String
-fileLowering label source = libPackage `bindResult` \pkg -> case (sourceLoader (sourceRequest LoadProgram False True (libCatalog pkg) source), lookup label expectedRefusals) of
-    (LoadedProgram response@Accepted{}, Nothing) -> Ok [(label, lowerAccepted response)]
-    (LoadedProgram Accepted{}, Just _) -> Error "accepted, but a refusal was expected"
-    (answer, expected) -> case (refusal answer, expected) of
-        (Just message, Just wanted)
-            | wanted `isInfixOf` message -> Ok []
-            | otherwise -> Error ("refused, but not as expected: " ++ message)
-        (Just message, Nothing) -> Error ("refused: " ++ message)
-        (Nothing, _) -> Error "the loader did not answer with the program's elaboration"
+fileLowering label source = libPackage `bindResult` \pkg ->
+    let snap = Mod.sourceSnapshot Mod.defaultLoadOptions source
+        req = (Mod.loadRequest LoadPackage snap){lrLibraries = libCatalog pkg}
+     in case (sourceLoader req, lookup label expectedRefusals) of
+            (LoadedModules answers, Nothing)
+                | [response@Accepted{}] <- [r | (m, _, r) <- answers, m == Mod.entryModuleOf snap] -> Ok [(label, lowerAccepted response)]
+            (LoadedModules answers, Just _)
+                | [Accepted{}] <- [r | (m, _, r) <- answers, m == Mod.entryModuleOf snap] -> Error "accepted, but a refusal was expected"
+            (answer, expected) -> case (refusal answer, expected) of
+                (Just message, Just wanted)
+                    | wanted `isInfixOf` message -> Ok []
+                    | otherwise -> Error ("refused, but not as expected: " ++ message)
+                (Just message, Nothing) -> Error ("refused: " ++ message)
+                (Nothing, _) -> Error "the loader did not answer with the program's elaboration"
   where
     refusal answer = case answer of
-        LoadedProgram (Refused m) -> Just m
-        LoadedProgram (RefusedInterface m) -> Just m
-        LoadedProgram (Unresolved m) -> Just m
-        LoadedProgram (NotModelled m) -> Just m
+        LoadedModules answers -> case [m | (_, _, r) <- answers, Just m <- [responseMsg r]] of
+            m : _ -> Just m
+            [] -> Nothing
         NotLoaded m -> Just m
-        Unparsed m -> Just m
+        _ -> Nothing
+    responseMsg r = case r of
+        Refused m -> Just m
+        RefusedInterface m -> Just m
+        Unresolved m -> Just m
+        NotModelled m -> Just m
         _ -> Nothing
 
 packageLowerings :: [(FilePath, String)] -> FilePath -> Result [UnitLowering] String
@@ -415,19 +424,10 @@ packageLowerings files entry =
             [] -> Error "a package without modules"
             modules -> Ok [(Mod.renderModuleId (Package.compiledModuleId m), Package.compiledLowered m) | m <- modules]
 
--- As LibPackage takes each library's unit; every library answers
+-- As LibPackage compiles each std module; every std module answers
 libraryLowerings :: Result [UnitLowering] String
-libraryLowerings = case bootstrapLoader Mod.libraryRequest of
-    LoadedLibraries answers Nothing
-        | sort [label | LibraryAnswer label _ _ _ <- answers] == sort (nub [libModuleOf name | (name, _, _) <- libModules]) -> libraries answers
-        | otherwise -> Error "the libraries that answered are not PreludeSource.libModules"
-    LoadedLibraries _ (Just e) -> Error e
-    _ -> Error "the loader did not answer with the compiler libraries"
-  where
-    libraries [] = Ok []
-    libraries (LibraryAnswer label _ _ response : rest) = case response of
-        Accepted (Just _) _ _ -> mapResult (("tersuslib::" ++ label, lowerAccepted response) :) (libraries rest)
-        _ -> Error ("library " ++ label ++ " was not accepted with an interface")
+libraryLowerings = libPackage `bindResult` \pkg -> nativeStorageUnits `bindResult` \_ ->
+    Ok [("std::" ++ label, lowered) | label <- libOrder pkg, Just lowered <- [Map.lookup label (libLowered pkg)]]
 
 -- The lowering succeeded and round trips
 checkLowering :: UnitLowering -> TestResult

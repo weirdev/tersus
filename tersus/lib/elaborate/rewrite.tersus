@@ -938,7 +938,11 @@ fn prepareModule(nodes: List<AstNode>, p: &Pkg, key: &String, roots: &List<Int>)
             if k >= size(roots) { return Prepared { nodes: rw.nodes, stmts: [], ok: false, msg: "a module file the request gives no statements for" }; };
             ids = listItems(&rw.nodes, get(roots, k));
             rw = prepareFile(rw, p, f, i, &ids);
-            if !rw.ok { return Prepared { nodes: rw.nodes, stmts: [], ok: false, msg: catStrings(catStrings(catStrings(catStrings("in module ", key), " file "), &f.name), catStrings(": ", &rw.msg)) }; };
+            if !rw.ok {
+                where = catStrings(catStrings(catStrings("in module ", key), " file "), &f.name);
+                if size(key.bytes) = 0 { where = catStrings("in file ", &f.name); };
+                return Prepared { nodes: rw.nodes, stmts: [], ok: false, msg: catStrings(where, catStrings(": ", &rw.msg)) };
+            };
             for s in &ids { all = push(all, s); };
             k = k + 1;
         };

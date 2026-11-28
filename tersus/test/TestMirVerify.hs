@@ -14,7 +14,7 @@ import Compile (lowerSource)
 import Mir
 import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (insertOwnership, verifyProgram, toolProgram)
-import Compile (lowerParts, parseSourceParts)
+import Compile (lowerSource)
 import Pipeline (compileSource, nativeProgram)
 import MirHousekeeping (storageProgram)
 import Types (Type (..))
@@ -416,9 +416,7 @@ functionCases =
   where
     sourceData name = case lookup name unvalidatedPrograms of
         Nothing -> Error ("no function program named " ++ name)
-        Just source -> case parseSourceParts True source of
-            Error e -> Error e
-            Ok parts -> mapResult writeProgram (lowerParts parts `bindResult` nativeProgram `bindResult` insertOwnership)
+        Just source -> mapResult writeProgram (lowerSource True source `bindResult` nativeProgram `bindResult` insertOwnership)
     ordinary = ("fn(Int) -> Int", "fn 1 int int")
     borrowedArg = ("fn(&List<Int>) -> Int", "fn 1 ref list int int")
     namedArg = ("fn(Integer) -> Int", "fn 1 named \"Integer\" 0 int")

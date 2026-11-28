@@ -386,8 +386,7 @@ supportUnitIdentity (loaded, compiled, _) = inspect inputs $ \(libs, units, unit
     , testAssertErrorContains "inconsistent units" (linkWithLibraries libs (units ++ [unit, (supportId, program{M.progFunctions = Map.delete (supportName "lookupDecl") (M.progFunctions program)})]))
     ]
   where
-    -- (the copies of the libraries' functions with bounds that the unit calls are made from the libraries' units)
-    libraries = Package.compiledLibUnits compiled
+    libraries = Ok []
     inputs = libraries `bindResult` \libs ->
         imported `bindResult` \units -> mapResult (\unit -> (libs, units, unit)) (lowerSupportUnit loaded compiled)
     -- (and the frames of the functions of the modules it imports, data::codec's among them, from those modules' units)

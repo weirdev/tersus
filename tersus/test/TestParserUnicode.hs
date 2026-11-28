@@ -75,7 +75,7 @@ identifier cp letter = do
         source = name ++ " = 1; return " ++ name ++ ";"
         expected = [Assign name (Val (VInt 1)), Return (Var name)]
     native <- TersusParser.parseFileNative emptyDecls source
-    let production = Compile.parseSource source
+    let production = parseStandalone source
     pure $ case (native, production) of
         (Left e, _) | ParserSeed.toolFailure e -> Just e
         (_, Error e) | ParserSeed.toolFailure e || frontendToolFailure e -> Just e

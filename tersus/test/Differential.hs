@@ -35,7 +35,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.ByteString.Char8 as B
 
 import Bootstrap (llvmOfOwned)
-import Compile (lowerPartsWith, lowerSourceUsing, lowerStatementsWith, parseWithEqualityPartsUsing, parseWithEqualityUsing)
+import Compile (lowerSourceUsing, lowerStatementsWith)
 import ElaborateRequest
 import ElaboratorTool (Loader, bootstrapElaborator, bootstrapLoader, noVerdict, runElaborator, runLoader, sourceElaborator, sourceLoader)
 import InterfaceData (writeInterface)
@@ -93,13 +93,8 @@ askFrontend (Frontend _ loader) (AskedLoad rq) = answersOf (loader rq)
 
 answersOf :: LoadResponse -> Answers
 answersOf response = case response of
-    AssembledProgram names r -> Answers [("program", r)] (Just (ProgramAssembly names))
-    AssembledPackage entry rows ms -> Answers (modules ms) (Just (PackageAssembly entry rows))
-    LoadedProgram r -> withoutAssembly [("program", r)]
     LoadedModules ms -> withoutAssembly (modules ms)
-    LoadedLibraries ls failure -> withoutAssembly ([(name, r) | LibraryAnswer name _ _ r <- ls] ++ [("libraries", Refused e) | Just e <- [failure]])
     NotLoaded e -> withoutAssembly [("load", Refused e)]
-    Unparsed e -> withoutAssembly [("parse", Refused e)]
     other -> withoutAssembly [("load", Unresolved ("not an elaboration: " ++ take 200 (show other)))]
   where
     modules ms = [(Mod.renderModuleId m, r) | (m, _, r) <- ms]
@@ -140,11 +135,9 @@ unitRequests frontend unit = do
 -- The compiler's compilation of a unit as far as lowering, through the given frontend, made anew each time the action
 -- runs; deep, the length of what it lowered to, which forces all of it
 unitThrough :: Bool -> Frontend -> Unit -> IO (Result Int String)
-unitThrough deep (Frontend elaborator loader) given = pure given >>= \unit -> case unit of
+unitThrough deep (Frontend _ loader) given = pure given >>= \unit -> case unit of
     SourceFile path -> program <$> readFile path
-    SourceText _ source -> pure $ case parseWithEqualityPartsUsing loader source of
-        Left e -> Error ("does not parse: " ++ e)
-        Right parts -> measured (lowerPartsWith elaborator parts)
+    SourceText _ source -> pure (program source)
     EmbeddedPackage entry -> pure (package (embeddedFiles entry) entry)
     FilePackage entry -> do
         files <- Mod.snapshotFromFilesystem entry

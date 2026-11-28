@@ -59,7 +59,7 @@ withResult (Ok value) check = check value
 
 realUnits :: String -> Result [(ModuleId, M.Program)] String
 realUnits source = compileModulesUsing bootstrapLoader libPackage snapshot `bindResult` \compiled ->
-    mapResult (uncurry (++)) (packageLinkInputs compiled)
+    packageLinkInputs compiled
   where
     entry = "app/main.tersus"
     files =

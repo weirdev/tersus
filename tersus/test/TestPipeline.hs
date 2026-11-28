@@ -41,7 +41,7 @@ import ValidatorNative (prepareTexts, validationRefusals)
 import TestParserFragments
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
-import Compile (elaborateParts, elaborateStatements, lowerParts, lowerStatements, parseSourceParts)
+import Compile (elaborateStatements, lowerStatements)
 import qualified Compile
 import ElaborateRequest (LoadRequest (..), LoadResponse (..))
 import PackageData (Resolver (..))
@@ -469,11 +469,9 @@ withMir source check = either Just check (lowerSource source)
 -- A program that holds a list or a Box, which it has as values of the library's structs: lowered with the libraries the
 -- elaborator selects for it
 lowerLibSource :: String -> Either String M.Program
-lowerLibSource source = case parseWithEqualityParts source of
-    Left err -> Left ("Parse failed: " ++ err)
-    Right parts -> case lowerParts parts of
-        Error e -> Left e
-        Ok program -> Right program
+lowerLibSource source = case Compile.lowerSource True source of
+    Error e -> Left e
+    Ok program -> Right program
 
 withLibMir :: String -> (M.Program -> TestResult) -> TestResult
 withLibMir source check = either Just check (lowerLibSource source)
@@ -865,7 +863,7 @@ selfHostedQueryFamilies program =
                     MData name fields -> MData name [(key, onLoop change field) | (key, field) <- fields]
                     MList items -> MList (map (onLoop change) items)
                     other -> other
-                checkDrivenLoop source change expected = case parseSourceParts True source `bindResult` lowerParts of
+                checkDrivenLoop source change expected = case Compile.lowerSource True source of
                     Error e -> Just ("Could not lower test program: " ++ e)
                     Ok mir -> case fmap (lookup "f") (encode mir) of
                         Right (Just (blocks, initial, entry)) -> either Just (`testAssertEq` Just (MInt expected)) (driven (toDriver (onLoop change blocks)) entry initial)
@@ -877,7 +875,7 @@ selfHostedQueryFamilies program =
                     Ok (Just (MData "DriverParsed" fields)) -> lookup "value" fields
                     _ -> Nothing
                 malformed = Just (MData "DriverValue::DriverMalformed" [])
-                drivenTexts = parseSourceParts True "fn f(x: Int) -> Int { return x; }; return 0;" `bindResult` lowerParts `bindResult` prepareTexts False
+                drivenTexts = Compile.lowerSource True "fn f(x: Int) -> Int { return x; }; return 0;" `bindResult` prepareTexts False
                 checkDrivenInput edit expected = case drivenTexts of
                     Error e -> Just ("Could not prepare test program: " ++ e)
                     Ok texts -> case runProgramWith (edit (show (length texts) ++ "\n") (concatMap snd texts)) program of
@@ -1069,7 +1067,7 @@ selfHostedQueryFamilies program =
                             result -> Just ("Unexpected known boolean join result: " ++ show result)
                 boolConstants = [constant (20, 1, 1), constant (21, 1, 0)]
                 checkMirSubset input expected =
-                    let lowered = parseSourceParts True input `bindResult` lowerParts
+                    let lowered = Compile.lowerSource True input
                      in case lowered of
                             Error e -> Just ("Could not lower test program: " ++ e)
                             Ok mir ->
@@ -1079,7 +1077,7 @@ selfHostedQueryFamilies program =
                                         Nothing -> Nothing
                 checkMalformedArrayLength =
                     let input = "fn f<n>(a: Array<Int, n>, m: Int) -> Int { b = array(n, 0); return size(b); }; return 0;"
-                        lowered = parseSourceParts True input `bindResult` lowerParts
+                        lowered = Compile.lowerSource True input
                      in case lowered of
                             Error e -> Just ("Could not lower malformed-MIR fixture: " ++ e)
                             Ok mir -> case Map.lookup "f" (M.progFunctions mir) of
@@ -1949,8 +1947,8 @@ testPipeline =
             Ok _ -> Just "ordinary source received private parser helpers"
             Error err | "Parser tool failure:" `isInfixOf` err -> Just err
             Error err -> testAssertTrue ("parserUnicodeLetter" `isInfixOf` err)
-        , testAssertErrorContains "frontend sentinel" (validatedSourceUsing (const (Unparsed "frontend sentinel")) False "return 1;")
-        , testAssertErrorContains "frontend sentinel" (compileSourceUsing (const (Unparsed "frontend sentinel")) False "return 1;")
+        , testAssertErrorContains "frontend sentinel" (validatedSourceUsing (const (NotLoaded "frontend sentinel")) False "return 1;")
+        , testAssertErrorContains "frontend sentinel" (compileSourceUsing (const (NotLoaded "frontend sentinel")) False "return 1;")
         , case compileSourceUsing (substitutedFrontend "return 7;") False "return 1;" of
             Error err -> Just err
             Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program)) (Ok (Just "7"))
@@ -1958,49 +1956,30 @@ testPipeline =
             Error err -> Just err
             Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program)) (Ok (Just "7"))
         , -- Each stage names itself in its error
-          testAssertErrorContains "Parse error" (parseSource "x = ;")
+          testAssertErrorContains "parse error" (parseStandalone "x = ;")
         , validationFailureFor "compileSource"
-        , testAssertErrorContains "Validation failed: Type error" (compileSource "x = 1; y = x(2);")
+        , testAssertErrorContains "Type error" (compileSource "x = 1; y = x(2);")
         , -- The checked program has each `shrinks` clause resolved, and is the one that gets lowered
-          case parseSourceParts True "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" `bindResult` elaborateParts of
+          case elaborateSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" of
             Ok lowered -> testAssertTrue (not (null [() | M.LoopSpec _ (Just (Counting _)) _ _ <- Map.elems (M.specLoops (M.fnSpec (M.progMain (M.lowProgram lowered))))]))
             Error e -> Just e
         , case compileSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; }; return i;" of
             Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program), Map.size (M.fnBlocks (M.progMain program))) (Ok (Just "3"), 4)
             Error e -> Just e
         , -- The MIR of a program is verified: a program with no return type to agree on never gets that far
-          testAssertErrorContains "Validation failed: Type error" (compileSource "if true { return 1; } else { return false; };")
+          testAssertErrorContains "Type error" (compileSource "if true { return 1; } else { return false; };")
         , testAssertEq (mapResult (const ()) (compileSource "")) (Ok ())
-        , -- The libraries in front of a program are decided from the program as it was read, not from its text
-          case parseSource "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();" of
-            Ok stmts -> testAssertEq (traitCount "Sequence" stmts) 1
-            Error e -> Just e
-        , case parseSource "struct String { x: Int }; return String { x: 3 }.x;" of
-            Ok stmts -> testAssertEq (structFields "String" stmts) [["x"]]
-            Error e -> Just e
-        , case parseSource "// Sequence String Clone\nreturn 4;" of
-            Ok stmts -> testAssertEq (traitCount "Sequence" stmts, structFields "String" stmts) (0, [])
-            Error e -> Just e
-        , case parseSource "struct String { bytes: List<Byte> }; s = \"trait Sequence\"; return size(s.bytes);" of
-            Ok stmts -> testAssertEq (traitCount "Sequence" stmts, structFields "String" stmts) (0, [["bytes"]])
-            Error e -> Just e
-        , case parseSource "return \"a\";" of
-            Ok stmts -> testAssertEq (structFields "String" stmts) [["bytes"]]
-            Error e -> Just e
-        , case parseSource "fn f<S: Sequence<Int>>(s: &S) -> Int { return size(s); }; return f([1, 2]);" of
-            Ok stmts -> testAssertEq (traitCount "Sequence" stmts) 1
-            Error e -> Just e
-        , testAssertErrorContains "Parse error" (parseSource "trait Sequence { fn size(self: Self) -> Int; }; s = \"a\";")
-        , testAssertErrorContains "Parse error" (parseSource "x = \"a\"; y = ;")
-        , -- A program that declares its own enum or trait named String is read without the string library
-          testAssertEq (mapResult (const ()) (compileSource "enum String { Empty }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
-        , testAssertEq (mapResult (const ()) (compileSource "trait String { fn size(self: Self) -> Int; }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
-        , -- A program that declares its own prelude trait is read without the prelude or the libraries that need it, so String is not a struct there
-          testAssertEq (mapResult (const ()) (compileSource "trait Sequence { }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
-        , testAssertEq (mapResult (const ()) (compileSource "trait String { }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
-        , -- A program may declare a function named like a native storage helper: the helpers are std's, by their canonical names
+        , -- Top-level declarations colliding with listed prelude names are ordinary ambiguity errors unless noPrelude is set
+          testAssertErrorContains "ambiguous in this file" (compileSource "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();")
+        , testAssertErrorContains "ambiguous in this file" (compileSource "struct String { x: Int }; return String { x: 3 }.x;")
+        , testAssertErrorContains "ambiguous in this file" (compileSource "enum String { Empty }; return 1;")
+        , testAssertErrorContains "ambiguous in this file" (compileSource "trait String { }; return 1;")
+        , testAssertEq (mapResult (const ()) (compileSourceNoPrelude True "struct String { x: Int }; return String { x: 3 }.x;")) (Ok ())
+        , testAssertEq (mapResult (const ()) (compileSourceNoPrelude True "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();")) (Ok ())
+        , testAssertErrorContains "parse error" (parseStandalone "x = \"a\"; y = ;")
+        , -- A program may declare a function named like a native storage helper: std::lists is native-only and never in the prelude
           testAssertEq (mapResult (const ()) (compileSource "fn listPush(x: Int) -> Int { return x; }; xs = [1]; return listPush(size(xs));")) (Ok ())
-        , case parseSource "// fn listPush\nreturn 1;" of
+        , case parseStandalone "// fn listPush\nreturn 1;" of
             Ok _ -> Nothing
             Error e -> Just e
         ]

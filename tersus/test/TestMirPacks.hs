@@ -92,7 +92,7 @@ metadata expanded =
         ]
 
 realTemplate :: String -> String -> Result M.Program String
-realTemplate target source = compileModulesUsing bootstrapLoader libPackage snapshot `bindResult` packageLinkInputs `bindResult` \(_, units) ->
+realTemplate target source = compileModulesUsing bootstrapLoader libPackage snapshot `bindResult` packageLinkInputs `bindResult` \units ->
     case [p | (_, p) <- units, Map.member target (M.progBounded p)] of
         [p] -> Ok p
         _ -> Error ("expected one pre-copies package unit defining " ++ target)

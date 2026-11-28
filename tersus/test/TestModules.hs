@@ -194,10 +194,10 @@ testImports =
             Right parsed -> Just ("Expected parse failure, got: " ++ show parsed)
         , case compileSource "import a::b::c; x = 1;" of
             Error err ->
-                if "imports are not linked yet" `isInfixOf` err
+                if "is not configured for standalone source" `isInfixOf` err
                     then Nothing
-                    else Just ("Expected not-linked error, got: " ++ err)
-            Ok _ -> Just "Expected a file with imports to be rejected for now"
+                    else Just ("Expected standalone-package error, got: " ++ err)
+            Ok _ -> Just "Expected a file with unconfigured package import to be rejected"
         , case compileSource "x = 1; return x;" of
             Ok _ -> Nothing
             Error err -> Just ("Expected existing single-file program to compile, got: " ++ err)
@@ -227,17 +227,18 @@ expectErrAll files entry needles = case loadPkg files entry of
     Right pkg -> Just ("Expected load failure containing " ++ show needles ++ ", got: " ++ show (map (renderModuleId . loadedModuleId) (packageModules pkg)))
 
 moduleOrder :: LoadedPackage -> [String]
-moduleOrder pkg = map (renderModuleId . loadedModuleId) (packageModules pkg)
+moduleOrder pkg = [renderModuleId (loadedModuleId modu) | modu <- packageModules pkg, modulePackage (loadedModuleId modu) /= "std"]
 
 resolvedIn :: LoadedPackage -> String -> String -> [ResolvedImport]
 resolvedIn pkg moduleName fileName =
-    concat
-        [ loadedImports file
-        | modu <- packageModules pkg
-        , renderModuleId (loadedModuleId modu) == moduleName
-        , file <- loadedModuleFiles modu
-        , loadedFileName file == fileName
-        ]
+    [ ri
+    | modu <- packageModules pkg
+    , renderModuleId (loadedModuleId modu) == moduleName
+    , file <- loadedModuleFiles modu
+    , loadedFileName file == fileName
+    , ri <- loadedImports file
+    , importLine (resolvedImport ri) > 0
+    ]
 
 basePkg :: Files
 basePkg =
@@ -275,11 +276,11 @@ testLoaderDiscovery =
             Left err -> Just ("entry in package root should load: " ++ err)
             Right pkg -> testAssertEq (packageEntryModule pkg) (ModuleId "app" Nothing)
         , case loadFromEntry (resolverFromFiles [("lonely/main.tersus", "x = 1;")]) "lonely/main.tersus" of
-            Right (StandaloneResult _ _) -> Nothing
-            other -> Just ("expected standalone result, got: " ++ show other)
+            Right (PackageResult pkg) -> testAssertEq (packageEntryModule pkg) (ModuleId "" Nothing)
+            other -> Just ("expected standalone package result, got: " ++ show other)
         , case loadFromEntry (resolverFromFiles [("lonely/main.tersus", "import a::b; x = 1;")]) "lonely/main.tersus" of
             Left err ->
-                if "standalone" `isInfixOf` err && "imports are not supported" `isInfixOf` err
+                if "is not configured for standalone source" `isInfixOf` err
                     then Nothing
                     else Just ("expected standalone-import error, got: " ++ err)
             Right result -> Just ("expected standalone import to fail, got: " ++ show result)
@@ -804,13 +805,11 @@ testModuleLinkDrop =
                 let rendered = M.renderProgram program
                  in testAssertTrue ("<app$geo$geo$Token as std$core$ownership$Drop>::drop" `isInfixOf` rendered)
                         <> testAssertTrue ("drop " `isInfixOf` rendered)
-        , expectRuns dropSuppressedPreludeFiles "app/main.tersus" "2"
-        , case ownedPkg dropSuppressedPreludeFiles "app/main.tersus" of
-            Left err -> Just ("drop with a suppressed prelude should compile to owned MIR: " ++ err)
+        , expectRuns dropNoPreludeFiles "app/main.tersus" "2"
+        , case ownedPkg dropNoPreludeFiles "app/main.tersus" of
+            Left err -> Just ("drop with noPrelude and explicit Drop import should compile to owned MIR: " ++ err)
             Right program -> testAssertTrue ("<app$geo$geo$Token as std$core$ownership$Drop>::drop" `isInfixOf` M.renderProgram program)
-        , case compileSource (suppressedPreludeDrop ++ " t = Token::new(2); return t.n;") `bindResult` runProgram of
-            Error err -> Just ("a single file with a prelude trait of its own still has std core's Drop: " ++ err)
-            Ok value -> testAssertEq value (Just (MInt 2))
+        , testAssertErrorContains "ambiguous in this file" (compileSource (suppressedPreludeDrop ++ " t = Token::new(2); return t.n;"))
         ]
   where
     dropFiles =
@@ -818,13 +817,10 @@ testModuleLinkDrop =
         , ("app/main.tersus", "import app::geo; t = geo::Token::new(2); return t.n;")
         , ("app/geo/geo.tersus", "struct Token { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl Token { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for Token { fn drop(self: Self) -> Int [{ }] [{ }] { return Addr::free(self.addr, self.blk); }; };")
         ]
-    -- (the geo module declares a prelude trait of its own, so the prelude
-    -- is not selected for it, and its impl Drop sees std core's Drop trait,
-    -- as a single file that does the same does)
-    dropSuppressedPreludeFiles =
-        [ ("app/package.tersus", "")
+    dropNoPreludeFiles =
+        [ ("app/package.tersus", "noPrelude = true;")
         , ("app/main.tersus", "import app::geo; t = geo::Token::new(2); return t.n;")
-        , ("app/geo/geo.tersus", suppressedPreludeDrop)
+        , ("app/geo/geo.tersus", "import std::core::ownership { Drop }; " ++ suppressedPreludeDrop)
         ]
     suppressedPreludeDrop = "trait Sequence<E> { fn size(self: &Self) -> Int; }; struct Token { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl Token { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for Token { fn drop(self: Self) -> Int [{ }] [{ }] { return Addr::free(self.addr, self.blk); }; };"
 
@@ -923,7 +919,7 @@ testModuleAssumptions =
                             <> testAssertEq [drop (length "in module app::geo: assume ") line | line <- found, "in module app::geo: assume " `isPrefixOf` line]
                                 ["x > 1", "x > 2", "x > 3", "x > 4", "x > 5", "x > 6", "1 > 0"]
                             <> testAssertErrorContains "in module app::geo: the unit did not lower"
-                                (assumptionsOfPackage compiled{compiledModules = [m{compiledLowered = Error "the unit did not lower"} | m <- compiledModules compiled]})
+                                (assumptionsOfPackage compiled{compiledModules = [if compiledModuleId m == ModuleId "app" (Just "geo") then m{compiledLowered = Error "the unit did not lower"} else m | m <- compiledModules compiled]})
         ]
   where
     assumptionFiles =
@@ -1252,8 +1248,10 @@ testLoaderInjection = testCaseSeq "loader-injection"
     , case loadFromEntryWith (const (NotLoaded "injected refusal sentinel")) (resolverFromFiles [("solo.tersus", "return 1;")]) "solo.tersus" of
         Left err -> testAssertTrue ("injected refusal sentinel" `isInfixOf` err)
         Right _ -> Just "standalone loader did not use the injected loader"
-    , case loadFromEntryWith (\request -> sourceLoader request{lrResolver = resolverFromFiles [("solo.tersus", "return 99;")]}) (resolverFromFiles [("solo.tersus", "not Tersus syntax")]) "solo.tersus" of
-        Right (StandaloneResult path pf) -> testAssertEq path "solo.tersus" <> testAssertEq [stmt | stmt <- fileBody pf, not (isMark stmt)] [Return (Val (VInt 99))]
+    , case loadFromEntryWith (\request -> sourceLoader request{lrResolver = (lrResolver request){resolverFiles = Map.insert "solo.tersus" "return 99;" (resolverFiles (lrResolver request))}}) (resolverFromFiles [("solo.tersus", "not Tersus syntax")]) "solo.tersus" of
+        Right (PackageResult pkg)
+            | [file] <- [f | m <- packageModules pkg, loadedModuleId m == packageEntryModule pkg, f <- loadedModuleFiles m] ->
+                testAssertEq (loadedFilePath file) "solo.tersus" <> testAssertEq [stmt | stmt <- fileBody (loadedParsed file), not (isMark stmt)] [Return (Val (VInt 99))]
         other -> Just ("standalone AST substitution failed: " ++ show other)
     , case loadFromEntry (resolverFromFiles nativeFiles) "app/main.tersus" of
         Left err -> Just ("seeded files should load: " ++ err)
@@ -1264,8 +1262,8 @@ testLoaderInjection = testCaseSeq "loader-injection"
                 <> case mainFiles of
                     [file] -> testAssertEq (loadedFileSource file) nativeSource
                         <> testAssertEq (loadedFilePath file) "app/main.tersus"
-                        <> testAssertEq (map resolvedImport (loadedImports file)) [Import ["app", "geo", "NativePoint"] Nothing Nothing 1 1]
-                        <> testAssertEq (map resolvedCanonical (loadedImports file)) ["app$geo$geo$NativePoint"]
+                        <> testAssertEq (map resolvedImport (resolvedIn pkg "app" "main.tersus")) [Import ["app", "geo", "NativePoint"] Nothing Nothing 1 1]
+                        <> testAssertEq (map resolvedCanonical (resolvedIn pkg "app" "main.tersus")) ["app$geo$geo$NativePoint"]
                         <> case compileModulesToProgram (packageSnapshot pkg) of
                             Error err -> Just ("the loaded package should compile: " ++ err)
                             Ok program -> case runProgram program of
@@ -1597,7 +1595,7 @@ toolPackageIsolation entry = do
             , case discoverEntry besideFiles entry of
                 InPackage r name -> testAssertEq (r, name) ("lib/" ++ pkg, pkg)
                 _ -> Just (entry ++ " is not found in its own package")
-            , testAssertEq [path | modu <- packageModules b, file <- loadedModuleFiles modu, let path = loadedFilePath file, not (root `isPrefixOf` path || "lib/data/" `isPrefixOf` path)] []
+            , testAssertEq [path | modu <- packageModules b, file <- loadedModuleFiles modu, let path = loadedFilePath file, not (root `isPrefixOf` path || "lib/data/" `isPrefixOf` path || "<std>/" `isPrefixOf` path)] []
             ]
         (Left e, _) -> Just e
         (_, Left e) -> Just e
@@ -1762,6 +1760,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                     Error e -> Just e
                     Ok checker ->
                         let files = concatMap loadedModuleFiles (packageModules pkg)
+                            valFiles = [f | m <- packageModules pkg, modulePackage (loadedModuleId m) /= "std", f <- loadedModuleFiles m]
                             units = [lowered | modu <- PackageCompile.compiledModules compiled, Ok lowered <- [PackageCompile.compiledLowered modu]]
                             declared = [name | lowered <- units, name <- Set.toList (M.lowDeclared lowered), Map.member name (M.progFunctions (M.lowProgram lowered)), Map.notMember name (M.progBounded (M.lowProgram lowered))]
                             typeNames = [name | lowered <- units, name <- Set.toList (M.lowDeclared lowered), Map.member name (M.progTypes (M.lowProgram lowered)) || Map.member name (M.progGenerics (M.lowProgram lowered))]
@@ -1776,7 +1775,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions (withoutGeneric raw)))
                             , case refused of Error _ -> Nothing; Ok _ -> Just "changed same-path validator bypassed validation"
                             , testAssertEq (length markers) (Map.size (Map.fromList [(marker, ()) | marker <- markers]))
-                            , testAssertEq (validatorMetadataFingerprint raw) "504b193d005dd35e"
+                            , testAssertEq (validatorMetadataFingerprint raw) "4d4c427a93edf25f"
                             , case Compile.completeSpecEnvs raw of
                                 Error e -> Just e
                                 Ok completed -> testAssertEq (validatorMetadataFingerprint completed) (validatorMetadataFingerprint raw)
@@ -1786,20 +1785,20 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Just fn -> let env = M.specEnv (M.fnSpec fn) in
                                     all (`Map.member` env) (Map.keys (M.progFunctions raw)) && not (Map.member "countParsed" env))
                                 ["containsValue", "commonContext", "driverReadAll"])
-                            , testAssertEq (Map.size (M.progFunctions raw)) 1086
+                            , testAssertEq (Map.size (M.progFunctions raw)) 1133
                             , testAssertEq (Map.keys (M.progFunctions checker)) (Map.keys (M.progFunctions (withoutGeneric raw)))
                             , testAssertTrue (all (`Map.member` M.progFunctions raw) declared)
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) declared)
                             , testAssertTrue (all (\n -> Map.member n (M.progTypes raw) || Map.member n (M.progGenerics raw)) typeNames)
                             , testAssertEq disk validationPackageFiles
-                            , testAssertEq (map loadedFileStem files) ["context", "differences", "driver", "evaluation", "execution", "flow", "joins", "linear", "loopInference", "model", "relations", "saturation", "sequenceFacts", "state", "validation"]
-                            , testAssertEq (length (packageModules pkg)) 1
-                            , testAssertTrue (all ((== packageEntryModule pkg) . loadedFileModule) files)
-                            , testAssertTrue (all (\file -> all ((== packageEntryModule pkg) . resolvedTargetModule) (loadedImports file)) files)
-                            , testAssertEq [loadedFileStem file | file <- files, "JoinedFact" `elem` loadedDeclNames file] ["joins"]
-                            , testAssertEq [loadedFileStem file | file <- files, "commonFacts" `elem` loadedDeclNames file] ["joins"]
-                            , testAssertEq [loadedFileStem file | file <- files, "commonContext" `elem` loadedDeclNames file] ["joins"]
-                            , testAssertEq (sum [definitions stmt | file <- files, stmt <- fileBody (loadedParsed file)]) 628
+                            , testAssertEq (map loadedFileStem valFiles) ["context", "differences", "driver", "evaluation", "execution", "flow", "joins", "linear", "loopInference", "model", "relations", "saturation", "sequenceFacts", "state", "validation"]
+                            , testAssertEq (length [m | m <- packageModules pkg, modulePackage (loadedModuleId m) /= "std"]) 1
+                            , testAssertTrue (all ((== packageEntryModule pkg) . loadedFileModule) valFiles)
+                            , testAssertTrue (all (\file -> all (\ri -> resolvedTargetModule ri == packageEntryModule pkg || modulePackage (resolvedTargetModule ri) == "std") (loadedImports file)) valFiles)
+                            , testAssertEq [loadedFileStem file | file <- valFiles, "JoinedFact" `elem` loadedDeclNames file] ["joins"]
+                            , testAssertEq [loadedFileStem file | file <- valFiles, "commonFacts" `elem` loadedDeclNames file] ["joins"]
+                            , testAssertEq [loadedFileStem file | file <- valFiles, "commonContext" `elem` loadedDeclNames file] ["joins"]
+                            , testAssertEq (sum [definitions stmt | file <- valFiles, stmt <- fileBody (loadedParsed file)]) 628
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) ["validateExecution", "noTemplates", "commonContext", "driverReadAll"])
                             , testAssertTrue (all (not . isInfixOf "validation$") (Map.keys (M.progFunctions checker)))
                             , testAssertEq (runNamedFunction trapped "noTemplates" []) (Ok (Just (MList [])))
@@ -2123,16 +2122,14 @@ testPhase1Packages = TestList "testPhase1Packages"
         Left err -> Just err
         Right pkg -> case compileModules (packageSnapshot pkg) of
             Error err -> Just err
-            Ok compiled -> testAssertEq (map loadedNoPrelude (packageModules pkg)) [True, False]
-                <> testAssertTrue (case compiledLibUnits compiled of
-                    Ok (_ : _) -> True
-                    _ -> False)
-    , testCase "no-prelude source files receive no implicit library declaration seed" $
+            Ok compiled -> testAssertEq (map loadedNoPrelude [m | m <- packageModules pkg, modulePackage (loadedModuleId m) /= "std"]) [True, False]
+                <> testAssertTrue (any ((== "std") . modulePackage . compiledModuleId) (compiledModules compiled))
+    , testCase "no-prelude source files receive no implicit prelude imports" $
         case loadFromEntry (resolverFromFiles (phase1Files phase1Program)){resolverOptions = phase1Options} phase1Entry of
                 Left err -> Just err
                 Right (PackageResult pkg) -> case compileModules (packageSnapshot pkg) of
                     Error err -> Just err
-                    Ok compiled -> testAssertEq (compiledLibUnits compiled) (Ok [])
+                    Ok compiled -> testAssertEq [compiledModuleId m | m <- compiledModules compiled, modulePackage (compiledModuleId m) == "std"] []
                 Right _ -> Just "expected package"
     , testCase "a no-prelude package file is read without the String library" $
         case phase1Load phase1Options (phase1Files "s = \"hi\"; return size(s.bytes);") of
@@ -2140,10 +2137,11 @@ testPhase1Packages = TestList "testPhase1Packages"
             Right pkg -> phase1ResultRefusal "String" (compileModulesToProgram (packageSnapshot pkg))
     , testCase "a no-prelude program is read without the String library" $
         phase1ResultRefusal "String" (Pipeline.compileSourceNoPrelude True "s = \"hi\"; return size(s.bytes);")
-    , testCase "standalone no-prelude parsing never probes implicit source declarations" $
-        case Compile.parseSourcePartsNoPrelude True True "return 17 + 25;" of
-                Error err -> Just err
-                Ok (names, library, _) -> testAssertEq names [] <> testAssertEq library []
+    , testCase "standalone no-prelude parsing never imports std" $
+        case loadFromEntry (resolverFromFiles [("<source>", "return 17 + 25;")]){resolverOptions = defaultLoadOptions{noPrelude = True}} "<source>" of
+            Left err -> Just err
+            Right (PackageResult pkg) -> testAssertEq [loadedModuleId m | m <- packageModules pkg, modulePackage (loadedModuleId m) == "std"] []
+            Right _ -> Just "expected package graph"
     , testCase "empty-library source lowering has no implicit package dependency" $ case Compile.lowerSourceNoPrelude True True "return 42;" of
         Error err -> Just err
         Ok program -> testAssertEq (runProgram program) (Ok (Just (MInt 42)))

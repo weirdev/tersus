@@ -13,7 +13,7 @@ import qualified Mir as M
 import TestParserFragments
 import Types
 import Syntax
-import Compile (elaborateParts, elaborateStatements, parseWithEqualityParts)
+import Compile (elaborateStatements)
 import Utils
 import TestHarness
 import ValidatorNative (validateCompiled)
@@ -380,11 +380,9 @@ testTermination =
                 Right stmts -> case elaborateStatements stmts of
                     Ok lowered | [Just (Counting _)] <- loopTerminations lowered -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
-            , case parseWithEqualityParts (tree ++ "t = Box::new(Tree::Leaf); while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; };") of
-                Left err -> Just ("Parse error: " ++ err)
-                Right parts -> case elaborateParts parts of
-                    Ok lowered | [Just (Parts _)] <- loopTerminations lowered -> Nothing
-                    other -> Just ("Unexpected: " ++ show other)
+            , case elaborateSource (tree ++ "t = Box::new(Tree::Leaf); while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; };") of
+                Ok lowered | [Just (Parts _)] <- loopTerminations lowered -> Nothing
+                other -> Just ("Unexpected: " ++ show other)
             , case parseStatementBlock "fn f(n: Int) -> Int shrinks n { return 0; };" of
                 Left err -> Just ("Parse error: " ++ show err)
                 Right stmts -> case elaborateStatements stmts of
