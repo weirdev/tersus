@@ -2,9 +2,7 @@
 {-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
 
 module Pipeline
-    ( parseSource
-    , parseWithEquality
-    , validatedSource
+    ( validatedSource
     , compileSource
     , validatedSourceNoPrelude
     , compileSourceNoPrelude
@@ -31,18 +29,15 @@ module Pipeline
     , nativeProgram
     , validateStatements
     , runStatements
-    , validateParts
-    , runParts
-    , parseWithEqualityParts
-    , parseSourceParts
     , assumptionsOf
     , assumptionsOfNoPrelude
+    , assumptionsOfStatements
     ) where
 
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
-import Compile (SourceParts, lowerParts, lowerSourceUsing, lowerStatements, parseSource, parseSourceParts, parseSourcePartsNoPrelude, parseWithEquality, parseWithEqualityParts)
+import Compile (lowerSourceUsing, lowerStatements)
 import ElaboratorTool (Loader, sourceLoader)
 import LibPackage (compileLibPackageWith, libPackage)
 import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesLinked, compileModulesUsing, lowerCompiledPackage)
@@ -55,6 +50,7 @@ import ValidatorNative (validateCompiled)
 import MirCopies (withoutGeneric)
 import System.IO.Unsafe (unsafePerformIO)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import ParsedFile (fileBody)
 import Pretty (renderVarProof, renderExpression)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
 import Types (Size (..), Type (..))
@@ -78,7 +74,15 @@ assumptionsOf :: String -> Result [String] String
 assumptionsOf = assumptionsOfNoPrelude False
 
 assumptionsOfNoPrelude :: Bool -> String -> Result [String] String
-assumptionsOfNoPrelude noPrelude source = mapResult (snd . statements Nothing . (\(_, library, body) -> library ++ body)) (parseSourcePartsNoPrelude noPrelude True source)
+assumptionsOfNoPrelude noPrelude source =
+    case Mod.graphResult (Mod.sourceSnapshot Mod.defaultLoadOptions{Mod.noPrelude = noPrelude} source) sourceLoader of
+        Left err -> Error err
+        Right (Mod.StandaloneResult _ parsed) -> Ok (assumptionsOfStatements (fileBody parsed))
+        Right (Mod.PackageResult pkg) ->
+            Ok (concat [assumptionsOfStatements (fileBody (Mod.loadedParsed f)) | m <- Mod.packageModules pkg, Mod.loadedModuleId m == Mod.packageEntryModule pkg, f <- Mod.loadedModuleFiles m])
+
+assumptionsOfStatements :: [Statement] -> [String]
+assumptionsOfStatements = snd . statements Nothing
   where
     statements place = foldl (\(p, found) stmt -> let (p', more) = statement p stmt in (p', found ++ more)) (place, [])
     statement place stmt = case stmt of
@@ -123,7 +127,7 @@ validatedSourceUsing :: Loader -> Bool -> String -> Result M.Program String
 validatedSourceUsing loader noPrelude source =
     lowerSourceUsing loader libPackage noPrelude True source `bindResult` \program ->
         checkedLowered program `bindResult` \checked ->
-            stage "Validation failed: " (validateCompiled checked) `bindResult` \_ ->
+            stage "Validation failed: " (validateCompiled (oneMarkerEach checked)) `bindResult` \_ ->
                 Ok (withoutGeneric checked)
 
 -- The MIR of a program that passes every check
@@ -205,10 +209,6 @@ listLibrary = do
 validateStatements :: [Statement] -> Result () String
 validateStatements stmts = lowerStatements stmts `bindResult` validateLowered
 
--- The same for a program read with compiler libraries (Compile.lowerParts)
-validateParts :: SourceParts -> Result () String
-validateParts parts = lowerParts parts `bindResult` validateLowered
-
 validateLowered :: M.Program -> Result () String
 validateLowered program =
     (case verifyProgram program of
@@ -219,9 +219,6 @@ validateLowered program =
 -- Runs a program given as statements, once it type checks, without validating it
 runStatements :: [Statement] -> Result (Maybe MirValue) String
 runStatements stmts = lowerStatements stmts `bindResult` runLowered
-
-runParts :: SourceParts -> Result (Maybe MirValue) String
-runParts parts = lowerParts parts `bindResult` runLowered
 
 runLowered :: M.Program -> Result (Maybe MirValue) String
 runLowered program =

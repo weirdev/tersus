@@ -14,7 +14,6 @@ import TestParserFragments
 import Data.List (isInfixOf)
 import ElaboratorTool (noVerdict)
 import MirEval (fromMirValue)
-import Pipeline (parseWithEquality, parseWithEqualityParts, runParts, validateParts)
 import StdLib
 import Types
 import Syntax
@@ -180,46 +179,30 @@ testParse =
         ]
 
 -- Evaluate tests
-evalExprHelper :: Expression -> Value -> TestResult
-evalExprHelper expr expected =
-    case libraryParts [Return expr] `bindResult` runParts of
+parseEvalExprHelper :: String -> Value -> TestResult
+parseEvalExprHelper exprStr expected =
+    case runSourceUnvalidated ("return " ++ exprStr ++ ";") of
         Ok (Just val) -> testAssertEq (fromMirValue val) expected
         Ok Nothing -> Just "No value returned"
         Error e -> Just $ "Expression failed with error: " ++ e
 
-parseEvalExprHelper :: String -> Value -> TestResult
-parseEvalExprHelper exprStr expected =
-    let parseOutput = parseExpression exprStr
-     in case parseOutput of
-            Left err -> Just $ "Parse failed: " ++ show err
-            Right parsed -> evalExprHelper parsed expected
-
 parseEvalReturningStmtHelper :: String -> Value -> TestResult
 parseEvalReturningStmtHelper stmtStr expected =
-    let parseOutput = parseStatement stmtStr
-     in case parseOutput of
-            Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) ->
-                case libraryParts stmts `bindResult` runParts of
-                    Ok (Just val) -> testAssertEq (fromMirValue val) expected
-                    Ok Nothing -> Just "No value returned"
-                    Error e -> Just $ "Evaluation failed with error: " ++ e
-            Right _ -> Just "Not a block statement"
+    case runSourceUnvalidated stmtStr of
+        Ok (Just val) -> testAssertEq (fromMirValue val) expected
+        Ok Nothing -> Just "No value returned"
+        Error e -> Just $ "Evaluation failed with error: " ++ e
 
 -- Dual stage (validate + run) for snippets covered only here, replacing the
 -- former TestValidation parse-val twins of the same snippets.
 dualReturningStmtHelper :: String -> Value -> TestResult
 dualReturningStmtHelper stmtStr expected =
-    case parseStatement stmtStr of
-        Left err -> Just $ "Parse failed: " ++ show err
-        Right (Block stmts) ->
-            case libraryParts stmts `bindResult` validateParts of
-                Error e -> Just $ "Validation failed with error: " ++ e
-                Ok _ -> case libraryParts stmts `bindResult` runParts of
-                    Ok (Just val) -> testAssertEq (fromMirValue val) expected
-                    Ok Nothing -> Just "No value returned"
-                    Error e -> Just $ "Evaluation failed with error: " ++ e
-        Right _ -> Just "Not a block statement"
+    case validateSource stmtStr of
+        Error e -> Just $ "Validation failed with error: " ++ e
+        Ok _ -> case runSourceUnvalidated stmtStr of
+            Ok (Just val) -> testAssertEq (fromMirValue val) expected
+            Ok Nothing -> Just "No value returned"
+            Error e -> Just $ "Evaluation failed with error: " ++ e
 
 testParseEvalSimpleExpression :: TestResult
 testParseEvalSimpleExpression =
@@ -306,13 +289,7 @@ testParseEval =
 
 parseEvalFailStmtHelper :: String -> String -> TestResult
 parseEvalFailStmtHelper stmtStr expectedError =
-    case parseStatement stmtStr of
-        Left err -> Just $ "Parse failed: " ++ show err
-        Right (Block stmts) ->
-            testAssertErrorContains
-                expectedError
-                (libraryParts stmts `bindResult` runParts)
-        Right _ -> Just "Not a block statement"
+    testAssertErrorContains expectedError (runSourceUnvalidated stmtStr)
 
 testParseEvalFirstEmptyFail :: TestResult
 testParseEvalFirstEmptyFail =
@@ -349,13 +326,10 @@ argPassingSource =
 
 testArgPassingByValue :: TestResult
 testArgPassingByValue =
-    case parseWithEqualityParts argPassingSource of
-        Left err -> Just $ "Parse failed: " ++ err
-        Right parts ->
-            case (validateParts parts, runParts parts) of
-                (Error e, _) -> Just $ "Validation failed with error: " ++ e
-                (_, Error e) -> Just $ "Evaluation failed with error: " ++ e
-                (Ok _, Ok ret) -> testAssertEq (fmap fromMirValue ret) (Just (VInt 3))
+    case (validateSource argPassingSource, runSourceUnvalidated argPassingSource) of
+        (Error e, _) -> Just $ "Validation failed with error: " ++ e
+        (_, Error e) -> Just $ "Evaluation failed with error: " ++ e
+        (Ok _, Ok ret) -> testAssertEq (fmap fromMirValue ret) (Just (VInt 3))
 
 testParseEvalUdfExtraArgsFail :: TestResult
 testParseEvalUdfExtraArgsFail =
@@ -629,14 +603,12 @@ testValidateWhile =
     -- (the validator could not prove exactly this obligation: not a parse, type, tool or internal failure, nor a part
     -- it does not model, nor another obligation)
     proofRefused obligation source =
-        case parseWithEqualityParts source of
-            Left err -> Just ("Parse failed: " ++ err)
-            Right parts -> case validateParts parts of
-                Ok _ -> Just "Validation passed when it should have failed"
-                Error e
-                    | noVerdict e || any (`isInfixOf` e) ["does not model yet", "internal compiler error", "Internal error"] -> Just ("No verdict: " ++ e)
-                    | ("Could not prove: " ++ obligation) `isInfixOf` e -> Nothing
-                    | otherwise -> Just ("Expected Could not prove: " ++ obligation ++ ", got: " ++ e)
+        case validateSource source of
+            Ok _ -> Just "Validation passed when it should have failed"
+            Error e
+                | noVerdict e || any (`isInfixOf` e) ["does not model yet", "internal compiler error", "Internal error"] -> Just ("No verdict: " ++ e)
+                | ("Could not prove: " ++ obligation) `isInfixOf` e -> Nothing
+                | otherwise -> Just ("Expected Could not prove: " ++ obligation ++ ", got: " ++ e)
     callLoopFunctions =
         "fn done(i: Int, n: Int) -> Bool [{ }] [{ affirm return = (i >= n); }] { return i >= n; };\
         \fn more(i: Int, n: Int) -> Bool [{ }] [{ affirm return = (i < n); }] { return i < n; };\

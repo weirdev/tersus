@@ -16,7 +16,7 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import PreludeSource (nativeStorageModules, nativeHelperName)
 import Link (linkWithLibraries)
 import MirMono (namedTypesByName)
-import LibPackage (libModuleId, stripDeclaredFromUnits)
+import LibPackage (libModuleId)
 import PackageData (ModuleId (..))
 import Utils (Result (..), bindResult, mapResult)
 import Mir
@@ -142,8 +142,16 @@ lowerListsWith linker library program
     ownedNames units = Set.unions [Map.keysSet (progFunctions unit) | (_, unit) <- owned units]
     wanted = storageModules program
     st = progStorage program
-    unusedTypes = [ty | (modu, ty) <- [("lists", storageList st), ("box", storageBox st)], modu `notElem` wanted]
-    selected units = stripDeclaredFromUnits unusedTypes [(modu, unit) | (modu, unit) <- units, modu `elem` map libModuleId wanted]
+    unusedTypes = Set.fromList [ty | (modu, ty) <- [("lists", storageList st), ("box", storageBox st)], modu `notElem` wanted]
+    withoutUnused (modu, unit) =
+        ( modu
+        , unit
+            { progTypes = Map.withoutKeys (progTypes unit) unusedTypes
+            , progGenerics = Map.withoutKeys (progGenerics unit) unusedTypes
+            , progInvariants = Map.withoutKeys (progInvariants unit) unusedTypes
+            }
+        )
+    selected units = map withoutUnused [(modu, unit) | (modu, unit) <- units, modu `elem` map libModuleId wanted]
     lowered units =
         program
             { progTypes = Map.fromList [(renameName renames n, renameDecl d) | (n, d) <- Map.toList (progTypes program), Set.notMember n boxedArrays]

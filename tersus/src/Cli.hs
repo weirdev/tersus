@@ -32,10 +32,12 @@ import GHC.IO.Handle (hDuplicate)
 import System.IO
 import System.IO.Unsafe (unsafePerformIO)
 
+import ElaboratorTool (sourceLoader)
 import Mir (Program, renderProgram)
 import MirData (writeOwnedProgram, writeProgramWithGhosts)
 import Modules (Snapshot)
 import MirEval (Outcome (..), RunEnv (..), renderMirValue, runProgramEnv)
+import ParsedFile (fileBody)
 import Pipeline
 import Types
 import Syntax
@@ -191,9 +193,17 @@ runPackageFiles _ Mir pkg = mapResult (\program -> ((renderProgram program, ""),
 runPackageFiles _ Owned pkg = mapResult (\program -> ((renderProgram program, ""), [])) (compileModulesToOwned pkg)
 runPackageFiles _ MirText pkg = compileModulesToOwned pkg `bindResult` writeOwnedProgram `bindResult` \text -> Ok ((text, ""), [])
 runPackageFiles _ GhostText pkg = mapResult (\program -> ((writeProgramWithGhosts program, ""), [])) (compileModulesValidated pkg)
-runPackageFiles _ Assumptions pkg = case compileModules pkg of
-    Error err -> Error err
-    Ok compiled -> assumptionsOfPackage compiled `bindResult` \found -> Ok ((if null found then "No assumptions" else intercalate "\n" found, ""), [])
+runPackageFiles _ Assumptions pkg
+    | Modules.entryModuleOf pkg == Modules.ModuleId "" Nothing = case Modules.graphResult pkg sourceLoader of
+        Left err -> Error err
+        Right (Modules.StandaloneResult _ parsed) -> render (assumptionsOfStatements (fileBody parsed))
+        Right (Modules.PackageResult loaded) ->
+            render (concat [assumptionsOfStatements (fileBody (Modules.loadedParsed f)) | m <- Modules.packageModules loaded, Modules.loadedModuleId m == Modules.packageEntryModule loaded, f <- Modules.loadedModuleFiles m])
+    | otherwise = case compileModules pkg of
+        Error err -> Error err
+        Ok compiled -> assumptionsOfPackage compiled `bindResult` render
+  where
+    render found = Ok ((if null found then "No assumptions" else intercalate "\n" found, ""), [])
 runPackageFiles _ _ _ = Error "not a command that is run on its own"
 
 renderValue :: Value -> String

@@ -21,9 +21,8 @@ module ElaborateRequest
     , requestHeader
     , responseHeader
     , LoadKind (..)
-    , LoadRequest (LoadRequest, LoadRequestData, lrKind, lrReserving, lrResolver, lrEntry, lrSources, lrLibraries, lrProtocols)
+    , LoadRequest (LoadRequest, LoadRequestData, lrKind, lrReserving, lrResolver, lrEntry, lrLibraries, lrProtocols)
     , LoadResponse (..)
-    , LibraryAnswer (..)
     , Graph (..)
     , GraphModule (..)
     , GraphFile (..)
@@ -117,10 +116,6 @@ transportMatches checked response = case response of
 loadTransportMatches :: Bool -> LoadResponse -> Result LoadResponse String
 loadTransportMatches checked loadResponse = case loadResponse of
     LoadedModules answers -> allMatch [r | (_, _, r) <- answers]
-    LoadedProgram r -> allMatch [r]
-    AssembledPackage _ _ answers -> allMatch [r | (_, _, r) <- answers]
-    AssembledProgram _ r -> allMatch [r]
-    LoadedLibraries answers _ -> allMatch (map laResponse answers)
     _ -> Ok loadResponse
   where
     allMatch = foldr (\r rest -> transportMatches checked r `bindResult` \_ -> rest) (Ok loadResponse)
@@ -412,12 +407,10 @@ responseHeader = "tersus-elaborated 1"
 -- ---------------------------------------------------------------------------
 -- Loading (AST_DATA.md, "Loading"): the snapshot the host read, answered as a whole by the loader written in Tersus
 
--- graph: the module graph and each file as read (Modules.LoadResult); package: every module of the package elaborated in
--- order; program and parse: a single file, elaborated or only read (SourceParse); equality: a file read with the type,
--- clone and equality libraries in front of it (Compile.parseWithEquality); libraries: the compiler libraries elaborated
+-- graph: the module graph and each file as read (Modules.LoadResult); package: every module of the package or
+-- standalone compilation unit elaborated in order.
 data LoadKind
-    = LoadGraph | LoadPackage | LoadProgram | LoadParse | LoadEquality | LoadLibraries
-    | LoadPackageAssembly ModuleId | LoadProgramAssembly
+    = LoadGraph | LoadPackage
     deriving (Show, Eq)
 
 -- The entry is a file of the snapshot, read from the filesystem or given as source (standard input, a program's text);
@@ -427,15 +420,14 @@ data LoadRequest = LoadRequestData
     , lrReserving :: Bool
     , lrResolver :: Resolver
     , lrEntry :: Maybe (FilePath, Bool)
-    , lrSources :: [(String, Bool, String)]
     , lrLibraries :: [Library]
     , lrProtocols :: Maybe (Map.Map Name [Name])
     }
     deriving (Show, Eq)
 
-pattern LoadRequest :: LoadKind -> Bool -> Resolver -> Maybe (FilePath, Bool) -> [(String, Bool, String)] -> [Library] -> LoadRequest
-pattern LoadRequest kind reserving resolver entry sources libraries <- LoadRequestData kind reserving resolver entry sources libraries _
-  where LoadRequest kind reserving resolver entry sources libraries = LoadRequestData kind reserving resolver entry sources libraries (Just Map.empty)
+pattern LoadRequest :: LoadKind -> Bool -> Resolver -> Maybe (FilePath, Bool) -> [Library] -> LoadRequest
+pattern LoadRequest kind reserving resolver entry libraries <- LoadRequestData kind reserving resolver entry libraries _
+  where LoadRequest kind reserving resolver entry libraries = LoadRequestData kind reserving resolver entry libraries (Just Map.empty)
 
 {-# COMPLETE LoadRequest #-}
 
@@ -468,48 +460,24 @@ data Graph = Graph
     }
     deriving (Show, Eq)
 
-data LibraryAnswer = LibraryAnswer
-    { laName :: String
-    , laImports :: [String]
-    , laStatements :: [Statement]
-    , laResponse :: Response
-    }
-    deriving (Show)
-
 type ModuleAnswer = (ModuleId, [ModuleId], Response)
 
 data LoadResponse
     = -- the load refuses, in the loader's words
       NotLoaded String
-    | LoadedStandalone FilePath [Statement]
     | LoadedGraph Graph
     | -- each module in order with the modules of the interfaces its lowering takes; the last may be a refusal
       LoadedModules [ModuleAnswer]
-    | LoadedProgram Response
-    | AssembledPackage ModuleId [(String, ModuleId)] [ModuleAnswer]
-    | AssembledProgram [String] Response
-    | -- the file does not read, in the reader's words, whole
-      Unparsed String
-    | -- the libraries the file was read with, their statements as read in their order, and its statements
-      ParsedSource [String] [Statement] [Statement]
-    | -- the libraries in order, then the native storage helpers; a failure to read them ends the list
-      LoadedLibraries [LibraryAnswer] (Maybe String)
     deriving (Show)
 
 loadKindWord :: LoadKind -> String
 loadKindWord kind = case kind of
     LoadGraph -> "graph"
     LoadPackage -> "package"
-    LoadProgram -> "program"
-    LoadParse -> "parse"
-    LoadEquality -> "equality"
-    LoadLibraries -> "libraries"
-    LoadPackageAssembly _ -> "package assembly"
-    LoadProgramAssembly -> "program assembly"
 
 writeLoadRequest :: LoadRequest -> Result String String
 writeLoadRequest rq =
-    checkAssemblyCatalog rq `bindResult` \() ->
+    checkCatalog rq `bindResult` \() ->
     protocolRecords (lrProtocols rq) `bindResult` \protocols ->
     builtinTableLines `bindResult` \builtins ->
     mapAll writeLibrary (lrLibraries rq) `bindResult` \libraries ->
@@ -530,9 +498,7 @@ writeLoadRequest rq =
                     ++ ["files " ++ show (Map.size (resolverFiles resolver))]
                 )
                 ++ [counted ("file " ++ quote path) text | (path, text) <- Map.toList (resolverFiles resolver)]
-                ++ map (++ "\n") ["sources " ++ show (length (lrSources rq))]
-                ++ [counted ("source " ++ quote name ++ (if native then " native" else " implicit")) text | (name, native, text) <- lrSources rq]
-                ++ map (++ "\n") (["builtins"] ++ block builtins ++ (if null libraries then [] else ("libraries " ++ show (length libraries)) : concat libraries))
+                ++ map (++ "\n") (["sources 0", "builtins"] ++ block builtins ++ (if null libraries then [] else ("libraries " ++ show (length libraries)) : concat libraries))
             )
   where
     resolver = lrResolver rq
@@ -543,41 +509,27 @@ writeLoadRequest rq =
     counted header text = let bytes = encodeUtf8 text in header ++ " " ++ show (length bytes) ++ "\n" ++ bytes ++ "\n"
     writeLibrary (Library name imports iface) = writeInterfaceLines iface `bindResult` \t -> Ok (unwords (["library", quote name, show (length imports)] ++ map quote imports) : block t)
 
-checkAssemblyCatalog :: LoadRequest -> Result () String
-checkAssemblyCatalog rq = case lrKind rq of
-    LoadPackageAssembly _ -> unique
-    LoadProgramAssembly -> unique
-    _ -> Ok ()
+checkCatalog :: LoadRequest -> Result () String
+checkCatalog rq
+    | Set.size (Set.fromList names) == length names = Ok ()
+    | otherwise = Error "ElaborateRequest: duplicate cached std module identity"
   where
     names = map libraryName (lrLibraries rq)
-    unique
-        | Set.size (Set.fromList names) == length names = Ok ()
-        | otherwise = Error "ElaborateRequest: duplicate assembly catalog identity"
 
 readLoadResponseBytes :: LoadRequest -> [B.ByteString] -> Result LoadResponse String
-readLoadResponseBytes rq ls = checkAssemblyCatalog rq `bindResult` \() -> case ls of
+readLoadResponseBytes rq ls = checkCatalog rq `bindResult` \() -> case ls of
     header : rest | B.unpack header == responseHeader -> case lrKind rq of
         LoadGraph -> graphOf rest
-        LoadPackage -> packageAnswers Nothing rest
-        LoadPackageAssembly entry -> packageAnswers (Just entry) rest
-        LoadProgram -> programAnswer False rest
-        LoadProgramAssembly -> programAnswer True rest
-        LoadParse -> parsedOf rest
-        LoadEquality -> parsedOf rest
-        LoadLibraries -> librariesAnswer rest
+        LoadPackage -> packageAnswers rest
     _ -> Error "ElaborateRequest: not a load response"
   where
     text = B.unpack
     tokens line = strictTokenize (text line)
     notLoaded line = case tokens line of
         Ok [Word "notLoaded", Str message] -> Just (NotLoaded message)
-        Ok [Word "unparsed", Str message] -> Just (Unparsed message)
         _ -> Nothing
     graphOf (line : rest) | Just r <- notLoaded line = if null rest then Ok r else Error "ElaborateRequest: records after a refusal"
     graphOf (line : rest) = tokens line `bindResult` \ts -> case ts of
-        [Word "standalone", Str path] -> blocksWith text 1 rest `bindResult` \(asts, after) -> case (asts, after) of
-            ([ast], []) -> readParsedLines (map text ast) `bindResult` \body -> Ok (LoadedStandalone path body)
-            _ -> Error "ElaborateRequest: malformed standalone answer"
         [Word "package", Str root, Str name, Str entry, p, m] -> moduleIdOf p m `bindResult` \entryId ->
             case rest of
                 countLine : more -> wordAfter "modules" (text countLine) `bindResult` countOf `bindResult` \n ->
@@ -635,92 +587,25 @@ readLoadResponseBytes rq ls = checkAssemblyCatalog rq `bindResult` \() -> case l
     policyOf line = tokens line `bindResult` \ts -> case ts of
         [Word "policy", Str name, Str root, Word flag] -> boolOf flag `bindResult` \b -> Ok (name, root, b)
         _ -> Error "ElaborateRequest: malformed policy"
-    packageAnswers _ (line : rest) | Just r <- notLoaded line = if null rest then Ok r else Error "ElaborateRequest: records after a refusal"
-    packageAnswers expected ls' = modulesOf (expected /= Nothing) ls' `bindResult` \(answers, after) -> case expected of
-        Nothing | null after -> Ok (LoadedModules answers)
-                | otherwise -> Error "ElaborateRequest: records after the end"
-        Just entry ->
-            let ids = [m | (m, _, _) <- answers]
-                complete = entry `elem` ids && all (\(_, _, r) -> packageLowered r) answers
-             in if Set.size (Set.fromList ids) /= length ids
+    packageAnswers (line : rest) | Just r <- notLoaded line = if null rest then Ok r else Error "ElaborateRequest: records after a refusal"
+    packageAnswers ls' = modulesOf ls' `bindResult` \(answers, after) ->
+        let ids = [m | (m, _, _) <- answers]
+         in if not (null after)
+                then Error "ElaborateRequest: records after the end"
+                else if Set.size (Set.fromList ids) /= length ids
                     then Error "ElaborateRequest: repeated module answer"
-                    else if complete
-                        then packageRecipe entry ids after `bindResult` \rows -> Ok (AssembledPackage entry rows answers)
-                        else if null after then Ok (LoadedModules answers) else Error "ElaborateRequest: assembly after an incomplete package"
-    packageLowered (Accepted (Just _) _ MirLowered{}) = True
-    packageLowered _ = False
-    packageRecipe entry ids (line : rest) = tokens line `bindResult` \ts -> case ts of
-        [Word "assembly", p, m, Word count] | Ok n <- countOf count, length rest == n ->
-            moduleIdOf p m `bindResult` \reported ->
-                if reported /= entry || last ids /= entry then Error "ElaborateRequest: unknown or misordered assembly entry" else
-                mapAll (libraryRow (ranks ids)) rest `bindResult` \rows ->
-                    let order = map snd rows
-                        names = [name | ((name, _), _) <- rows]
-                     in if Set.size (Set.fromList names) /= n || not (ascending order)
-                            then Error "ElaborateRequest: repeated or misordered assembly library"
-                            else Ok (map fst rows)
-        _ -> Error "ElaborateRequest: malformed package assembly"
-    packageRecipe _ _ [] = Error "ElaborateRequest: missing package assembly"
-    libraryRow contributors line = tokens line `bindResult` \ts -> case ts of
-        [Word "library", Str name, p, m] -> moduleIdOf p m `bindResult` \modu ->
-            case (Map.lookup name catalog, Map.lookup modu contributors) of
-                (Just li, Just mi) -> Ok ((name, modu), (mi, li))
-                _ -> Error "ElaborateRequest: unknown assembly library or contributor"
-        _ -> Error "ElaborateRequest: malformed assembly library"
-    programAnswer assembly ls' = sourceOf ls' `bindResult` \answer -> case answer of
-        Left response -> Ok response
-        Right (response@(Accepted _ _ MirLowered{}), after) | assembly ->
-            programRecipe after `bindResult` \names -> Ok (AssembledProgram names response)
-        Right (response, []) -> Ok (LoadedProgram response)
-        Right _ -> Error "ElaborateRequest: records after the program's answer"
-    programRecipe [line] = tokens line `bindResult` \ts -> case ts of
-        Word "assembly" : Word count : names | Ok n <- countOf count, length names == n, Just ns <- mapM strOf names ->
-            case mapM (`Map.lookup` catalog) ns of
-                Just order | ascending order -> Ok ns
-                _ -> Error "ElaborateRequest: unknown, repeated or misordered assembly library"
-        _ -> Error "ElaborateRequest: malformed program assembly"
-    programRecipe _ = Error "ElaborateRequest: missing assembly or records after it"
-    catalog = ranks (map libraryName (lrLibraries rq))
-    ranks xs = Map.fromList (zip xs [0 :: Int ..])
-    ascending xs = and (zipWith (<) xs (drop 1 xs))
-    modulesOf _ (line : rest) | text line == "end" = Ok ([], rest)
-    modulesOf strict (line : loweringLine : rest) = tokens line `bindResult` \ts -> case ts of
+                    else Ok (LoadedModules answers)
+    modulesOf (line : rest) | text line == "end" = Ok ([], rest)
+    modulesOf (line : loweringLine : rest) = tokens line `bindResult` \ts -> case ts of
         [Word "module", p, m] -> moduleIdOf p m `bindResult` \modu -> tokens loweringLine `bindResult` \lts -> case lts of
             Word "lowering" : Word count : ids | Ok n <- countOf count, even (length ids), length ids `div` 2 == n -> pairs ids `bindResult` \lowering ->
                 answerOf rest `bindResult` \(response, after) -> case response of
-                    Accepted{} -> continue modu lowering response after
-                    _ | not strict -> continue modu lowering response after
-                      | end : trailer' <- after, text end == "end" -> Ok ([(modu, lowering, response)], trailer')
+                    Accepted{} -> modulesOf after `bindResult` \(more, trailer') -> Ok ((modu, lowering, response) : more, trailer')
+                    _ | end : trailer' <- after, text end == "end" -> Ok ([(modu, lowering, response)], trailer')
                       | otherwise -> Error "ElaborateRequest: expected end after a module refusal"
             _ -> Error "ElaborateRequest: malformed lowering"
         _ -> Error "ElaborateRequest: malformed module answer"
-      where
-        continue modu lowering response after = modulesOf strict after `bindResult` \(more, trailer') -> Ok ((modu, lowering, response) : more, trailer')
-    modulesOf _ _ = Error "ElaborateRequest: the answers end early"
-    sourceOf (line : rest) | Just r <- notLoaded line = if null rest then Ok (Left r) else Error "ElaborateRequest: records after a refusal"
-    sourceOf ls' = mapResult Right (answerOf ls')
-    parsedOf (line : rest) | Just r <- notLoaded line = if null rest then Ok r else Error "ElaborateRequest: records after a refusal"
-    parsedOf (line : librariesLine' : rest) | text line == "parsed" = tokens librariesLine' `bindResult` \ts -> case ts of
-        Word "libraries" : Word count : names | Ok n <- countOf count, length names == n, Just ns <- mapM strOf names ->
-            blocksWith text (n + 1) rest `bindResult` \(asts, after) -> case (reverse asts, after) of
-                (ast : libraries, []) -> mapAll (readParsedLines . map text) (reverse libraries) `bindResult` \stmts ->
-                    readParsedLines (map text ast) `bindResult` \body -> Ok (ParsedSource ns (concat stmts) body)
-                _ -> Error "ElaborateRequest: malformed parse answer"
-        _ -> Error "ElaborateRequest: malformed parse answer"
-    parsedOf _ = Error "ElaborateRequest: malformed parse answer"
-    librariesAnswer (line : rest) = tokens line `bindResult` \ts -> case ts of
-        [Word "librariesFailed", Str message] | null rest -> Ok (LoadedLibraries [] (Just message))
-        [Word "nativesFailed", Str message] | null rest -> Ok (LoadedLibraries [] (Just message))
-        [Word "end"] | null rest -> Ok (LoadedLibraries [] Nothing)
-        Word "library" : Str name : Word count : imports | Ok n <- countOf count, length imports == n, Just is <- mapM strOf imports ->
-            blocksWith text 1 rest `bindResult` \(asts, after) -> case asts of
-                [ast] -> readParsedLines (map text ast) `bindResult` \stmts -> answerOf after `bindResult` \(response, after') ->
-                    librariesAnswer after' `bindResult` \more -> case more of
-                        LoadedLibraries answers failure -> Ok (LoadedLibraries (LibraryAnswer name is stmts response : answers) failure)
-                        _ -> Error "ElaborateRequest: malformed libraries answer"
-                _ -> Error "ElaborateRequest: malformed library"
-        _ -> Error "ElaborateRequest: malformed libraries answer"
-    librariesAnswer [] = Error "ElaborateRequest: the libraries answer ends early"
+    modulesOf _ = Error "ElaborateRequest: the answers end early"
     -- one module's answer, as a module response gives it after its header, and the records after it
     answerOf :: [B.ByteString] -> Result (Response, [B.ByteString]) String
     answerOf (line : rest) = case text line of

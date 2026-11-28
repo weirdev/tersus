@@ -31,7 +31,7 @@ struct LS {
     ok: Bool, msg: String,
     layouts: HashMap<String, Layout>, parsed: HashMap<String, PMod>, parsing: List<String>,
     resolved: HashMap<String, List<RImp>>, order: List<ModId>, done: HashSet<String>, probes: List<String>,
-    programs: HashMap<String, AstProgram>, libDecls: Decls, libOk: Bool, libMsg: String
+    programs: HashMap<String, AstProgram>, preludeSeeded: Bool, preludeSeed: Decls
 };
 struct Loaded {
     ok: Bool, msg: String, standalone: Bool, standaloneProgram: AstProgram,
@@ -245,9 +245,66 @@ fn packageNoPrelude(snap: &Snap, root: &String) -> Config ~ {
 
 // ---- the loader's state and helpers ----
 
-fn newLS(libDecls: Decls, libOk: Bool, libMsg: String) -> LS ~ {
+fn newLS() -> LS ~ {
     return LS { ok: true, msg: "", layouts: HashMap::new(), parsed: HashMap::new(), parsing: [], resolved: HashMap::new(), order: [],
-        done: HashSet::new(), probes: [], programs: HashMap::new(), libDecls: libDecls, libOk: libOk, libMsg: libMsg };
+        done: HashSet::new(), probes: [], programs: HashMap::new(), preludeSeeded: false, preludeSeed: emptyDecls() };
+};
+
+fn preludeImp2(modu: String, sym: String) -> ps::FileImport ~ {
+    return ps::FileImport { path: push(push(push([], "std"), modu), sym), hasAlias: false, alias: "", hasNames: false, names: [], line: 0, column: 0 };
+};
+
+fn preludeImp3(modu: String, file: String, sym: String) -> ps::FileImport ~ {
+    return ps::FileImport { path: push(push(push(push([], "std"), modu), file), sym), hasAlias: false, alias: "", hasNames: false, names: [], line: 0, column: 0 };
+};
+
+// Fixed documented prelude imports inserted before discovery and declaration seeding when noPrelude is false.
+fn preludeImports() -> List<ps::FileImport> ~ {
+    out = [];
+    out = push(out, preludeImp3("core", "types", "List"));
+    out = push(out, preludeImp3("core", "types", "Box"));
+    out = push(out, preludeImp3("core", "ownership", "Clone"));
+    out = push(out, preludeImp3("core", "ownership", "Copy"));
+    out = push(out, preludeImp3("core", "ownership", "Drop"));
+    out = push(out, preludeImp3("core", "ownership", "Deref"));
+    out = push(out, preludeImp3("core", "clone", "map"));
+    out = push(out, preludeImp3("core", "clone", "filter"));
+    out = push(out, preludeImp3("core", "clone", "fold"));
+    out = push(out, preludeImp3("core", "clone", "any"));
+    out = push(out, preludeImp3("core", "clone", "all"));
+    out = push(out, preludeImp3("core", "clone", "find"));
+    out = push(out, preludeImp3("core", "clone", "sortBy"));
+    out = push(out, preludeImp3("core", "clone", "mapArray"));
+    out = push(out, preludeImp3("core", "clone", "filterArray"));
+    out = push(out, preludeImp3("core", "clone", "foldArray"));
+    out = push(out, preludeImp3("core", "clone", "anyArray"));
+    out = push(out, preludeImp3("core", "clone", "allArray"));
+    out = push(out, preludeImp3("core", "clone", "findArray"));
+    out = push(out, preludeImp3("core", "clone", "sortArrayBy"));
+    out = push(out, preludeImp2("eq", "Eq"));
+    out = push(out, preludeImp2("prelude", "Sequence"));
+    out = push(out, preludeImp2("prelude", "Growable"));
+    out = push(out, preludeImp2("prelude", "Hash"));
+    out = push(out, preludeImp2("prelude", "hashCombine"));
+    out = push(out, preludeImp2("string", "String"));
+    out = push(out, preludeImp2("string", "Format"));
+    out = push(out, preludeImp2("map", "HashMap"));
+    out = push(out, preludeImp2("map", "hashMapForEach"));
+    out = push(out, preludeImp2("map", "hashMapFold"));
+    out = push(out, preludeImp2("map", "hashMapRetainIf"));
+    out = push(out, preludeImp2("set", "HashSet"));
+    out = push(out, preludeImp2("set", "hashSetForEach"));
+    out = push(out, preludeImp2("set", "hashSetFold"));
+    out = push(out, preludeImp2("set", "hashSetRetainIf"));
+    out = push(out, preludeImp2("thread", "Thread"));
+    return out;
+};
+
+fn effectiveImports(noPrelude: Bool, explicit: &List<ps::FileImport>) -> List<ps::FileImport> ~ {
+    if noPrelude { return clone(explicit); };
+    out = preludeImports();
+    for imp in explicit { out = push(out, clone(imp)); };
+    return out;
 };
 
 fn probed(ls: LS, path: &String) -> LS ~ {
@@ -373,6 +430,22 @@ fn importSeedFor(ls: LS, snap: &Snap, entryPath: &String, layout: &Layout, id: &
     prefix = ps::importPrefixText(ps::newSt(), read.text);
     if !prefix.ok { return SeedR { ls: failed(ls, cat(cat(cat("parse error in file ", &entry.path), ": "), showText(&prefix.message))), decls: emptyDecls() }; };
     d = emptyDecls();
+    if !layout.noPrelude {
+        if ls.preludeSeeded {
+            d = clone(ls.preludeSeed);
+        } else {
+            pd = emptyDecls();
+            for imp in preludeImports() {
+                seeded = seedImport(ls, snap, entryPath, layout, id, entry, &imp);
+                seedOfImport = clone(seeded.decls);
+                ls = stateOfSeed(seeded);
+                if !ls.ok { return SeedR { ls: ls, decls: emptyDecls() }; };
+                pd = addImported(pd, &seedOfImport);
+            };
+            ls = LS { preludeSeeded: true, preludeSeed: clone(pd), ..ls };
+            d = pd;
+        };
+    };
     for imp in &prefix.imports {
         seeded = seedImport(ls, snap, entryPath, layout, id, entry, imp);
         seedOfImport = clone(seeded.decls);
@@ -519,12 +592,7 @@ fn seedPrefixes(fileSeg: &String, isCollapsed: Bool, local: &String, ri: &RImp) 
 // ---- Modules.parseModuleFiles: the parse rounds of a module's files ----
 
 fn parseModuleFiles(ls: LS, snap: &Snap, entryPath: &String, layout: &Layout, id: &ModId, entries: &List<FE>, seeds: &List<Decls>, texts: &List<String>) -> FilesR ~ {
-    declared = emptyDecls();
-    if !layout.noPrelude {
-        if !ls.libOk { return FilesR { ls: failed(ls, clone(ls.libMsg)), files: [] }; };
-        declared = clone(ls.libDecls);
-    };
-    d = seedDecls(entries, seeds, texts, declared);
+    d = seedDecls(entries, seeds, texts, emptyDecls());
     n = size(entries);
     results = [];
     for i in 0..n { results = push(results, PR { ok: false, msg: "", imports: [], program: AstProgram { stage: "parsed", nodes: [], root: 0 }, decls: emptyDecls() }); };
@@ -547,6 +615,7 @@ fn parseModuleFiles(ls: LS, snap: &Snap, entryPath: &String, layout: &Layout, id
             if k >= 0 && k < size(entries) && k < size(texts) { path = clone(get(entries, k).path); text = clone(get(texts, k)); };
             plain = parseWith(locating(emptyDecls()), &text);
             prefix = cat(cat(cat(cat("parse error in module ", modKey(id)), " file "), &path), ": ");
+            if !layout.isPackage { prefix = cat(cat("parse error in file ", &path), ": "); };
             if !plain.ok { return FilesR { ls: failed(ls, cat(&prefix, &plain.msg)), files: [] }; };
             return FilesR { ls: failed(ls, cat(&prefix, "could not be parsed with the declarations of its package")), files: [] };
         };
@@ -561,7 +630,7 @@ fn parseModuleFiles(ls: LS, snap: &Snap, entryPath: &String, layout: &Layout, id
             check = checkDeclarationsOnly(id, e, e.path = clone(entryPath), &r.program.nodes, &stmts);
             if !check.ok { return FilesR { ls: failed(ls, check.text), files: [] }; };
             ls = LS { programs: ls.programs.insert(clone(e.path), clone(r.program)), ..ls };
-            files = push(files, LFile { entry: clone(e), names: declarationNames(&r.program.nodes, &stmts), imports: clone(r.imports) });
+            files = push(files, LFile { entry: clone(e), names: declarationNames(&r.program.nodes, &stmts), imports: effectiveImports(layout.noPrelude, &r.imports) });
         };
     };
     return FilesR { ls: ls, files: files };
@@ -1017,15 +1086,7 @@ fn loadEntry(ls: LS, snap: &Snap) -> Loaded ~ {
     };
     read = readFile(snap, &entryPath);
     if !read.ok { return notLoaded(ls, cat("file not found: ", &entryPath)); };
-    if rootsConfigured(snap) { return loadLayout(ls, snap, &entryPath, soloLayout(&entryPath, snap.noPrelude)); };
-    parsed = parseWith(locating(emptyDecls()), &read.text);
-    if !parsed.ok { return notLoaded(ls, cat(cat(cat("parse error in file ", &entryPath), ": "), &parsed.msg)); };
-    if size(parsed.imports) > 0 {
-        msg = cat(cat("standalone program ", &entryPath), ": imports are not supported without a package (no package.tersus found in any ancestor directory); first import: ");
-        return notLoaded(ls, cat(&msg, renderPath(&get(parsed.imports, 0).path)));
-    };
-    base = notLoaded(ls, "");
-    return Loaded { standalone: true, standaloneProgram: parsed.program, entryPath: entryPath, ok: true, ..base };
+    return loadLayout(ls, snap, &entryPath, soloLayout(&entryPath, snap.noPrelude));
 };
 
 fn loadLayout(ls: LS, snap: &Snap, entryPath: &String, layout: &Layout) -> Loaded ~ {

@@ -20,7 +20,7 @@ import ElaborateRequest (Extraction (..), Request (..), Response (..))
 import ElaboratorTool (sourceElaborator)
 import LibPackage (LibPackage (..), libPackage, libModuleId, nativeStorageUnits, compileLibPackageWith, nativeStorageUnitsWith)
 import PreludeSource (libPackageFiles)
-import ElaborateRequest (LibraryAnswer (..), LoadKind (..), LoadRequest (..), LoadResponse (..))
+import ElaborateRequest (LoadKind (..), LoadRequest (..), LoadResponse (..))
 import ElaboratorTool (bootstrapLoader, sourceLoader)
 import Link (linkPrograms, pruneProgram)
 import MirLists (lowerLists)
@@ -78,49 +78,29 @@ testLibModules =
             , testCase "Box of an array compares and clones through templates" (compiledRuns "a = Array::boxed(2, 7); b = Array::boxed(2, 7); c = clone(a); if a = b { if c = a { return size(c); }; }; return 0;" (VInt 2))
             , testCase "Copy is synthesized through the prelude interface" (runs (checkedSource "struct P { x: Int, y: Int }; impl Clone for P { }; impl Copy for P { }; fn getX(p: P) -> Int { return p.x; }; p = P { x: 3, y: 4 }; a = getX(p); b = getX(p); return a * 10 + b + p.y;") (VInt 37))
             , testCase "Drop is synthesized through the prelude interface" (compiledRuns (dropper ++ "v = V::new(3); w = V::new(4); return v.n + w.n;") (VInt 7))
-            , -- (= is std's Eq, the role std's package binds: a trait of the program that is spelled Eq is another trait)
-              testCase "an Eq of the program's own leaves = to std's Eq" (compiledRuns "trait Eq { }; if [1] = [1] { return 1; }; return 0;" (VInt 1))
-            , testCase "a String of the program's own takes its literals" (compiledRuns "struct String { bytes: List<Byte> }; s = \"hi\"; return size(s.bytes);" (VInt 2))
-            , testCase "an Eq of the program's own with a string literal" (compiledRuns (ownEq ++ "s = \"hi\"; return size(s.bytes);") (VInt 2))
-            , testCase "an Eq of the program's own compares strings" (compiledRuns (ownEq ++ "if \"a\" = \"a\" { if \"a\" != \"b\" { return 1; }; }; return 0;") (VInt 1))
-            , testCase "an Eq of the program's own with a HashMap" (compiledRuns (ownEq ++ "m = HashMap::new().insert(\"a\", 3).insert(\"b\", 4); return m.lookup(\"a\", 0) * 10 + m.lookup(\"b\", 0);") (VInt 34))
+            , -- Top-level collisions with listed prelude names are ordinary ambiguity errors unless noPrelude is set
+              testCase "an Eq declaration collides with the prelude without noPrelude" (compiledRejected "trait Eq { }; return 0;" "ambiguous in this file")
+            , testCase "a String declaration collides with the prelude without noPrelude" (compiledRejected "struct String { bytes: List<Byte> }; s = \"hi\"; return size(s.bytes);" "ambiguous in this file")
+            , testCase "a Box declaration collides with the prelude without noPrelude" (compiledRejected "struct Box { x: Int }; return Box { x: 3 }.x;" "ambiguous in this file")
             ]
-        , TestList "Eq shadowing source fixtures"
-            ([ testCase (path ++ " keeps std's = beside an own Eq with another " ++ label) (runs (compile source) (VInt 1))
-             | (path, compile) <- [("single", checkedSource), ("package", checkedPackage)]
-             , (label, trait) <-
-                [ ("return type", "trait Eq { fn eq(self: &Self, other: &Self) -> Int; }; ")
-                , ("contract", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm false; }]; }; ")
-                , ("empty method set", "trait Eq { }; ")
-                , ("extra method", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; fn extra(self: &Self) -> Int; }; ")
-                , ("generic arity", "trait Eq<T> { fn eq(self: &Self, other: &Self) -> Bool; }; ")
-                ]
-             , let source = trait ++ "s = \"a\"; if s = \"a\" { return size(s.bytes); }; return 0;"
-             ] ++
-             -- (an impl of the program's own Eq does not make its bound the Eq role: = of a T still needs std's)
-             [ testCase (path ++ " an own Eq's " ++ owner ++ " impl does not bound = by std's Eq") (rejected (compile source) "T is compared with =, which needs it to implement Eq")
-             | (path, compile) <- [("single", checkedSource), ("package", checkedPackage)]
-             , owner <- ["List", "Array", "Box"]
-             , let source = ownEq ++ eqImpl owner ++ "s = \"hi\"; return size(s.bytes);"
-             ] ++
-             [ testCase "compatible Eq keeps String equality" (runs (checkedSource (ownEq ++ "if \"a\" = \"a\" { return 1; }; return 0;")) (VInt 1))
-             , -- (std's eq module is the build's Eq, whatever a trait of the program is spelled)
-               testCase "std's eq helper is std's beside an own Eq" (runs (checkedSource (ownEq ++ "s = \"hi\"; a = Array::boxed(1, 1); return eqBoxedArrays(a, a);")) (VBool True))
-             , testCase "a replacement without cached Eq impls is unrestricted" (runs (checkedSource "trait Eq { }; return 7;") (VInt 7))
-             , testCase "supplied single-file AST is lowered without reparsing" (runs (Compile.lowerSourceUsing (\request -> sourceLoader request{lrResolver = (lrResolver request){Modules.resolverFiles = Map.fromList [("<source>", "return 9;")]}}) libPackage False True "@supplied-ast@") (VInt 9))
-             , testCase "Drop source validates and retains its implementation" $ case checkedSource (dropper ++ "v = V::new(3); w = V::new(4); return v.n + w.n;") of
-                Error err -> Just err
-                Ok program -> testAssertTrue (Map.member ("<V as " ++ dropTrait ++ ">::drop") (M.progFunctions program))
-             , testCase "injected package AST is compiled without reparsing" injectedPackage
-             , testCase "production helper linking retains runtime layouts" $ case ownedSource "xs = [1]; b = Box::new(1); return size(xs) + Box::unbox(b);" of
-                Error e -> Just e
-                Ok p -> runtimeStorageLayout p
-             , testCase "package custom Box survives the production list-helper link" $ case checkedPackage "struct Box { x: Int }; b = Box { x: 3 }; xs = [1]; return b.x + size(xs);" `bindResult` erasedModuleProgram `bindResult` ownedModuleProgram of
+        , TestList "prelude collision and noPrelude fixtures"
+            [ testCase "single-file noPrelude allows declaring own Eq" (runs (Compile.lowerSourceNoPrelude True True "trait Eq { }; return 7;") (VInt 7))
+            , testCase "package noPrelude allows declaring own Eq" (runs (checkedPackageNoPrelude "trait Eq { }; return 7;") (VInt 7))
+            , testCase "package noPrelude allows declaring own String" (runs (checkedPackageNoPrelude "struct String { n: Int }; return String { n: 5 }.n;") (VInt 5))
+            , testCase "package noPrelude custom Box survives the production list-helper link" $ case checkedPackageNoPrelude "import std::core::types { List }; struct Box { x: Int }; b = Box { x: 3 }; xs = [1]; return b.x + size(xs);" `bindResult` erasedModuleProgram `bindResult` ownedModuleProgram of
                 Error e -> Just e
                 Ok p -> both (testAssertEq (Map.lookup "Box" (M.progTypes p)) (Just (M.StructDecl [("x", TInt)]))) (testAssertTrue (Map.notMember "boxNew" (M.progFunctions p)))
-             , -- (the native helpers have std's canonical names, which no function of a package entry has)
-               testCase "a package entry function spelled like a native helper is the entry's own" (runs (checkedPackage "fn listNew() -> Int { return 7; }; return listNew();") (VInt 7))
-             ])
+            , testCase "supplied single-file AST is lowered without reparsing" (runs (Compile.lowerSourceUsing (\request -> sourceLoader request{lrResolver = (lrResolver request){Modules.resolverFiles = Map.insert "<source>" "return 9;" (Modules.resolverFiles (lrResolver request))}}) libPackage False True "@supplied-ast@") (VInt 9))
+            , testCase "Drop source validates and retains its implementation" $ case checkedSource (dropper ++ "v = V::new(3); w = V::new(4); return v.n + w.n;") of
+                Error err -> Just err
+                Ok program -> testAssertTrue (Map.member ("<V as " ++ dropTrait ++ ">::drop") (M.progFunctions program))
+            , testCase "injected package AST is compiled without reparsing" injectedPackage
+            , testCase "production helper linking retains runtime layouts" $ case ownedSource "xs = [1]; b = Box::new(1); return size(xs) + Box::unbox(b);" of
+                Error e -> Just e
+                Ok p -> runtimeStorageLayout p
+            , -- (the native helpers have std's canonical names, which no function of a package entry has)
+              testCase "a package entry function spelled like a native helper is the entry's own" (runs (checkedPackage "fn listNew() -> Int { return 7; }; return listNew();") (VInt 7))
+            ]
         ]
   where
     implicitSources = [("core/ownership", ownershipSource), ("core/types", typesSource), ("core/clone", cloneSource), ("eq", eqSource),
@@ -138,25 +118,22 @@ testLibModules =
         , ("set", [(["core", "types"], ["List"]), (["map"], ["HashMap", "findNth"]), (["core", "ownership"], ["Clone"]), (["eq"], ["Eq"]), (["prelude"], ["Hash"])])
         , ("thread", [])
         ]
-    moduleDependencies = [("core", []), ("eq", ["core"]), ("prelude", ["core"]), ("string", ["core", "eq", "prelude"]), ("map", ["core", "eq", "prelude"]), ("set", ["core", "map", "eq", "prelude"]), ("thread", [])]
+    moduleDependencies = [("core", []), ("eq", ["core"]), ("prelude", ["core"]), ("string", ["core", "eq", "prelude"]), ("map", ["core", "eq", "prelude"]), ("set", ["core", "eq", "map", "prelude"]), ("thread", [])]
     checkedSource source = Compile.lowerSource True source `bindResult` \program ->
         validateCompiled program `bindResult` \_ -> Ok program
     checkedPackage source = case Modules.loadFromEntry (Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", source)]) "app/main.tersus" of
         Left err -> Error err
         Right (Modules.PackageResult pkg) -> compileModulesValidated (Modules.packageSnapshot pkg)
         Right _ -> Error "fixture did not load as a package"
+    checkedPackageNoPrelude source = case Modules.loadFromEntry (Modules.resolverFromFiles [("app/package.tersus", "noPrelude = true;"), ("app/main.tersus", source)]) "app/main.tersus" of
+        Left err -> Error err
+        Right (Modules.PackageResult pkg) -> compileModulesValidated (Modules.packageSnapshot pkg)
+        Right _ -> Error "fixture did not load as a package"
     runs result expected = case result `bindResult` runProgram of
         Error err -> Just err
         Ok value -> testAssertEq (fmap fromMirValue value) (Just expected)
-    rejected result expected = case result of
-        Error err -> testAssertTrue (expected `isInfixOf` err)
-        Ok _ -> Just ("expected rejection containing " ++ expected)
-    eqImpl owner = unlines (takeThrough (== "};") (dropWhile (not . isInfixOf ("Eq for " ++ owner ++ "<")) (lines eqSource)))
-    takeThrough _ [] = []
-    takeThrough p (x : xs) = x : if p x then [] else takeThrough p xs
     injectedPackage =
-        let supplied = Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", "return 11;")]
-            loader request = sourceLoader request{lrResolver = supplied}
+        let loader request = sourceLoader request{lrResolver = (lrResolver request){Modules.resolverFiles = Map.insert "app/main.tersus" "return 11;" (Modules.resolverFiles (lrResolver request))}}
          in case Modules.loadFromEntryWith loader (Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", "@supplied-ast@")]) "app/main.tersus" of
                 Right (Modules.PackageResult pkg) -> runs (Package.compileModulesWith loader (Modules.packageSnapshot pkg) `bindResult` Package.lowerCompiledPackage) (VInt 11)
                 other -> Just ("injected fixture failed: " ++ show other)
@@ -211,9 +188,12 @@ testNativeStorageModules = TestList "testNativeStorageModules"
     [ testCase "snapshot uses the embedded helper texts without concatenating bodies" $
         testAssertEq (map (\path -> lookup path libPackageFiles) ["std/lists/lists.tersus", "std/box/box.tersus"]) [Just listsSource, Just boxSource]
     , testCase "native imports are the compiled dependency graph" $
-        case bootstrapLoader Modules.libraryRequest of
-            LoadedLibraries answers Nothing -> testAssertEq [(name, imports) | LibraryAnswer name imports _ _ <- answers, name `elem` ["lists", "box"]] [("lists", ["core"]), ("box", ["core"])]
-            other -> Just ("the compiler libraries did not load: " ++ take 300 (show other))
+        let snap = Modules.Snapshot ((Modules.resolverFromFiles [("driver/package.tersus", "noPrelude = true;"), ("driver/main.tersus", "import std::lists; import std::box; return 0;")]){Modules.resolverOptions = Modules.defaultLoadOptions{Modules.noPrelude = True}}) "driver/main.tersus" False
+         in case Modules.loadFromEntryWith bootstrapLoader (Modules.snapshotResolver snap) (Modules.snapshotEntry snap) of
+                Right (Modules.PackageResult pkg) ->
+                    testAssertEq [(m, Modules.loadedDependencies lm) | lm <- Modules.packageModules pkg, Modules.ModuleId "std" (Just m) <- [Modules.loadedModuleId lm], m `elem` ["lists", "box"]]
+                        [("box", [libModuleId "core"]), ("lists", [libModuleId "core"])]
+                other -> Just ("the std native storage graph did not load: " ++ take 300 (show other))
     , testCase "user-library compilation excludes native modules" $ case libPackage of
         Ok pkg -> testAssertTrue (all (\name -> name `notElem` libOrder pkg && Map.notMember name (libPrograms pkg) && Map.notMember name (libImports pkg)) ["lists", "box"])
         Error e -> Just e
@@ -230,9 +210,9 @@ testNativeStorageModules = TestList "testNativeStorageModules"
             Ok p -> testAssertEq (runProgram p) (Ok (Just (MInt 1)))
                 <> testAssertTrue (all (`Map.notMember` M.progFunctions p) (map nativeHelperName ["listNew", "boxNew"]))
     , testCase "a native helper failure does not fail the regular catalog" $
-        let loader rq = case bootstrapLoader rq of
-                LoadedLibraries answers _ -> LoadedLibraries (takeWhile ((/= "lists") . laName) answers) (Just "deliberate native storage failure")
-                other -> other
+        let loader rq = case lrLibraries rq of
+                [] -> bootstrapLoader rq
+                _ -> NotLoaded "deliberate native storage failure"
          in testAssertEq (mapResult libOrder (compileLibPackageWith loader)) (mapResult libOrder libPackage)
             <> testAssertEq (mapResult (const ()) (nativeStorageUnitsWith loader)) (Error "deliberate native storage failure")
     , testCase "the helpers implement no trait, and core's types have their Drop impls" $ inspectPackage $ \pkg ->

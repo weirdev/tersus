@@ -15,7 +15,7 @@ import qualified PackageCompile as Package
 import ParsedFile (fileBody)
 import PreludeSource (toolPackageFiles, validationPackageFiles)
 import MirHousekeeping (validationEntry)
-import ElaborateRequest (LibraryAnswer (..), LoadKind (..), LoadRequest (..), LoadResponse (..))
+import ElaborateRequest (LoadKind (..), LoadRequest (..), LoadResponse (..))
 import ElaboratorTool (bootstrapLoader)
 import qualified AstData as A
 import BuiltinTable (builtinTableText)
@@ -33,7 +33,7 @@ import MirHousekeeping (insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput)
 import ParsedFile (emptyDecls, locating)
 import TestParserFragments (parseStatementBlockWith)
-import Pipeline (nativeProgram, parseSource, runStatements)
+import Pipeline (nativeProgram, runStatements)
 import Seed (cachedSeed, compilerSnapshotHash, seedHash)
 import LlvmRuntime (runtimeSource)
 import MirEval (fromMirValue)
@@ -63,17 +63,8 @@ corpusUnits = do
             Left err -> [(entry, Error err)]
             Right (Mod.PackageResult pkg) -> [(Mod.loadedFilePath file, Ok (fileBody (Mod.loadedParsed file))) | modu <- Mod.packageModules pkg, file <- Mod.loadedModuleFiles modu]
             Right _ -> [(entry, Error "AST corpus tool is not a package")]
-    pure ([[(path, parseCorpusFile path source)] | (path, source) <- fromFiles ++ generated] ++ map packageTrees packages)
+    pure ([[(path, parsed source)] | (path, source) <- fromFiles ++ generated] ++ map packageTrees packages)
   where
-    -- (a library as the compiler reads it: with the libraries it imports in front of it, from the libraries' load)
-    parseCorpusFile path source = case [name | (name, _) <- libraryAnswers, path == "lib/" ++ name ++ ".tersus"] of
-        name : _ ->
-            let closure [] done = done
-                closure (n : rest) done | n `elem` done = closure rest done
-                closure (n : rest) done = closure (maybe [] fst (lookup n libraryAnswers) ++ rest) (n : done)
-                wanted = closure [name] []
-             in Ok (concat [stmts | (n, (_, stmts)) <- libraryAnswers, n `elem` wanted])
-        [] -> parsed source
     files dir = map ((dir ++ "/") ++) . filter (isSuffixOf ".tersus") . sort <$> listDirectory dir
     generated =
         [ ("generated forward call", "fn a(n: Int) -> Int { return b(n); }; fn b(n: Int) -> Int { return n; }; return a(5);")
@@ -82,13 +73,8 @@ corpusUnits = do
         , ("generated maximum integer literal", "return 9223372036854775807;")
         ]
 
-libraryAnswers :: [(String, ([String], [Statement]))]
-libraryAnswers = case bootstrapLoader Mod.libraryRequest of
-    LoadedLibraries answers _ -> [(name, (imports, stmts)) | LibraryAnswer name imports stmts _ <- answers]
-    _ -> []
-
 parsed :: String -> Result [Statement] String
-parsed source = case parseSource source of
+parsed source = case parseStandalone source of
     Ok ss -> Ok ss
     Error e | ParserSeed.toolFailure e -> Error e
     Error _ -> case parseStatementBlockWith (locating emptyDecls) source of

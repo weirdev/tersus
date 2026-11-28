@@ -439,23 +439,9 @@ libraries as imports of the names it spells, which its own declarations and impo
 bindings give `core` and `eq` their roles. A source in the earlier shape, a module of a synthetic `tersuslib` package
 that imported `tersuslib::name` and kept its bare names (which the elaborator read until the std cutover), is refused.
 
-## Opt-in assembly recipe
+## Load kinds
 
-`load package assembly` and `load program assembly` request the recipe in the
-same load. Production package and standalone compilation request it; parsing,
-graph, and library loads are unchanged. The modifier works with either
-ownership transport version. With no modifier, both request and response keep
-their existing form.
-
-After the package's `end`, a successful reply adds `assembly P M N` (the entry
-module, last in the module answers) and `N` lines of `library "NAME" P M`.
-`NAME` identifies a unit from the request catalog; `P M` identifies the first
-module whose declaration exclusions apply to that unit. The order is module
-answer order, then catalog order within each contributor, skipping units already
-named by an earlier contributor. For a program, the successful reply adds only
-`assembly N "NAME"...` in catalog order; the single program is the contributor.
-Neither form repeats user units or transports library MIR. A refusal, lowering
-refusal, or a package answer with no entry has no recipe.
+The elaborator answers two load kinds (`load graph` and `load package`), both over the ordinary package snapshot (`Modules.withInstalledStd` mounts the embedded `std` package at `<std>` unless `--std-root`, `--package-root std=...`, a sibling `std/`, or package `std` itself is present). Standalone files and stdin use the same `load package` path as packages, with an empty package name (`""`). When effective `noPrelude` is `false`, `lib/elaborate/load.tersus` inserts the fixed listed prelude imports from `std` into every file before import discovery and seeding. Optional `libraries` catalog entries carry precompiled `std` interfaces that `load package` reuses only when the snapshot uses the exact built-in installed `std` mount (`<std>`). Legacy `load program`, `load libraries`, `load parse`, `load equality`, and `assembly` recipe sections are removed.
 
 The link selection walks the compiled catalog over the closure of the original
 library selection. `types` is eligible only when directly selected. This is not

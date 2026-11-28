@@ -12,7 +12,7 @@ import TestParserFragments
 import StdLib
 import Types
 import Syntax
-import Compile (elaborateParts, elaborateStatements, parseWithEqualityParts)
+import Compile (elaborateStatements)
 import Utils
 import TestHarness
 
@@ -91,16 +91,10 @@ typeCheckRows =
 
 testTypeCheck :: Test
 testTypeCheck =
-    let typeError source expected =
-            case parseWithEqualityParts source of
-                Left err -> Just ("Parse failed: " ++ err)
-                Right parts -> testAssertErrorContains expected (mapResult (const ()) (elaborateParts parts))
-        typeOk source =
-            case parseWithEqualityParts source of
-                Left err -> Just ("Parse failed: " ++ err)
-                Right parts -> case mapResult (const ()) (elaborateParts parts) of
-                    Ok () -> Nothing
-                    Error e -> Just ("Type check failed: " ++ e)
+    let typeError source expected = testAssertErrorContains expected (mapResult (const ()) (elaborateSource source))
+        typeOk source = case mapResult (const ()) (elaborateSource source) of
+            Ok () -> Nothing
+            Error e -> Just ("Type check failed: " ++ e)
         runRow (name, stage, source, expected) =
             ( name
             , recordSource source `seq` case stage of

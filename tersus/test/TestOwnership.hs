@@ -16,7 +16,7 @@ import Mir
 import MirEval (MirValue (..), runProgram)
 import MirMoves (Role (..), operandLocal, roles)
 import MirHousekeeping (expandRefWrites, insertOwnership, verifyProgram)
-import Compile (lowerParts, parseSourceParts)
+import Compile (lowerSource)
 import Modules (LoadResult (..))
 import Pipeline
 import TestCopies (boxedClonePrograms)
@@ -991,11 +991,9 @@ onFile path = do
 -- The same for a program that is lowered without being validated
 onLowered :: String -> String -> TestResult
 onLowered name source =
-    case parseSourceParts True source of
-        Error e -> Just (name ++ " does not parse: " ++ e)
-        Ok parts -> case lowerParts parts of
-            Error e -> Just (name ++ " does not lower: " ++ e)
-            Ok program -> sameOnModel name program
+    case lowerSource True source of
+        Error e -> Just (name ++ " does not lower: " ++ e)
+        Ok program -> sameOnModel name program
 
 ownedText :: String -> Either String String
 ownedText source = case ownedSource source of

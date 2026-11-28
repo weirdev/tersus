@@ -6,7 +6,7 @@ import ElaboratorTool (noVerdict)
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Mir as M
-import Pipeline (parseSource, parseSourceParts, parseWithEquality, parseWithEqualityParts, runParts, runStatements, validateParts, validateStatements)
+import Pipeline (runStatements, validateStatements)
 import Types
 import Syntax
 import Solver
@@ -39,16 +39,12 @@ testTraits =
                 , "impl Counter { fn label(self: Self) -> Int { return 3; }; };"
                 ]
         -- (the prelude is put in front of a program by the pipeline, so these programs are read as the command line reads them)
-        runsLib source expected = case parseSourceParts True source of
-            Error e -> Just ("Parse failed: " ++ e)
-            Ok parts -> case runParts parts of
-                Ok result -> testAssertEq (fmap fromMirValue result) (Just (VInt expected))
-                Error e -> Just ("Evaluation failed with error: " ++ e)
-        validLib source = case parseSourceParts True source of
-            Error e -> Just ("Parse failed: " ++ e)
-            Ok parts -> case validateParts parts of
-                Ok _ -> Nothing
-                Error e -> Just ("Validation failed with error: " ++ e)
+        runsLib source expected = case runSourceUnvalidated source of
+            Ok result -> testAssertEq (fmap fromMirValue result) (Just (VInt expected))
+            Error e -> Just ("Evaluation failed with error: " ++ e)
+        validLib source = case validateSource source of
+            Ok _ -> Nothing
+            Error e -> Just ("Validation failed with error: " ++ e)
         measure =
             unlines
                 [ "trait Measure { fn sides(self: Self) -> Int [{ }] [{ affirm return >= 0; }]; };"
@@ -93,20 +89,16 @@ testTraits =
         showSize = "trait Show { fn show(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; trait Size { fn measure(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; struct Cell { v: Int }; impl Show for Cell { fn show(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return 1; }; }; impl Size for Cell { fn measure(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return 2; }; }; "
         bounded body expected = parseEvalProgramHelper (showSize ++ body) (Just (VInt expected))
         -- (refused in the program's words: an internal compiler error of a copy is not the refusal asked for)
-        boundedRejected body expected = case parseWithEqualityParts (showSize ++ body) of
-            Left err -> Just ("Parse failed: " ++ err)
-            Right parts -> case validateParts parts of
-                Error e | "internal compiler error" `isInfixOf` e -> Just ("an internal compiler error instead of a refusal: " ++ e)
-                _ -> parseValidateFailProgramHelper (showSize ++ body) expected
+        boundedRejected body expected = case validateSource (showSize ++ body) of
+            Error e | "internal compiler error" `isInfixOf` e -> Just ("an internal compiler error instead of a refusal: " ++ e)
+            _ -> parseValidateFailProgramHelper (showSize ++ body) expected
         -- (the checker's own refusal: an elaborator that failed as a tool, or an internal error, is not it)
-        checkerRefuses source expected = case parseWithEqualityParts source of
-            Left err -> Just ("Parse failed: " ++ err)
-            Right parts -> case runParts parts of
-                Ok value -> Just ("accepted, giving " ++ show (fmap fromMirValue value))
-                Error e
-                    | noVerdict e || "internal compiler error" `isInfixOf` e -> Just ("no refusal by the checker: " ++ e)
-                    | expected `isInfixOf` e -> Nothing
-                    | otherwise -> Just ("expected " ++ show expected ++ ", got: " ++ e)
+        checkerRefuses source expected = case runSourceUnvalidated source of
+            Ok value -> Just ("accepted, giving " ++ show (fmap fromMirValue value))
+            Error e
+                | noVerdict e || "internal compiler error" `isInfixOf` e -> Just ("no refusal by the checker: " ++ e)
+                | expected `isInfixOf` e -> Nothing
+                | otherwise -> Just ("expected " ++ show expected ++ ", got: " ++ e)
         compiledRejected source expected = case lowerSource True source of
             Ok _ -> Just ("accepted: " ++ source)
             Error e -> if take (length expected) e == expected then Nothing else Just ("expected an error starting " ++ show expected ++ ", got: " ++ e)

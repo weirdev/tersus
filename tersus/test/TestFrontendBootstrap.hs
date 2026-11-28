@@ -15,7 +15,7 @@ import System.IO.Unsafe (unsafePerformIO)
 
 import CacheLock (openTempFileCloexec)
 import Differential (Answers, Asked (..), Outcome (..), Unit (..), bootstrapFrontend, compareAnswers, executableCandidate, unitRequests)
-import Compile (sourceRequest)
+import qualified Modules as Mod
 import ElaborateRequest (LoadKind (..), LoadResponse (..), Response (..))
 import ElaboratorNative (frontendStage, frontendStageIsSeed)
 import ElaboratorTool (frontendSources, frontendToolFailure, nativeElaborator, nativeLoader)
@@ -64,7 +64,7 @@ refusals = withScratch $ \home -> do
                     _ -> Just "an elaborator that cannot run did not refuse the module as a tool failure"
                 [] -> Just "no module request to send"
             Error e -> Just e
-        , case nativeLoader (home </> "absent-elaborator") (sourceRequest LoadParse False False [] "return 1;") of
+        , case nativeLoader (home </> "absent-elaborator") (Mod.loadRequest LoadGraph (Mod.sourceSnapshot Mod.defaultLoadOptions "return 1;")) of
             NotLoaded e | frontendToolFailure e -> Nothing
             _ -> Just "an elaborator that cannot run did not refuse the load as a tool failure"
         ]

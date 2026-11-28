@@ -1,7 +1,6 @@
 module TestArrays (testArrays) where
 
 import Syntax
-import Pipeline (parseWithEquality)
 import qualified ParserSeed
 import Utils (Result (..))
 import TestHarness
@@ -13,13 +12,13 @@ testArrays =
     let runs body expected = parseEvalProgramHelper body (Just expected)
         valid = parseValidProgramHelper
         rejected = parseValidateFailProgramHelper
-        parseRejected source reason = case parseWithEquality source of
-            Left e | ParserSeed.toolFailure e -> Just e
-                   | otherwise -> testAssertErrorContains reason (Error e :: Result () String)
-            Right _ -> Just ("Expected a native parse rejection for: " ++ source)
+        parseRejected source reason = case parseStandalone source of
+            Error e | ParserSeed.toolFailure e -> Just e
+                    | otherwise -> testAssertErrorContains reason (Error e :: Result () String)
+            Ok _ -> Just ("Expected a native parse rejection for: " ++ source)
         ints = VList . map VInt
-        parseFails source = case parseValidProgramHelper source of
-            Just err | take 11 err == "Parse faile" -> Nothing
+        parseFails source = case parseStandalone source of
+            Error e | not (ParserSeed.toolFailure e) -> Nothing
             _ -> Just ("Expected a parse error for: " ++ source)
         dot =
             unlines

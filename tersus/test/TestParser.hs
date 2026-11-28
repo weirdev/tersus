@@ -405,8 +405,8 @@ locatedSnippets =
 
 -- A program with imports is parsed whole by the frontend and then refused, not read as a package
 importsVerdict :: IO TestResult
-importsVerdict = pure $ testAssertEq (writeData (case Compile.parseSource "import geo; import geo::Point as P { x }; return 0;" of { Ok ss -> Right ss; Error e -> Left e }))
-    (Left "imports are not linked yet: geo, geo::Point")
+importsVerdict = pure $ testAssertEq (writeData (case parseStandalone "import geo; import geo::Point as P { x }; return 0;" of { Ok ss -> Right ss; Error e -> Left e }))
+    (Left "in file <source>:1:1: package \"geo\" is not configured for standalone source")
 
 
 firstFailure :: [TestResult] -> TestResult

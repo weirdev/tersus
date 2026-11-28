@@ -332,7 +332,7 @@ linkedCase compiled check = withResult compiled $ \units -> do
     withResult merged $ \input -> compareCopies "linked" library input (Right (check library))
 
 sourceUnits :: String -> Result [(ModuleId, M.Program)] String
-sourceUnits source = compiled `bindResult` packageLinkInputs `bindResult` (Ok . uncurry (++))
+sourceUnits source = compiled `bindResult` packageLinkInputs
   where
     entry = "app/main.tersus"
     snapshot = Snapshot (resolverFromFiles [("app/package.tersus", ""), (entry, source)]) entry False
@@ -345,7 +345,7 @@ asUnit :: M.Program -> M.Lowered
 asUnit p = M.Lowered p Set.empty Set.empty Set.empty Set.empty Set.empty Set.empty []
 
 fromStatements :: String -> [S.Statement] -> Result M.Lowered String
-fromStatements declarations statements = Compile.parseSourcePartsNoPrelude True True declarations `bindResult` \(_, _, body) ->
+fromStatements declarations statements = parseStandaloneNoPrelude True declarations `bindResult` \body ->
     Compile.elaborateStatements (body ++ statements)
 
 testMirCopiesParity :: Test

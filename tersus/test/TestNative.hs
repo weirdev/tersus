@@ -1601,11 +1601,9 @@ emitUnvalidated program = case nativeProgram program `bindResult` insertOwnershi
         Ok () -> llvmOfOwned owned
 
 lowerSource :: String -> Either String M.Program
-lowerSource source = case Compile.parseSourceParts True source of
-    Error err -> Left ("Parse failed: " ++ err)
-    Ok parts -> case Compile.lowerParts parts of
-        Error e -> Left e
-        Ok program -> Right program
+lowerSource source = case Compile.lowerSource True source of
+    Error e -> Left e
+    Ok program -> Right program
 
 safeChar :: Char -> Char
 safeChar c = if c `elem` ['a' .. 'z'] ++ ['A' .. 'Z'] ++ ['0' .. '9'] then c else '_'

@@ -277,7 +277,12 @@ fn covers(ri: &Imp, d: &Decl) -> Bool ~ {
     if ri.level = 1 { return ri.hasFile && ri.file = d.stem; };
     if ri.level = 2 {
         leading = beforeByte(&d.local, 58);
-        return ri.hasSymbol && (ri.symbol = d.local || ri.symbol = leading);
+        if ri.hasSymbol && (ri.symbol = d.local || ri.symbol = leading) { return true; };
+        if ri.hasSymbol && d.kind = 3 && startsWithByte(&d.local, 60) {
+            parts = implParts(&d.local);
+            if !parts.hasTrait && baseNameOf(&parts.owner) = ri.symbol && (!ri.hasFile || ri.file = d.stem) { return true; };
+        };
+        return false;
     };
     return true;
 };

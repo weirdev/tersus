@@ -23,7 +23,12 @@ module TestHarness
     , testAssertEq
     , testAssertErrorContains
     , parseValFailStmtHelper
-    , libraryParts
+    , parseStandalone
+    , parseStandaloneNoPrelude
+    , elaborateSource
+    , validateSource
+    , runSourceUnvalidated
+    , validateStatementsWithStd
     , parseEvalProgramHelper
     , parseEvalProgramFailHelper
     , parseValidProgramHelper
@@ -97,24 +102,29 @@ import System.Posix.Types (Fd)
 import System.Process (proc)
 
 import CacheLock (openBinaryTempFileCloexec, openLockFd)
-import Mir (Program)
-import Compile (SourceParts, lowerSource)
-import LibPackage (libCatalog, libPackage)
-import ElaborateRequest (libraryName)
-import MirHousekeeping (eraseGhosts, toolProgram, validationEntry)
+import Mir (Lowered, Program)
+import Compile (lowerSource)
+import ElaborateRequest (Extraction (..), Request (..))
+import ElaboratorTool (sourceElaborator, sourceLoader)
+import LibPackage (LibPackage (..), libPackage, libUnit)
+import Link (linkPrograms)
+import Lowering (lowerAccepted)
+import MirEval (MirValue, fromMirValue, runProgram)
+import MirHousekeeping (eraseGhosts, toolProgram, validationEntry, verifyProgram)
+import MirMoves (finishLowered)
 import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, parserSeedSha256, seedSha256, stdlibSource, toolPackageFiles, validationPackageFiles, elaboratePackageFiles, frontendSeedSha256)
 import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import MirData (writeProgram)
-import MirEval (fromMirValue)
 import Native (cacheDirectory, readProcessOutput)
+import ParsedFile (fileBody)
 import Seed (verifySeedFile)
 import TestParserFragments
-import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
+import Modules (LoadOptions (..), LoadResult (..), ModuleId (..), defaultLoadOptions, normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
 import qualified Pipeline
-import ElaboratorTool (sourceLoader)
-import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, ownedOfProgram, parseSource, parseSourceParts, parseWithEquality, parseWithEqualityParts, runParts, runStatements, validateParts, validateStatements)
+import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, oneMarkerEach, ownedModuleProgram, ownedOfProgram, runStatements, validateStatements)
+import ValidatorNative (validateCompiled)
 import Types
 import Syntax
 import Solver
@@ -173,13 +183,11 @@ parseFailsWithHelper source expected =
 -- Dual stage: a program must both validate and evaluate to the expected value.
 parseValidateEvalProgramHelper :: String -> Maybe Value -> TestResult
 parseValidateEvalProgramHelper source expected = withProgram source $
-    case parseWithEqualityParts source of
-        Left err -> Just $ "Parse failed: " ++ err
-        Right parts -> case validateParts parts of
-            Error e -> Just $ "Validation failed with error: " ++ e
-            Ok _ -> case runParts parts of
-                Ok result -> testAssertEq (fmap fromMirValue result) expected
-                Error e -> Just $ "Evaluation failed with error: " ++ e
+    case Pipeline.compileSource source of
+        Error e -> Just e
+        Ok program -> case runProgram program of
+            Ok result -> testAssertEq (fmap fromMirValue result) expected
+            Error e -> Just $ "Evaluation failed with error: " ++ e
 batchItems :: Int -> Int -> [a] -> [a]
 batchItems count batch values
     | count <= 0 || batch < 1 || batch > count = []
@@ -318,78 +326,92 @@ oldValidatorWords =
     , "the range has to be known to end at or after its start"
     ]
 
+parseStandalone :: String -> Result [Statement] String
+parseStandalone = parseStandaloneNoPrelude False
+
+parseStandaloneNoPrelude :: Bool -> String -> Result [Statement] String
+parseStandaloneNoPrelude noPrelude' source =
+    case Modules.graphResult (Modules.sourceSnapshot defaultLoadOptions{noPrelude = noPrelude'} source) sourceLoader of
+        Left err -> Error err
+        Right (StandaloneResult _ parsed) -> Ok (fileBody parsed)
+        Right (PackageResult pkg) ->
+            Ok (concat [fileBody (Modules.loadedParsed f) | m <- Modules.packageModules pkg, Modules.loadedModuleId m == Modules.packageEntryModule pkg, f <- Modules.loadedModuleFiles m])
+
+elaborateSource :: String -> Result Lowered String
+elaborateSource source =
+    Pipeline.compileModules (Modules.sourceSnapshot defaultLoadOptions source) `bindResult` \pkg ->
+        case [Pipeline.compiledLowered m | m <- Pipeline.compiledModules pkg, Pipeline.compiledModuleId m == Pipeline.compiledEntryModule pkg] of
+            [lowered] -> lowered
+            _ -> Error "internal: missing entry module in compiled source"
+
+validateSource :: String -> Result () String
+validateSource source = mapResult (const ()) (Pipeline.validatedSource source)
+
+runSourceUnvalidated :: String -> Result (Maybe MirValue) String
+runSourceUnvalidated source =
+    lowerSource True source `bindResult` \program ->
+        (case verifyProgram program of
+            Ok () -> Ok program
+            Error e -> Error ("Lowering produced a malformed program: " ++ e))
+            `bindResult` eraseGhosts `bindResult` runProgram
+
+validateStatementsWithStd :: [Statement] -> Result () String
+validateStatementsWithStd stmts =
+    libPackage `bindResult` \pkg ->
+        let coreIfaces = [iface | name <- ["core", "eq"], Just iface <- [Map.lookup name (libInterfaces pkg)]]
+            rq = Request (ModuleId "main" Nothing) False False NoInterface coreIfaces [] [] [stmts]
+         in lowerAccepted (sourceElaborator rq) `bindResult` finishLowered `bindResult` \entryProg ->
+                flatResultMap (libUnit pkg) ["core", "eq"] `bindResult` \stdUnits ->
+                    linkPrograms (stdUnits ++ [(ModuleId "main" Nothing, entryProg)]) `bindResult` \linked ->
+                        (case verifyProgram linked of
+                            Ok () -> Ok linked
+                            Error e -> Error ("Lowering produced a malformed program: " ++ e))
+                            `bindResult` (validateCompiled . oneMarkerEach)
+
 parseValFailStmtHelper :: String -> TestResult
 parseValFailStmtHelper stmtStr =
-    let parseOutput = parseStatement stmtStr
-     in case parseOutput of
-            Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) -> case libraryParts stmts `bindResult` validateParts of
-                Ok _ -> Just "Validation succeeded expected failure"
-                Error _ -> Nothing
-            Right _ -> Just "Not a block statement"
-
--- A program given as statements, with the compiler libraries a program read from source may be given: the elaborator selects
--- among them as it does for a single file (a list or a String is a value of a library's type)
-libraryParts :: [Statement] -> Result SourceParts String
-libraryParts stmts = mapResult (\pkg -> ([libraryName l | l <- libCatalog pkg], [], stmts)) libPackage
+    case validateSource stmtStr of
+        Ok _ -> Just "Validation succeeded expected failure"
+        Error _ -> Nothing
 
 -- Control flow tests. A program runs on the MIR once it type checks; nothing here validates it.
 parseEvalProgramHelper :: String -> Maybe Value -> TestResult
 parseEvalProgramHelper source expected = withProgram source $
-    case parseWithEqualityParts source of
-        Left err -> Just $ "Parse failed: " ++ err
-        Right parts -> case runParts parts of
-            Ok result -> testAssertEq (fmap fromMirValue result) expected
-            Error e -> Just $ "Evaluation failed with error: " ++ e
+    case runSourceUnvalidated source of
+        Ok result -> testAssertEq (fmap fromMirValue result) expected
+        Error e -> Just $ "Evaluation failed with error: " ++ e
 
 parseEvalProgramFailHelper :: String -> String -> TestResult
 parseEvalProgramFailHelper source expectedError = withProgram source $
-    case parseWithEqualityParts source of
-        Left err -> Just $ "Parse failed: " ++ err
-        Right parts -> testAssertErrorContains expectedError (runParts parts)
+    testAssertErrorContains expectedError (runSourceUnvalidated source)
 
 parseValidProgramHelper :: String -> TestResult
 parseValidProgramHelper source = withProgram source $
-    case parseWithEqualityParts source of
-        Left err -> Just $ "Parse failed: " ++ err
-        Right parts -> case validateParts parts of
-            Ok _ -> Nothing
-            Error e -> Just $ "Validation failed with error: " ++ e
+    case validateSource source of
+        Ok _ -> Nothing
+        Error e -> Just $ "Validation failed with error: " ++ e
 
 -- Assert validation fails and the error contains the expected substring
 -- (via testAssertErrorContains, which accepts the Tersus validator's refusal for an expectation
 -- in the old validator's words).
 parseValidateFailProgramHelper :: String -> String -> TestResult
 parseValidateFailProgramHelper source expectedError = withProgram source $
-    case parseWithEqualityParts source of
-        Left err -> Just $ "Parse failed: " ++ err
-        Right parts -> case validateParts parts of
-            Ok _ -> Just "Validation passed when it should have failed"
-            result@(Error _) -> testAssertErrorContains expectedError result
+    case validateSource source of
+        Ok _ -> Just "Validation passed when it should have failed"
+        result@(Error _) -> testAssertErrorContains expectedError result
 
--- The Pipeline.parseSource counterparts of the helpers above: parseSource reads a program as
--- the command line reads it, with the libraries the pipeline puts in front of it (lib-injected),
--- where parseWithEquality reads the source alone. pipelineRejected asserts the expected
--- substring, on a parse failure directly and on a validation failure via
--- testAssertErrorContains (as parseValidateFailProgramHelper does).
 pipelineRuns :: String -> Value -> TestResult
-pipelineRuns source expected = case parseSourceParts True source of
-    Error e -> Just ("Parse failed: " ++ e)
-    Ok parts -> case runParts parts of
-        Ok result -> testAssertEq (fmap fromMirValue result) (Just expected)
-        Error e -> Just ("Evaluation failed with error: " ++ e)
+pipelineRuns source expected = case runSourceUnvalidated source of
+    Ok result -> testAssertEq (fmap fromMirValue result) (Just expected)
+    Error e -> Just ("Evaluation failed with error: " ++ e)
 
 pipelineValid :: String -> TestResult
-pipelineValid source = case parseSourceParts True source of
-    Error e -> Just ("Parse failed: " ++ e)
-    Ok parts -> case validateParts parts of
-        Ok _ -> Nothing
-        Error e -> Just ("Validation failed with error: " ++ e)
+pipelineValid source = case validateSource source of
+    Ok _ -> Nothing
+    Error e -> Just ("Validation failed with error: " ++ e)
 
 pipelineRejected :: String -> String -> TestResult
-pipelineRejected source expected = case parseSourceParts True source of
-    Error e -> if expected `isInfixOf` e then Nothing else Just ("Expected failure containing: " ++ show expected ++ "\nGot: " ++ e)
-    Ok parts -> testAssertErrorContains expected (validateParts parts)
+pipelineRejected source expected = testAssertErrorContains expected (validateSource source)
 
 -- A failure says which program it was about (the start of it)
 withProgram :: String -> TestResult -> TestResult
@@ -868,15 +890,7 @@ nativeInts n = NativeFunct (Signature (replicate n TInt) TInt [] [] [] []) Nothi
 vecLibrary :: String
 vecLibrary =
     unlines
-        [ "trait Sequence<E> {"
-        , "    fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }];"
-        , "    fn get(self: &Self, i: Int) -> E [{ affirm i >= 0; affirm i < size(self); }] [{ }];"
-        , "    fn set(self: Self, i: Int, x: E) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }];"
-        , "};"
-        , "trait Growable<E> {"
-        , "    fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }];"
-        , "};"
-        , "struct Vec<T> {"
+        [ "struct Vec<T> {"
         , "    data: Box<Array<T>>,"
         , "    len: Int,"
         , "} invariant [{ affirm len >= 0; affirm len <= size(data); affirm size(data) >= 1; }];"
@@ -895,6 +909,9 @@ vecLibrary =
         , "    };"
         , "    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = get(self.data, i); }] {"
         , "        return clone(get(self.data, i));"
+        , "    };"
+        , "    fn getRef(self: &Self, i: Int) -> &T from self [{ affirm i >= 0; affirm i < self.len; }] [{ affirm *return = get(self.data, i); }] {"
+        , "        return &get(self.data, i);"
         , "    };"
         , "    fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return.len = self.len; affirm get(return.data, i) = x; }] {"
         , "        return Self { data: set(self.data, i, x), len: self.len };"

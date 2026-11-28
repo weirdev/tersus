@@ -518,10 +518,12 @@ compiler library with what it imports (`AST_DATA.md`, "Elaboration requests").
 The elaborator names each file's declarations canonically, rewrites its
 references through the spellings its imports give (`lib/elaborate/resolve.tersus`,
 `rewrite.tersus`), orders the statements, refuses reserved helper names and
-orphan impls, selects libraries by the rule `SourceParse.librariesFor` applies
-to a parse (`libraries.tersus`), and gives the module their interfaces without
-what it declares itself; it answers `unresolved` with the whole message where
-Haskell refused. The response names the libraries it selected, and the compiler
+orphan impls, inserts the fixed listed prelude imports from the ordinary
+installed `std` package when `noPrelude` is `false` (`load.tersus`), and
+elaborates every package, standalone file, and stdin unit through one unified
+`load package` path; it answers `unresolved` with the whole message where
+Haskell refused. Privileged library selection (`librariesFor`, `viewOf`/`Hide`,
+`LibParsed`, `LoadLibraries`, `LoadProgram`) is deleted.
 links their units (`LibPackage.libSelection`, without the module's own type
 names); the elaborator lowers the module with their interfaces, leaving out what
 it declares itself. A single file's parse still selected the declarations it was

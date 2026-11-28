@@ -36,15 +36,15 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   `src/PackageCompile.hs`), then lowers and links the modules with the
   libraries the elaborator selected.
 - `tersus/lib/` (Tersus sources the Haskell implementation depends on).
-  `lib/std/` holds the compiler libraries: the ordinary package `std`, whose
-  modules are compiled once (`src/LibPackage.hs`) from their `PreludeSource`
-  texts under canonical names (`std$core$types$List`). Its `package.tersus`
-  binds the protocol roles: `List` and `Box` to `core::types`, `Clone`, `Copy`,
-  `Drop` and `Deref` to `core::ownership`, and `Eq` to `eq::Eq` (LANGUAGE.md,
-  "Protocol bindings"); a module provides only the roles its package's marker
-  binds. Until default prelude activation, the elaborator still selects the
-  libraries a module is given (`lib/elaborate/libraries.tersus`) on both the
-  single-file and package paths:
+  `lib/std/` holds the standard library: the ordinary installed package `std`, whose
+  modules are compiled via the ordinary `LoadPackage` path (`src/LibPackage.hs`) from
+  their `PreludeSource` texts under canonical names (`std$core$types$List`). Its `package.tersus`
+  sets `noPrelude = true;` and binds the protocol roles: `List` and `Box` to `core::types`,
+  `Clone`, `Copy`, `Drop` and `Deref` to `core::ownership`, and `Eq` to `eq::Eq` (LANGUAGE.md,
+  "Protocol bindings"); a module provides only the roles its package's marker binds. When a
+  compilation unit's effective `noPrelude` is `false`, `lib/elaborate/load.tersus` inserts the
+  fixed listed prelude imports from `std` into every file (packages, standalone files, and stdin)
+  before import discovery and declaration seeding:
   - `core/ownership`: the traits `Clone`, `Copy`, `Drop` and `Deref`.
   - `core/types`: the structs `List` and `Box` that a list and a Box are values
     of, with their layout invariants and their Drop impls.

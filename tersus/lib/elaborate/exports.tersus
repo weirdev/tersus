@@ -237,11 +237,10 @@ fn breakOn(needle: &String, text: &String) -> Broken ~ {
 };
 
 // Which names are the module's own, and the rules of what its interface keeps (Interface.extractInterfaceWith)
-struct Scope { isLib: Bool, prefix: String, ownNames: List<String>, bounded: List<String>, declaredFns: List<String> };
+struct Scope { prefix: String, ownNames: List<String>, bounded: List<String>, declaredFns: List<String> };
 impl Clone for Scope { };
 
 fn inModule(sc: &Scope, name: &String) -> Bool ~ {
-    if sc.isLib { return true; };
     if startsWith(name, &sc.prefix) { return true; };
     if size(name.bytes) = 0 { return false; };
     rest = name.slice(1, size(name.bytes));
@@ -261,8 +260,6 @@ fn implVisible(sc: &Scope, tname: &String, ty: &String) -> Bool ~ {
 };
 
 fn typeVisible(sc: &Scope, name: &String) -> Bool ~ {
-    base = baseNameOf(name);
-    if sc.isLib { return indexIn(&sc.ownNames, &base) >= 0; };
     return inModule(sc, name);
 };
 
@@ -285,11 +282,10 @@ fn declaredIn(st: &St, s: Int) -> List<String> ~ {
 
 fn pairParts(key: &String) -> Broken ~ { return breakOn(" ", key); };
 
-// The interface a checked module exposes to its importers (Interface.extractInterface and extractLibInterface): st.nid
-// the interface root, or status 3 with why it cannot be given
-fn extractInterface(st: St, isLib: Bool, pkg: String, modu: String, hasModule: Bool, original: &List<Int>, elaborated: &List<Int>) -> St ~ {
-    sc = scopeOf(st, isLib, &pkg, &modu, hasModule, original);
-    st = declarationSections(st, &pkg, &modu, hasModule, isLib, original, elaborated);
+// The interface a checked module exposes to its importers: st.nid the interface root, or status 3 with why it cannot be given
+fn extractInterface(st: St, storageProvider: Bool, pkg: String, modu: String, hasModule: Bool, original: &List<Int>, elaborated: &List<Int>) -> St ~ {
+    sc = scopeOf(st, &pkg, &modu, hasModule, original);
+    st = declarationSections(st, &pkg, &modu, hasModule, storageProvider, original, elaborated);
     first = clone(st.outs);
     st = implSections(st, &sc, elaborated);
     second = clone(st.outs);
@@ -300,7 +296,7 @@ fn extractInterface(st: St, isLib: Bool, pkg: String, modu: String, hasModule: B
 
 // The module's name and what it declares: st.outs the nodes of its package, module, types, constructors, generics,
 // invariants, traits and trait parameters
-fn declarationSections(st: St, pkg: &String, modu: &String, hasModule: Bool, isLib: Bool, original: &List<Int>, elaborated: &List<Int>) -> St ~ {
+fn declarationSections(st: St, pkg: &String, modu: &String, hasModule: Bool, storageProvider: Bool, original: &List<Int>, elaborated: &List<Int>) -> St ~ {
     st = emitName(st, clone(pkg));
     pkgNode = st.nid;
     if !hasModule { st = emit(st, AstNode::OptName { value: AstOptName::NoName }); } else {
@@ -309,7 +305,7 @@ fn declarationSections(st: St, pkg: &String, modu: &String, hasModule: Bool, isL
     };
     out = push(push([], pkgNode), st.nid);
     st = typesSection(st, elaborated); out = push(out, st.nid);
-    st = ctorsSection(st, isLib, elaborated); out = push(out, st.nid);
+    st = ctorsSection(st, storageProvider, elaborated); out = push(out, st.nid);
     st = genericsSection(st, elaborated); out = push(out, st.nid);
     st = invariantsSection(st, elaborated); out = push(out, st.nid);
     st = traitsSection(st, original); out = push(out, st.nid);
@@ -367,12 +363,12 @@ fn statementSections(st: St, elaborated: &List<Int>) -> St ~ {
 
 // What decides what a module exposes: its prefix, the types and traits it declares, the impls a storage library module
 // declares, its functions with bounds and the functions it declares
-fn scopeOf(st: &St, isLib: Bool, pkg: &String, modu: &String, hasModule: Bool, original: &List<Int>) -> Scope ~ {
+fn scopeOf(st: &St, pkg: &String, modu: &String, hasModule: Bool, original: &List<Int>) -> Scope ~ {
     prefix = catStrings(clone(pkg), "$");
     if hasModule { prefix = catStrings(catStrings(prefix, clone(modu)), "$"); };
     declaredFns = [];
     for s in original { for n in declaredIn(st, s) { declaredFns = push(declaredFns, clone(n)); }; };
-    return Scope { isLib: isLib, prefix: prefix, ownNames: ownNamesOf(st, original), bounded: boundedOf(st, original), declaredFns: declaredFns };
+    return Scope { prefix: prefix, ownNames: ownNamesOf(st, original), bounded: boundedOf(st, original), declaredFns: declaredFns };
 };
 
 fn boundedOf(st: &St, original: &List<Int>) -> List<String> ~ {
@@ -447,9 +443,9 @@ fn ctorEntry(st: St, name: &String, owner: &String, fs: Int) -> St ~ {
     return emit(st, AstNode::Entry { value: AstEntry::CtorEntry { n: nameNode, owner: st.nid, fs: fs } });
 };
 
-// The constructors: those of structs, then of variants, a later one of a name winning (Map.fromList), and in a library
-// the instance names of its generic structs where no constructor has the name
-fn ctorsSection(st: St, isLib: Bool, elaborated: &List<Int>) -> St ~ {
+// The constructors: those of structs, then of variants, a later one of a name winning (Map.fromList), and in a storage
+// provider module the instance names of its generic structs where no constructor has the name
+fn ctorsSection(st: St, storageProvider: Bool, elaborated: &List<Int>) -> St ~ {
     ctors = [];
     for s in elaborated {
         stmt = stmtOf(st, s);
@@ -478,7 +474,7 @@ fn ctorsSection(st: St, isLib: Bool, elaborated: &List<Int>) -> St ~ {
             };
         };
     };
-    if !isLib { return emitEntries(st, &ctors); };
+    if !storageProvider { return emitEntries(st, &ctors); };
     insts = [];
     for s in elaborated {
         stmt = stmtOf(st, s);
@@ -620,9 +616,7 @@ fn copiesOf(st: &St, sc: &Scope, elaborated: &List<Int>) -> List<String> ~ {
     for k in HashSet::elements(&st.impls) {
         p = pairParts(&k);
         if p.ok && protocolIs(st, "Copy", &p.before) && indexIn(&copies, &p.after) < 0 {
-            copyHere = inModule(sc, &p.after);
-            if sc.isLib { copyHere = implHere(sc, &p.before, &p.after); };
-            if copyHere { copies = push(copies, clone(p.after)); };
+            if implHere(sc, &p.before, &p.after) { copies = push(copies, clone(p.after)); };
         };
     };
     return copies;

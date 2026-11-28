@@ -361,13 +361,13 @@ retryStagesRecipe = inPrimedWorker "repair" ["parser-seed-", "tersus-parser-", "
                 case found of
                     Nothing -> pure ()
                     Just path -> createFileLink path (bin </> name)) ["sha256sum", "shasum"]
-            sourceFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (pure (resultToEither (Compile.parseSource "return 41;")))
+            sourceFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (pure (resultToEither (parseStandalone "return 41;")))
             nativeFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (TersusParser.parseFileNative emptyDecls "return 42;")
             clangFailed <- withSetting "PATH" (Just bin) (TersusParser.parseFileNative emptyDecls "return 42;")
             evictEmitterSeed
             emitterFailed <- withSetting "TERSUS_SEED_FILE" (Just (home </> "missing-emitter.ll")) (TersusParser.parseFileNative emptyDecls "return 42;")
             nativeReady <- TersusParser.parseFileNative emptyDecls "return 42;"
-            let sourceReady = case Compile.parseSource "return 43;" `bindResult` AstData.writeParsed of
+            let sourceReady = case parseStandalone "return 43;" `bindResult` AstData.writeParsed of
                     Ok wire -> Right wire
                     Error e -> Left e
             case firstFailure [refused "source P0" sourceFailed, refused "native P0" nativeFailed, refused "clang" clangFailed, refused "emitter E0" emitterFailed, parsed nativeReady, sourceValue sourceReady] of

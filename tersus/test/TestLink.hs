@@ -157,7 +157,7 @@ positiveMerge units check = do
 
 retainedGenericUnits :: Result [(ModuleId, M.Program)] String
 retainedGenericUnits = compileModulesUsing bootstrapLoader libPackage snapshot `bindResult` \compiled ->
-    mapResult (uncurry (++)) (packageLinkInputs compiled)
+    packageLinkInputs compiled
   where
     snapshot = Snapshot (resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", source)]) "app/main.tersus" False
     source = "struct Holder<T> { value: T }; fn bounded<T: Copy>(x: T) -> T [{ }] [{ affirm true; }] { affirm true; return x; }; fn generic<T>(xs: &List<T>) -> Int { return size(xs); }; xs = [1, 2]; h = Holder { value: xs }; return bounded(generic(&h.value));"

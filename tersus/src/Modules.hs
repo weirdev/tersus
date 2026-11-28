@@ -15,17 +15,19 @@ module Modules
     , captureSnapshot
     , entryModuleOf
     , findPackageRootIO
+    , installedStdMount
+    , installedStdFiles
+    , withInstalledStd
+    , usesInstalledStd
+    , sourceSnapshot
     , loadRequest
     , graphResult
-    , librarySources
-    , libraryRequest
-    , libraryRequestOf
     ) where
 
 import Control.Monad (filterM, forM_, when)
 import Control.Exception (IOException, try)
 import Data.IORef (modifyIORef', newIORef, readIORef)
-import Data.List (intercalate, nub, sort)
+import Data.List (intercalate, isPrefixOf, nub, sort)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
@@ -37,7 +39,7 @@ import ElaboratorTool (Loader, bootstrapLoader)
 import PackageData
 import ParsedFile (Import (..), ParsedFile (..))
 import qualified ParserSeed
-import PreludeSource (libModules, nativeStorageModules, stdPackageSource)
+import PreludeSource (libPackageFiles)
 
 -- The host's side of loading: it captures the snapshot of what a load reads (the files and directories, as the loader
 -- written in Tersus asks for them; lib/elaborate/load.tersus), and the loader answers with the module graph
@@ -278,48 +280,54 @@ filesystemSnapshot options rawEntry source = do
             case buildLayout resolver root of
                 Left _ -> pure ()
                 Right layout -> forM_ (rootProbeEntries layout{layName = pkg} path) (\file -> readSource (fePath file) >> pure ())
-        walkModule root pkg name = do
+        walkModule root pkg name isEntryRoot = do
             seen <- readIORef visited
             let key = (root, name)
             when (Set.notMember key seen) $ do
                 modifyIORef' visited (Set.insert key)
                 rootDirectories root
+                markerPresent <- readMarker root
+                markerText <- if markerPresent then readSource (joinPath root "package.tersus") else pure ""
+                let unitNoPrelude = markerDisablesPrelude markerText || (isEntryRoot && noPrelude options)
                 let dir = maybe root (joinPath root) name
                 (_, files) <- readDirectory dir
                 forM_ [file | file <- tersusFiles dir files, feName file /= "package.tersus"] $ \file -> do
                     text <- readSource (fePath file)
-                    walkImports root (Just pkg) text
-        walkImports root pkg text = case ParserSeed.parseImportPrefix text of
+                    walkImports root (Just pkg) unitNoPrelude text
+        walkImportPath root pkg segments = do
+            let targetPkg = head segments
+                rest = tail segments
+                requested = requestedRoots options targetPkg
+                sibling = joinPath (dirNameOf root) targetPkg
+            known <- Map.lookup targetPkg <$> readIORef roots
+            siblingPresent <- if pkg == Nothing then pure False else readMarker sibling
+            forM_ requested (\candidate -> readMarker candidate >> pure ())
+            let context = fmap (\name -> (name, root)) pkg
+            candidates <- fmap nub (mapM canonicalRoot (eligibleRoots options context targetPkg (\path -> path == sibling && siblingPresent)))
+            present <- mapM readMarker candidates
+            when (and present && length candidates == 1 && maybe True (== head candidates) known) $ do
+                let target = head candidates
+                modifyIORef' roots (Map.insert targetPkg target)
+                rootDirectories target
+                dirs <- readIORef directories
+                let isModule m = case Map.lookup (joinPath target m) dirs of
+                        Just (_, files) -> not (null (tersusFiles (joinPath target m) files))
+                        Nothing -> False
+                    name = case rest of
+                        m : _ | isModule m -> Just m
+                        _ -> Nothing
+                readRootProbes target targetPkg rest
+                walkModule target targetPkg name False
+        walkImports root pkg unitNoPrelude text = case ParserSeed.parseImportPrefix text of
             Left err | ParserSeed.toolFailure err -> ioError (userError err)
                      | otherwise -> pure ()
-            Right imports -> forM_ imports $ \imp -> do
-                let targetPkg = head (importPath imp)
-                    rest = tail (importPath imp)
-                    requested = requestedRoots options targetPkg
-                    sibling = joinPath (dirNameOf root) targetPkg
-                known <- Map.lookup targetPkg <$> readIORef roots
-                siblingPresent <- if pkg == Nothing then pure False else readMarker sibling
-                forM_ requested (\candidate -> readMarker candidate >> pure ())
-                let context = fmap (\name -> (name, root)) pkg
-                candidates <- fmap nub (mapM canonicalRoot (eligibleRoots options context targetPkg (\path -> path == sibling && siblingPresent)))
-                present <- mapM readMarker candidates
-                when (and present && length candidates == 1 && maybe True (== head candidates) known) $ do
-                    let target = head candidates
-                    modifyIORef' roots (Map.insert targetPkg target)
-                    rootDirectories target
-                    dirs <- readIORef directories
-                    let isModule m = case Map.lookup (joinPath target m) dirs of
-                            Just (_, files) -> not (null (tersusFiles (joinPath target m) files))
-                            Nothing -> False
-                        name = case rest of
-                            m : _ | isModule m -> Just m
-                            _ -> Nothing
-                    readRootProbes target targetPkg rest
-                    walkModule target targetPkg name
+            Right imports -> do
+                when (not unitNoPrelude) $ forM_ preludeImportPaths (walkImportPath root pkg)
+                forM_ imports (walkImportPath root pkg . importPath)
     case source of
         Just text -> do
             modifyIORef' contents (Map.insert entry text)
-            walkImports (dirNameOf entry) Nothing text
+            walkImports (dirNameOf entry) Nothing (noPrelude options) text
         Nothing -> do
             root <- findPackageRootIO entry
             case root of
@@ -327,7 +335,7 @@ filesystemSnapshot options rawEntry source = do
                     exists <- doesFileExist entry
                     when exists $ do
                         text <- readSource entry
-                        walkImports (dirNameOf entry) Nothing text
+                        walkImports (dirNameOf entry) Nothing (noPrelude options) text
                 Just packageRoot -> do
                     let normalized = normalizePath packageRoot
                         pkg = baseNameOf normalized
@@ -335,7 +343,7 @@ filesystemSnapshot options rawEntry source = do
                         name = if dir == normalized then Nothing else Just (baseNameOf dir)
                     _ <- readMarker normalized
                     modifyIORef' roots (Map.insert pkg normalized)
-                    walkModule normalized pkg name
+                    walkModule normalized pkg name True
     files <- Map.toAscList <$> readIORef contents
     dirs <- readIORef directories
     canonical <- readIORef canonicalRoots
@@ -345,11 +353,82 @@ filesystemSnapshot options rawEntry source = do
             files, Map.toAscList dirs, Map.toAscList selectedRoots, Map.toAscList canonical)
     pure (resolver, files, identity)
 
+preludeImportPaths :: [[String]]
+preludeImportPaths = [["std", m] | m <- ["core", "eq", "prelude", "string", "map", "set", "thread"]]
+
+markerDisablesPrelude :: String -> Bool
+markerDisablesPrelude text = hasSetting (tokens (stripComments text))
+  where
+    stripComments [] = []
+    stripComments ('/' : '/' : rest) = stripComments (dropWhile (/= '\n') rest)
+    stripComments ('/' : '*' : rest) = stripComments (dropBlock rest)
+    stripComments (c : rest) = c : stripComments rest
+    dropBlock [] = []
+    dropBlock ('*' : '/' : rest) = rest
+    dropBlock (_ : rest) = dropBlock rest
+    tokens [] = []
+    tokens (c : rest)
+        | c `elem` (" \t\r\n" :: String) = tokens rest
+        | c `elem` ("=;" :: String) = [c] : tokens rest
+        | otherwise = let (word, more) = span (\ch -> ch `notElem` (" \t\r\n=;" :: String)) (c : rest) in word : tokens more
+    hasSetting ("noPrelude" : "=" : "true" : ";" : _) = True
+    hasSetting (_ : rest) = hasSetting rest
+    hasSetting [] = False
+
 -- ---------------------------------------------------------------------------
--- The load the loader written in Tersus answers
+-- Installed std package and the load the loader written in Tersus answers
+
+installedStdMount :: FilePath
+installedStdMount = "<std>"
+
+installedStdFiles :: [(FilePath, String)]
+installedStdFiles = [(installedStdMount ++ "/" ++ drop 4 path, text) | (path, text) <- libPackageFiles]
+
+installedStdMap :: Map.Map FilePath String
+installedStdMap = Map.fromList installedStdFiles
+
+installedStdResolver :: Resolver
+installedStdResolver = resolverFromFiles installedStdFiles
+
+-- Attach the compiler installation's std package unless the caller supplied --std-root, --package-root std=...,
+-- a sibling std/ package, or is compiling package std itself.
+withInstalledStd :: Snapshot -> Snapshot
+withInstalledStd snap@(Snapshot resolver rawEntry isSource)
+    | installedStdRoot opts /= Nothing = snap
+    | Map.member "std" (packageRoots opts) = snap
+    | hasExplicitOrSiblingStd = snap
+    | otherwise = Snapshot merged rawEntry isSource
+  where
+    opts = resolverOptions resolver
+    entry = normalizePath rawEntry
+    hasExplicitOrSiblingStd = case if isSource then Nothing else findPackageRoot resolver entry of
+        Just pkgRoot ->
+            baseNameOf pkgRoot == "std"
+                || resolverReadFile resolver (joinPath (joinPath (dirNameOf pkgRoot) "std") "package.tersus") /= Nothing
+        Nothing -> False
+    merged = resolver
+        { resolverOptions = opts{installedStdRoot = Just installedStdMount}
+        , resolverFiles = Map.union (resolverFiles resolver) (resolverFiles installedStdResolver)
+        , resolverDirs = Map.union (resolverDirs resolver) (resolverDirs installedStdResolver)
+        , resolverCanonical = Map.insert installedStdMount installedStdMount (resolverCanonical resolver)
+        }
+
+usesInstalledStd :: Snapshot -> Bool
+usesInstalledStd snapshot =
+    installedStdRoot (resolverOptions resolver) == Just installedStdMount
+        && all (\(path, text) -> Map.lookup path files == Just text) installedStdFiles
+        && all (\(path, _) -> not ((installedStdMount ++ "/") `isPrefixOf` path) || Map.member path installedStdMap) (Map.toList files)
+  where
+    Snapshot resolver _ _ = withInstalledStd snapshot
+    files = resolverFiles resolver
+
+sourceSnapshot :: LoadOptions -> String -> Snapshot
+sourceSnapshot options source = Snapshot (resolverFromFiles [("<source>", source)]){resolverOptions = options} "<source>" True
 
 loadRequest :: LoadKind -> Snapshot -> LoadRequest
-loadRequest kind (Snapshot resolver entry source) = LoadRequest kind False resolver (Just (entry, source)) librarySources []
+loadRequest kind snapshot =
+    let Snapshot resolver entry source = withInstalledStd snapshot
+     in LoadRequest kind False resolver (Just (entry, source)) []
 
 -- A snapshot of the filesystem as loading the entry reads it (or of the given source as the entry, read from standard
 -- input)
@@ -368,24 +447,10 @@ entryModuleOf (Snapshot resolver rawEntry source) = case findPackageRoot resolve
   where
     entry = normalizePath rawEntry
 
-librarySources :: [(String, Bool, String)]
-librarySources = [(name, name `elem` nativeStorageModules, text) | (name, _, text) <- libModules]
-
--- The request for the compiler libraries: their sources, with the std package's marker at the request's std root, whose
--- bindings give core and eq their roles
-libraryRequest :: LoadRequest
-libraryRequest = libraryRequestOf librarySources
-
-libraryRequestOf :: [(String, Bool, String)] -> LoadRequest
-libraryRequestOf sources = LoadRequest LoadLibraries False marker Nothing sources []
-  where
-    marker = (resolverFromFiles [("std/package.tersus", stdPackageSource)]){resolverOptions = defaultLoadOptions{installedStdRoot = Just "std"}}
-
 graphResult :: Snapshot -> Loader -> Either String LoadResult
 graphResult snapshot loader = case loader (loadRequest LoadGraph snapshot) of
     NotLoaded message -> Left message
-    LoadedStandalone path body -> Right (StandaloneResult path (ParsedFile [] body))
-    LoadedGraph graph -> Right (PackageResult (packageOfGraph snapshot graph))
+    LoadedGraph graph -> Right (PackageResult (packageOfGraph (withInstalledStd snapshot) graph))
     _ -> Left "internal: the loader did not answer with a module graph"
 
 packageOfGraph :: Snapshot -> Graph -> LoadedPackage
