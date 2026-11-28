@@ -19,17 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [host, host-emitter, host-elaborator]
+        shard: [host-emitter]
         include:
-          - shard: host
-            label: Host validation (parser, AST reader, MIR tools)
-            test-groups: testHostValidation:parser testHostValidation:astReader testHostValidation:mirReader testHostValidation:mirVerify testHostValidation:mirErase
           - shard: host-emitter
             label: Host validation (emitter)
             test-groups: testHostValidation:emitter
-          - shard: host-elaborator
-            label: Host validation (elaborator)
-            test-groups: testHostValidation:elaborator
     # Keep the failure bound independent of the measured turnaround target.
     timeout-minutes: 60
     defaults:

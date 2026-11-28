@@ -158,7 +158,9 @@ testHostProgram path = TestCase path $ do
                             phase "validation-complete"
                             case refused of
                                 Error err -> pure (Just ("validation failed: " ++ err))
-                                Ok failures@(_ : _) -> pure (Just ("functions that do not validate (" ++ show (length failures) ++ "):\n" ++ unlines failures))
+                                Ok failures@(_ : _) -> do
+                                    phase ("refusals=" ++ show (length failures))
+                                    pure (Just ("functions that do not validate (" ++ show (length failures) ++ "):\n" ++ unlines failures))
                                 Ok [] -> do
                                     phase "erase"
                                     case erasedModuleProgram linked of
