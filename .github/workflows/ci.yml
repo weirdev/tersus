@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, ci-under-20-nov28-bench]
   pull_request:
 
 permissions:
