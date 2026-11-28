@@ -3,7 +3,7 @@
 -- The bridge from MIR to the validator written in Tersus
 -- (lib/validation/validation.tersus): encode is a data-only translation, and anything it
 -- does not fully model is reported as an Unmodeled verdict, never accepted.
-module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateByTersus, encode, encodeLibrary, obligationNote, sourceContainerView) where
+module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateByTersus, encode, encodeLibrary, encodePrepared, obligationNote, sourceContainerView) where
 
 import Control.Monad (foldM, guard)
 import Data.Containers.ListUtils (nubOrd)
@@ -4081,7 +4081,13 @@ encodeLibrary :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer
 encodeLibrary = encodeAs True
 
 encodeAs :: Bool -> M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
-encodeAs physical program = fmap (map (\(name, (blocks, state, entry)) -> (name, (withoutNotes blocks, state, entry)))) (encodeNoted physical program)
+encodeAs physical program = fmap (map withoutFunctionNotes) (encodeNoted physical program)
+
+encodePrepared :: Bool -> M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
+encodePrepared physical program = fmap (map withoutFunctionNotes) (encodeMono physical program)
+
+withoutFunctionNotes :: (Name, (MirValue, MirValue, Integer)) -> (Name, (MirValue, MirValue, Integer))
+withoutFunctionNotes (name, (blocks, state, entry)) = (name, (withoutNotes blocks, state, entry))
 
 viewFor :: Bool -> M.Program -> M.Program
 viewFor physical program = if physical then program else sourceContainerView program

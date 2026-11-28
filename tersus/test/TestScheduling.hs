@@ -268,6 +268,7 @@ measuredWeights =
     , ("testMirSelfHosted:3/4", 206)
     , ("testMirSelfHosted:4/4", 69)
     , ("testMirSupport", 57)
+    , ("testMirValidationMono", 240)
     , ("testMirVerify:1/4", 82)
     , ("testMirVerify:2/4", 30)
     , ("testMirVerify:3/4", 71)
@@ -348,40 +349,47 @@ estimatedPeakMiB name
 peakTable :: Map.Map String Int
 peakTable = Map.fromList measuredPeaksMiB
 
--- Whoever wins the shared MIR probe cache miss can reach 2,593 MiB; account for it in every participating group.
+-- Whoever wins the shared MIR probe cache miss can reach ~8.9 GiB with its child seed; account for it in every participating group.
 measuredPeaksMiB :: [(String, Int)]
 measuredPeaksMiB =
     [ ("testAstData:1/4", 3328)
     , ("testAstData:2/4", 4352)
-    , ("testAstReader:1/4", 3584)
+    , ("testAstReader:1/4", 4352)
     , ("testAstReader:2/4", 3072)
-    , ("testAstReader:3/4", 3072)
+    , ("testAstReader:3/4", 3328)
     , ("testAstReader:4/4", 1536)
-    , ("testDataCodec", 2816)
-    , ("testDifferential", 4096)
-    , ("testFrontendBootstrap", 6912)
-    , ("testHostValidation:elaborator", 8704)
-    , ("testHostValidation:emitter", 7168)
-    , ("testHostValidation:parser", 2048)
-    , ("testMirCopiesFused", 3072)
-    , ("testMirCopiesParity", 3072)
-    , ("testMirCopyKeys", 3072)
-    , ("testMirEmit:2/4", 6400)
+    , ("testBootstrap", 8448)
+    , ("testDataCodec", 3072)
+    , ("testDifferential", 6400)
+    , ("testFncReview", 5120)
+    , ("testFrontendBootstrap", 13056)
+    , ("testHostValidation:elaborator", 12800)
+    , ("testHostValidation:emitter", 8704)
+    , ("testHostValidation:parser", 3072)
+    , ("testLink", 5120)
+    , ("testLinkNative", 5120)
+    , ("testMirCopiesFused", 8704)
+    , ("testMirCopiesParity", 8704)
+    , ("testMirCopyKeys", 8704)
+    , ("testMirEmit:1/4", 9216)
+    , ("testMirEmit:2/4", 9216)
     , ("testMirEmit:3/4", 9728)
     , ("testMirEmit:4/4", 9728)
-    , ("testMirEmitPrograms", 2560)
+    , ("testMirEmitPrograms", 8704)
     , ("testMirEmitRecords", 5632)
     , ("testMirErase", 3072)
-    , ("testMirLowered:2/4", 5888)
+    , ("testMirLowered:2/4", 8704)
     , ("testMirLowered:3/4", 4352)
     , ("testMirLowered:4/4", 2816)
+    , ("testMirMono", 9984)
     , ("testMirOwnership", 4096)
-    , ("testMirPacks", 3072)
+    , ("testMirPacks", 8704)
     , ("testMirSelfHosted:1/4", 9984)
     , ("testMirSelfHosted:2/4", 9984)
     , ("testMirSelfHosted:3/4", 7936)
     , ("testMirSelfHosted:4/4", 9984)
-    , ("testMirSupport", 3840)
+    , ("testMirSupport", 10752)
+    , ("testMirValidationMono", 6144)
     , ("testMirVerify:1/4", 3328)
     , ("testMirVerify:2/4", 3328)
     , ("testMirVerify:3/4", 2816)
@@ -392,19 +400,22 @@ measuredPeaksMiB =
     , ("testModules:3/4", 1536)
     , ("testModules:4/4", 1280)
     , ("testNative:2/4", 2304)
-    , ("testNativeStorageModules", 2816)
+    , ("testNativeStorageModules", 8704)
     , ("testOwnership", 3584)
     , ("testOwnershipCodec", 2816)
-    , ("testParity:mirReader", 1280)
-    , ("testParity:validation", 1792)
+    , ("testOwnershipInterpreted", 8448)
+    , ("testParity:mirReader", 9472)
+    , ("testParity:validation", 3840)
     , ("testParser:1/4", 6144)
-    , ("testParser:2/4", 8448)
+    , ("testParser:2/4", 9472)
     , ("testParser:3/4", 14336)
     , ("testParser:4/4", 4352)
-    , ("testParserBootstrap:2/2", 4352)
+    , ("testParserBootstrap:1/2", 8704)
+    , ("testParserBootstrap:2/2", 8704)
     , ("testPhase1Cache", 4608)
     , ("testSharedCache:3/4", 8192)
-    , ("testSharedCache:4/4", 4096)
+    , ("testSharedCache:4/4", 5376)
+    , ("testStdGraph", 3584)
     , ("testStructs", 2304)
     ]
 
@@ -731,7 +742,7 @@ testScheduling names batches = TestList "testScheduling"
             && map groupName (splitTestGroups 4 (testCase "single" Nothing)) == ["single:1/1"])
     , testCase "every MIR probe group can be charged as the cold build owner" $
         testAssertEq (map estimatedPeakMiB ["testMirPacks", "testMirCopyKeys", "testMirCopiesParity", "testMirCopiesFused"])
-            (replicate 4 3072)
+            (replicate 4 8704)
     , testCase "every CI shard's groups launch once, with estimated memory within the budget whenever two run" $
         testAssertTrue (all (\index -> case selectGroupNames (Arguments Nothing [] False (Just (index, ciShardCount))) names of
             Right shard -> let trace = admissionTrace shard
@@ -752,7 +763,7 @@ testScheduling names batches = TestList "testScheduling"
             [1 .. count]) [1, 3, 7])
     , testCase "the groups running at the shard 3 shutdown are not admitted together; a smaller group fills in instead" $
         testAssertEq (admitWhileRoom ["testMirSelfHosted:3/4", "testParser:3/4", "testParity:validation", "testNative:2/4", "testCli"])
-            ["testMirSelfHosted:3/4", "testParity:validation"]
+            ["testMirSelfHosted:3/4", "testNative:2/4"]
     , testCase "a group estimated over the budget runs alone, and launch order is the self-hosted chain, then longest work first, with stable ties" $
         testAssertEq
             ( admitGroup 1000 snd 0 [("big", 4000 :: Int), ("small", 10)]

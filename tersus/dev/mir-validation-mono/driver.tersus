@@ -1,0 +1,28 @@
+import data::reader::reader { readRecords, tokenizeMir };
+import mir::full::full { fullAt, printFull };
+import validationmonoprobe::mono { monomorphizeForValidation };
+import validationmonoprobe::profile { readNameProfile };
+
+fn runValidationMonoProbe() -> Int ~ {
+    input = readRecords(0 - 1);
+    if input.ok {
+        profile = readNameProfile(&input.value);
+        if profile.ok && profile.end < size(input.value) {
+            rows = [];
+            for i in profile.end..size(input.value) {
+                row = tokenizeMir(get(&input.value, i));
+                if !row.ok { "validation mono probe could not read MIR3\n".printError(); return 2; };
+                rows = push(rows, row.value);
+            };
+            parsed = fullAt(&rows);
+            if parsed.ok {
+                specialized = monomorphizeForValidation(&profile.classes, parsed.value);
+                printFull(&specialized); return 0;
+            };
+        };
+    };
+    "validation mono probe could not read MIR3\n".printError(); return 2;
+};
+
+status = runValidationMonoProbe();
+if status != 0 { return status; };
