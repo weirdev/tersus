@@ -182,6 +182,7 @@ mirSection = case sourceElaborator (Request (ModuleId "main" Nothing) False Fals
 -- holding entries of another kind) and one it reads; and a builtin's scheme renumbered
 elaboratorChecks :: IO TestResult
 elaboratorChecks = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles files) entry of
+    _ | length [() | (path, text) <- elaboratePackageFiles, path == entry, marker `elem` lines text] /= 1 -> Just "the elaborator's program does not start where expected"
     Left err -> Just err
     Right (Mod.PackageResult pkg) -> case Package.compileModulesLinked (Mod.packageSnapshot pkg) `bindResult` runProgramEnv RunEnv{envArgs = [], envInput = "", envFile = const Nothing} of
         Error err -> Just err
@@ -191,17 +192,13 @@ elaboratorChecks = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles files) e
     Right _ -> Just "the fixture is standalone"
   where
     entry = "lib/elaborate/elaborate.tersus"
-    files = [(path, if path == entry then imports ++ source else text) | (path, text) <- elaboratePackageFiles]
-    -- Compile just the providers under test, not the elaborator's request loop.
-    imports = unlines
-        [ "import data::arena::arena { remapNode };"
-        , "import data::ast::ast { AstElaborated, AstEntries, AstEntry, AstInterface, AstName, AstNames, AstNode, AstOptName, AstProgram, AstScheme, AstStatements, AstTypes, AstValue, AstValues };"
-        , "import data::codec::codec { catStrings, tokenize, typeAt };"
-        , "import elaborate::lowerbuild { lwShow, hsShowType };"
-        , "import elaborate::lowerout { lowerUnit };"
-        , "import elaborate::lowerstate { fromCodecTy, newLowSt, renderTy };"
-        , "import elaborate::state { intText };"
-        ]
+    marker = "header = readLine();"
+    files = [(path, if path == entry then unlines (map imported (takeWhile (/= marker) (lines text))) ++ source else text) | (path, text) <- elaboratePackageFiles]
+    imported l
+        | "import data::codec::codec { " `isPrefixOf` l = "import data::codec::codec { typeAt, " ++ drop (length "import data::codec::codec { ") l
+        | "import elaborate::lowerout " `isPrefixOf` l = l ++ "\nimport elaborate::lowerbuild { lwShow, hsShowType };\nimport elaborate::lowerstate { fromCodecTy, newLowSt, renderTy };"
+        | "import data::ast::ast { " `isPrefixOf` l = "import data::ast::ast { AstEntries, AstInterface, AstName, AstNames, AstScheme, AstStatements, AstTypes, AstValue, AstValues, " ++ drop (length "import data::ast::ast { ") l
+        | otherwise = l
     types =
         [ TNamed "item" []
         , SyntaxList (TParam "T")
